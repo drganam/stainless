@@ -37,10 +37,10 @@ trait CompilationUnit extends CodeGeneration {
   val loader = new CafebabeClassLoader(classOf[CompilationUnit].getClassLoader)
 
   class CompiledExpression(cf: ClassFile, expression: Expr, args: Seq[ValDef]) {
-    private lazy val cl = loader.loadClass(cf.className)
-    private lazy val meth = cl.getMethods()(0)
+    private val cl = CompilationUnit.this.synchronized(loader.loadClass(cf.className))
+    private val meth = cl.getMethods()(0)
 
-    private lazy val exprType = expression.getType
+    private val exprType = expression.getType
 
     def argsToJVM(args: Seq[Expr], monitor: Monitor): Seq[AnyRef] = {
       args.map(valueToJVM(_)(monitor))

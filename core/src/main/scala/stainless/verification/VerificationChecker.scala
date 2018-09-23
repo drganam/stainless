@@ -250,7 +250,9 @@ trait VerificationChecker { self =>
           reporter.error(d.getPos, e.getMessage)
           VCResult(VCStatus.Crashed, Some(s), Some(time))
 
-        case Failure(e) => reporter.internalError(e)
+        case Failure(e) =>
+          e.printStackTrace
+          reporter.internalError(e)
       }
 
       reporter.synchronized {
