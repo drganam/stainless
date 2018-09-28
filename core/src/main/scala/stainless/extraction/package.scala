@@ -79,7 +79,8 @@ package object extraction {
     oo.extractor         andThen
     imperative.extractor andThen
     innerfuns.extractor  andThen
-    inlining.extractor
+    inlining.extractor   andThen
+    induction.extractor
   }
 
   private[this] def completeSymbols(symbols: trees.Symbols)(to: ast.Trees): to.Symbols = {
