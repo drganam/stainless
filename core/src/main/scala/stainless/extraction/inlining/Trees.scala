@@ -4,7 +4,7 @@ package stainless
 package extraction
 package inlining
 
-trait Trees extends induction.Trees { self =>
+trait Trees extends termination.Trees { self =>
 
   case object Inline extends Flag("inline", Seq())
   case object InlineOnce extends Flag("inlineOnce", Seq())
@@ -25,11 +25,11 @@ trait Trees extends induction.Trees { self =>
   }
 }
 
-trait Printer extends induction.Printer {
+trait Printer extends extraction.Printer {
   protected val trees: Trees
 }
 
-trait TreeDeconstructor extends induction.TreeDeconstructor {
+trait TreeDeconstructor extends extraction.TreeDeconstructor {
   protected val s: Trees
   protected val t: Trees
 
