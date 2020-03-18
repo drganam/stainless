@@ -1,9 +1,9 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 package stainless
 package evaluators
 
-trait FunctionSplitting extends inox.ast.ProgramTransformer {
+trait FunctionSplitting extends inox.transformers.ProgramTransformer {
 
   val maxSize: Int
   val maxSlots: Int

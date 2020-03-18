@@ -1,17 +1,27 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 package stainless
 
+import scala.language.existentials
+
+import stainless.utils.YesNoOnly
+
 package object termination {
 
-  type TerminationProgram = Program { val trees: termination.trees.type }
+  type Trees = extraction.Trees
+  val trees = extraction.trees
 
-  object trees extends termination.Trees with inox.ast.SimpleSymbols {
-    case class Symbols(
-      functions: Map[Identifier, FunDef],
-      sorts: Map[Identifier, ADTSort]
-    ) extends SimpleSymbols with AbstractSymbols
+  object optInferMeasures extends inox.FlagOptionDef("infer-measures", true)
 
-    object printer extends Printer { val trees: termination.trees.type = termination.trees }
+  object optCheckMeasures extends inox.OptionDef[YesNoOnly] {
+    val name     = "check-measures"
+    val default  = YesNoOnly.Yes
+    val parser   = YesNoOnly.parse(_)
+    val usageRhs = "yes | no | only"
   }
+
+  object DebugSectionTermination extends inox.DebugSection("termination")
+
+  case class FailedMeasureInference(fd: inox.ast.Trees#FunDef, msg: String)
+    extends Exception(msg)
 }

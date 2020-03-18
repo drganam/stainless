@@ -1,4 +1,4 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 package stainless
 package extraction
@@ -7,15 +7,24 @@ package imperative
 trait GhostChecker { self: EffectsAnalyzer =>
   import s._
 
-  protected def checkGhost(fd: FunDef)(symbols: Symbols, effects: EffectsAnalysis): Unit = {
+  protected def checkGhost(fd: FunDef)(analysis: EffectsAnalysis): Unit = {
+    import analysis._
     import symbols._
-    import effects._
 
     def isGhostEffect(effect: Effect): Boolean = {
       def rec(tpe: Type, path: Seq[Accessor]): Boolean = (tpe, path) match {
-        case (adt: ADTType, FieldAccessor(selector) +: rest) =>
+        case (adt: ADTType, ADTFieldAccessor(selector) +: rest) =>
           val field = adt.getField(selector).get
           (field.flags contains Ghost) || rec(field.getType, rest)
+
+        case (ct: ClassType, ClassFieldAccessor(selector) +: rest) =>
+          getClassField(ct, selector) match {
+            case Some(field) =>
+              (field.flags contains Ghost) || rec(field.getType, rest)
+            case None =>
+              throw ImperativeEliminationException(fd,
+                s"Could not find field $selector of class/trait ${ct.id}")
+          }
 
         case (ArrayType(base), ArrayAccessor(index) +: rest) =>
           rec(base, rest)
@@ -23,7 +32,7 @@ trait GhostChecker { self: EffectsAnalyzer =>
         case _ => false
       }
 
-      (effect.receiver.flags contains Ghost) || rec(effect.receiver.getType, effect.target.path)
+      (effect.receiver.flags contains Ghost) || rec(effect.receiver.getType, effect.path.toSeq)
     }
 
     def isGhostExpression(e: Expr): Boolean = e match {
@@ -35,8 +44,10 @@ trait GhostChecker { self: EffectsAnalyzer =>
       // Measures are also considered ghost, as they are never executed
       case Decreases(_, body) => isGhostExpression(body)
 
+      case Snapshot(e) => true
+
       case FunInvocation(id, _, args, _) =>
-        val fun = lookupFunction(id).map(Outer(_)).getOrElse(effects.local(id))
+        val fun = lookupFunction(id).map(Outer(_)).getOrElse(analysis.local(id))
         (fun.flags contains Ghost) ||
         (fun.params zip args).exists { case (vd, arg) =>
           !(vd.flags contains Ghost) && isGhostExpression(arg)
@@ -47,9 +58,18 @@ trait GhostChecker { self: EffectsAnalyzer =>
           !(vd.flags contains Ghost) && isGhostExpression(arg)
         }
 
+      case ClassConstructor(ct, args) =>
+        (ct.tcd.fields zip args).exists { case (vd, arg) =>
+          !(vd.flags contains Ghost) && isGhostExpression(arg)
+        }
+
       case sel @ ADTSelector(e, id) =>
         isGhostExpression(e) ||
         (sel.constructor.fields.find(_.id == id).get.flags contains Ghost)
+
+      case sel @ ClassSelector(e, id) =>
+        isGhostExpression(e) ||
+        (sel.field.get.flags contains Ghost)
 
       case Let(vd, e, b) => isGhostExpression(b)
       case LetVar(vd, e, b) => isGhostExpression(b)
@@ -64,8 +84,10 @@ trait GhostChecker { self: EffectsAnalyzer =>
       if (fun.flags contains Synthetic) {
         () // Synthetic functions should always be fine with respect to ghost flow
       } else if (fun.flags contains Ghost) {
-        if (!effects(fun).forall(isGhostEffect))
-          throw ImperativeEliminationException(fun, s"Ghost function cannot have effect on non-ghost state")
+        effects(fun).find(!isGhostEffect(_)) match {
+          case Some(eff) => throw ImperativeEliminationException(fun, s"Ghost function cannot have effect on non-ghost state: ${eff.targetString}")
+          case None => ()
+        }
         new Checker(true).traverse(fun)
       } else {
         if (!inGhost && isGhostExpression(fun.fullBody))
@@ -74,11 +96,28 @@ trait GhostChecker { self: EffectsAnalyzer =>
       }
     }
 
-    class Checker(inGhost: Boolean) extends TreeTraverser {
+    class Checker(inGhost: Boolean) extends SelfTreeTraverser {
+      private[this] def isADT(e: Expr): Boolean = e.getType match {
+        case _: ADTType => true
+        case _ => false
+      }
+
+      private[this] def isObject(e: Expr): Boolean = e.getType match {
+        case _: ClassType => true
+        case _ => false
+      }
+
       override def traverse(expr: Expr): Unit = expr match {
-        case Let(vd, e, b) if (vd.flags contains Ghost) && !effects(e).forall(isGhostEffect) =>
-          throw ImperativeEliminationException(expr,
-            "Right-hand side of ghost variable must only have effects on ghost fields")
+        case Let(vd, e, b) if vd.flags contains Ghost =>
+          effects(e).find(!isGhostEffect(_)) match {
+            case Some(eff) =>
+              throw ImperativeEliminationException(expr,
+                s"Right-hand side of ghost variable must only have effects on ghost fields (${eff.targetString} is not ghost)")
+            case None =>
+              traverse(vd)
+              new Checker(true).traverse(e)
+              traverse(b)
+          }
 
         case Let(vd, e, b) if !(vd.flags contains Ghost) && inGhost =>
           val newVd = vd.copy(flags = vd.flags :+ Ghost)
@@ -88,9 +127,16 @@ trait GhostChecker { self: EffectsAnalyzer =>
           throw ImperativeEliminationException(expr,
             "Right-hand side of non-ghost variable cannot be ghost")
 
-        case LetVar(vd, e, b) if (vd.flags contains Ghost) && !effects(e).forall(isGhostEffect) =>
-          throw ImperativeEliminationException(expr,
-            "Right-hand side of ghost variable must only have effects on ghost fields")
+        case LetVar(vd, e, b) if vd.flags contains Ghost =>
+          effects(e).find(!isGhostEffect(_)) match {
+            case Some(eff) =>
+              throw ImperativeEliminationException(expr,
+                s"Right-hand side of ghost variable must only have effects on ghost fields (${eff.targetString} is not ghost)")
+            case None =>
+              traverse(vd)
+              new Checker(true).traverse(e)
+              traverse(b)
+          }
 
         case LetVar(vd, e, b) if !(vd.flags contains Ghost) && inGhost =>
           val newVd = vd.copy(flags = vd.flags :+ Ghost)
@@ -100,23 +146,49 @@ trait GhostChecker { self: EffectsAnalyzer =>
           throw ImperativeEliminationException(expr,
             "Right-hand side of non-ghost variable cannot be ghost")
 
-        case Assignment(v, e) if (v.flags contains Ghost) && !effects(e).forall(isGhostEffect) =>
-          throw ImperativeEliminationException(expr,
-            "Right-hand side of ghost variable assignment must only have effects on ghost fields")
+        case Assignment(v, e) if v.flags contains Ghost =>
+          effects(e).find(!isGhostEffect(_)) match {
+            case Some(eff) =>
+              throw ImperativeEliminationException(expr,
+                s"Right-hand side of ghost variable assignment must only have effects on ghost fields (${eff.targetString} is not ghost)")
+            case None =>
+              traverse(v)
+              new Checker(true).traverse(e)
+          }
 
         case Assignment(v, e) if !(v.flags contains Ghost) && isGhostExpression(e) =>
           throw ImperativeEliminationException(expr,
             "Right-hand side of non-ghost variable assignment cannot be ghost")
 
-        case FieldAssignment(obj, id, e) if (
-          isGhostExpression(ADTSelector(obj, id)) &&
-          !effects(e).forall(isGhostEffect)
-        ) =>
+        case Snapshot(e) if !inGhost =>
           throw ImperativeEliminationException(expr,
-            "Right-hand side of ghost field assignment must only have effects on ghost fields")
+            "Snapshots can only be used in ghost contexts")
+
+        case FieldAssignment(obj, id, e) if isADT(obj) && isGhostExpression(ADTSelector(obj, id)) =>
+          effects(e).find(!isGhostEffect(_)) match {
+            case Some(eff) =>
+              throw ImperativeEliminationException(expr,
+                s"Right-hand side of ghost field assignment must only have effects on ghost fields (${eff.targetString} is not ghost)")
+            case None =>
+              traverse(obj)
+              traverse(id)
+              new Checker(true).traverse(e)
+          }
+
+        case FieldAssignment(obj, id, e) if isObject(obj) && isGhostExpression(ClassSelector(obj, id)) =>
+          effects(e).find(!isGhostEffect(_)) match {
+            case Some(eff) =>
+              throw ImperativeEliminationException(expr,
+                s"Right-hand side of ghost field assignment must only have effects on ghost fields (${eff.targetString} is not ghost)")
+            case None =>
+              traverse(obj)
+              traverse(id)
+              new Checker(true).traverse(e)
+          }
 
         case FieldAssignment(obj, id, e) if (
-          !isGhostExpression(ADTSelector(obj, id)) &&
+          isObject(obj) &&
+          !isGhostExpression(ClassSelector(obj, id)) &&
           isGhostExpression(e)
         ) =>
           throw ImperativeEliminationException(expr,
@@ -129,17 +201,23 @@ trait GhostChecker { self: EffectsAnalyzer =>
           fds.foreach(fd => checkFunction(Inner(fd), inGhost))
           traverse(body)
 
+        case Annotated(e, flags) if flags contains Ghost =>
+          new Checker(true).traverse(e)
+
         case FunInvocation(id, tps, args, _) =>
           traverse(id)
           tps.foreach(traverse)
 
-          (lookupFunction(id).map(Outer(_)).getOrElse(effects.local(id)).params zip args)
+          (lookupFunction(id).map(Outer(_)).getOrElse(analysis.local(id)).params zip args)
             .foreach { case (vd, arg) =>
               if (vd.flags contains Ghost) {
-                if (!effects(arg).forall(isGhostEffect))
-                  throw ImperativeEliminationException(arg,
-                    s"Argument to ghost parameter `${vd.id}` of `${id}` must only have effects on ghost fields")
-                new Checker(true).traverse(arg)
+                effects(arg).find(!isGhostEffect(_)) match {
+                  case Some(eff) =>
+                    throw ImperativeEliminationException(arg,
+                      s"Argument to ghost parameter `${vd.id}` of `${id}` must only have effects on ghost fields (${eff.targetString} is not ghost)")
+                  case None =>
+                    new Checker(true).traverse(arg)
+                }
               } else {
                 traverse(arg)
               }
@@ -154,7 +232,22 @@ trait GhostChecker { self: EffectsAnalyzer =>
               if (vd.flags contains Ghost) {
                 if (!effects(arg).forall(isGhostEffect))
                   throw ImperativeEliminationException(arg,
-                    s"Argument to ghost field `${vd.id}` of class `${id}` must only have effects on ghost fields")
+                    s"Argument to ghost field `${vd.id.asString}` of class `${id.asString}` must only have effects on ghost fields")
+                new Checker(true).traverse(arg)
+              } else {
+                traverse(arg)
+              }
+            }
+
+        case cons @ ClassConstructor(ct, args) =>
+          traverse(ct)
+
+          (ct.tcd.fields zip args)
+            .foreach { case (vd, arg) =>
+              if (vd.flags contains Ghost) {
+                if (!effects(arg).forall(isGhostEffect))
+                  throw ImperativeEliminationException(arg,
+                    s"Argument to ghost field `${vd.id.asString}` of class `${ct.id.asString}` must only have effects on ghost fields")
                 new Checker(true).traverse(arg)
               } else {
                 traverse(arg)

@@ -1,45 +1,19 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 package stainless
 package transformers
 
 import scala.language.existentials
-import scala.concurrent.duration._
-import scala.collection.mutable.{Map => MutableMap}
-
-import inox.{Context, Semantics}
-import inox.utils._
-import inox.solvers._
-import inox.solvers.SolverResponses._
-import inox.evaluators.EvaluationResults
 
 trait PartialEvaluator extends SimplifierWithPC { self =>
   import trees._
-  import symbols.{simplifier => _, _}
+  import symbols._
   import exprOps._
-  import dsl._
 
   override protected def simplify(e: Expr, path: Env): (Expr, Boolean) = e match {
     case fi @ FunctionInvocation(id, tps, args) =>
       val tfd = fi.tfd
       val (rargs, pargs) = args.map(simplify(_, path)).unzip
-
-      val inlined: Option[Expr] = {
-        val (specs, body) = deconstructSpecs(tfd.fullBody)
-
-        body.map { body =>
-          val pre = specs.collectFirst { case Precondition(e) => e }.get
-          val l @ Lambda(Seq(res), post) = specs.collectFirst { case Postcondition(e) => e }.get
-
-          val newBody: Expr = Assert(pre, Some("Inlined precondition of " + tfd.id.name), Let(res, body,
-            Assert(post, Some("Inlined postcondition of " + tfd.id.name), res.toVariable).copiedFrom(l)
-          ).copiedFrom(body)).copiedFrom(pre)
-
-          freshenLocals((tfd.params zip rargs).foldRight(newBody) {
-            case ((vd, e), body) => Let(vd, e, body).copiedFrom(body)
-          })
-        }
-      }
 
       def containsChoose(expr: Expr): Boolean = exists {
         case (_: Choose) | (_: NoTree) => true
@@ -74,15 +48,38 @@ trait PartialEvaluator extends SimplifierWithPC { self =>
         res
       }
 
-      inlined
-        .filter(_ => isUnfoldable(id))
-        .filter(!containsChoose(_))
-        .filter(isProductiveUnfolding)
-        .map(unfold)
-        .getOrElse (
+      if (!isUnfoldable(id)) {
+        return (
           FunctionInvocation(id, tps, rargs).copiedFrom(fi),
           pargs.foldLeft(isPureFunction(id))(_ && _)
         )
+      }
+
+      val inlined: Option[Expr] = {
+        val (specs, body) = deconstructSpecs(tfd.fullBody)
+
+        body.map { body =>
+          val pre = specs.collectFirst { case Precondition(e) => e }.get
+          val l @ Lambda(Seq(res), post) = specs.collectFirst { case Postcondition(e) => e }.get
+
+          val newBody: Expr = Assert(pre, Some("Inlined precondition of " + tfd.id.name), Let(res, body,
+            Assert(post, Some("Inlined postcondition of " + tfd.id.name), res.toVariable).copiedFrom(l)
+          ).copiedFrom(body)).copiedFrom(pre)
+
+          freshenLocals((tfd.params zip rargs).foldRight(newBody) {
+            case ((vd, e), body) => Let(vd, e, body).copiedFrom(body)
+          })
+        }
+      }
+
+      inlined
+        .filterNot(containsChoose)
+        .filter(isProductiveUnfolding)
+        .map(unfold)
+        .getOrElse((
+          FunctionInvocation(id, tps, rargs).copiedFrom(fi),
+          pargs.foldLeft(isPureFunction(id))(_ && _)
+        ))
 
     case _ => super.simplify(e, path)
   }

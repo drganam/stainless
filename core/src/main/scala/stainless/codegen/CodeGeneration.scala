@@ -1,4 +1,4 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 package stainless
 package codegen
@@ -122,18 +122,20 @@ trait CodeGeneration { self: CompilationUnit =>
   private[this] val sortClassFiles : MutableMap[ADTSort, ClassFile] = MutableMap.empty
   private[this] val classToSort    : MutableMap[String, ADTSort]    = MutableMap.empty
 
-  def getClass(sort: ADTSort): ClassFile = synchronized(sortClassFiles.getOrElseUpdate(sort, {
+  def getClass(sort: ADTSort): ClassFile = synchronized(sortClassFiles.getOrElse(sort, {
     val cf = new ClassFile(defToJVMName(sort), None)
     classToSort += cf.className -> sort
+    sortClassFiles(sort) = cf
     cf
   }))
 
   private[this] val consClassFiles : MutableMap[ADTConstructor, ClassFile] = MutableMap.empty
   private[this] val classToCons    : MutableMap[String, ADTConstructor]    = MutableMap.empty
 
-  def getClass(cons: ADTConstructor): ClassFile = synchronized(consClassFiles.getOrElseUpdate(cons, {
+  def getClass(cons: ADTConstructor): ClassFile = synchronized(consClassFiles.getOrElse(cons, {
     val cf = new ClassFile(defToJVMName(cons), Some(defToJVMName(cons.getSort)))
     classToCons += cf.className -> cons
+    consClassFiles(cons) = cf
     cf
   }))
 
@@ -158,25 +160,31 @@ trait CodeGeneration { self: CompilationUnit =>
   private[this] val sortInfos: ConcurrentMap[ADTSort, (String, String)] = ConcurrentMap.empty
   private[this] val consInfos: ConcurrentMap[ADTConstructor, (String, String)] = ConcurrentMap.empty
 
-  protected def getSortInfo(sort: ADTSort): (String, String) = sortInfos.getOrElseUpdate(sort, {
+  protected def getSortInfo(sort: ADTSort): (String, String) = sortInfos.getOrElse(sort, {
     val tpeParam = if (sort.tparams.isEmpty) "" else "[I"
-    (getClass(sort).className, "(L"+MonitorClass+";" + tpeParam + ")V")
+    val res = (getClass(sort).className, "(L"+MonitorClass+";" + tpeParam + ")V")
+    sortInfos(sort) = res
+    res
   })
 
-  protected def getConsInfo(cons: ADTConstructor): (String, String) = consInfos.getOrElseUpdate(cons, {
+  protected def getConsInfo(cons: ADTConstructor): (String, String) = consInfos.getOrElse(cons, {
     val tpeParam = if (cons.getSort.tparams.isEmpty) "" else "[I"
     val sig = "(L"+MonitorClass+";" + tpeParam + cons.fields.map(f => typeToJVM(f.getType)).mkString("") + ")V"
-    (getClass(cons).className, sig)
+    val res = (getClass(cons).className, sig)
+    consInfos(cons) = res
+    res
   })
 
   private[this] val funDefInfos: ConcurrentMap[FunDef, (String, String, String)] = ConcurrentMap.empty
 
-  protected def getFunDefInfo(fd: FunDef): (String, String, String) = funDefInfos.getOrElseUpdate(fd, {
+  protected def getFunDefInfo(fd: FunDef): (String, String, String) = funDefInfos.getOrElse(fd, {
     val sig = "(L"+MonitorClass+";" +
       (if (fd.tparams.nonEmpty) "[I" else "") +
       fd.params.map(a => typeToJVM(a.getType)).mkString("") + ")" + typeToJVM(fd.getType)
 
-    (static.className, idToSafeJVMName(fd.id), sig)
+    val res = (static.className, idToSafeJVMName(fd.id), sig)
+    funDefInfos(fd) = res
+    res
   })
 
   /**
@@ -365,7 +373,7 @@ trait CodeGeneration { self: CompilationUnit =>
     object normalizer extends {
       val s: program.trees.type = program.trees
       val t: program.trees.type = program.trees
-    } with ast.TreeTransformer {
+    } with transformers.TreeTransformer {
       override def transform(tpe: Type): Type = tpe match {
         case tp: TypeParameter => subst(tp)
         case _ => super.transform(tpe)
@@ -613,6 +621,9 @@ trait CodeGeneration { self: CompilationUnit =>
     case Require(pre, body) =>
       mkExpr(IfExpr(pre, body, Error(body.getType, "Precondition failed")), ch)
 
+    case Decreases(measure, body) =>
+      mkExpr(body, ch)
+
     case Let(vd, d, v) if vd.toVariable == v => // Optimization for local variables.
       mkExpr(d, ch)
 
@@ -622,7 +633,7 @@ trait CodeGeneration { self: CompilationUnit =>
     case Let(vd,d,b) =>
       mkExpr(d, ch)
       val slot = ch.getFreshVar(typeToJVM(d.getType))
-      if (slot > 127) println("Error while converting one more slot which is too much " + e)
+      if (slot > 127) sys.error("Error while converting one more slot which is too much " + e)
       ch << (vd.getType match {
         case JvmIType() => IStore(slot)
         case Int64Type() => LStore(slot)
@@ -1205,8 +1216,11 @@ trait CodeGeneration { self: CompilationUnit =>
     case NoTree(_) =>
       ch << ACONST_NULL
 
-    case m : MatchExpr =>
+    case m: MatchExpr =>
       mkExpr(matchToIfThenElse(m, assumeExhaustive = false), ch)
+
+    case p: Passes =>
+      mkExpr(p.asConstraint, ch)
 
     case b if b.getType == BooleanType() && canDelegateToMkBranch =>
       val fl = ch.getFreshLabel("boolfalse")
@@ -1214,6 +1228,9 @@ trait CodeGeneration { self: CompilationUnit =>
       ch << Ldc(1)
       mkBranch(b, al, fl, ch, canDelegateToMkExpr = false)
       ch << Label(fl) << POP << Ldc(0) << Label(al)
+
+    case m: Max =>
+      mkExpr(maxToIfThenElse(m), ch)
 
     case Annotated(body, _) =>
       mkExpr(body, ch)
@@ -1405,7 +1422,7 @@ trait CodeGeneration { self: CompilationUnit =>
       if (smallArrays) {
         ch << CheckCast(BoxedArrayClass)
         base match {
-          case Int8Type() | Int16Type() | Int64Type() => println(s"NOT IMPLEMENTED!!!"); ??? // TODO implement me
+          case Int8Type() | Int16Type() | Int64Type() => sys.error("NOT IMPLEMENTED")
           case Int32Type() =>
             ch << InvokeVirtual(BoxedArrayClass, "intArray", s"()${typeToJVM(tp)}")
           case BooleanType() =>

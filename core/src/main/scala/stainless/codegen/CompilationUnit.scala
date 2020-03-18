@@ -1,4 +1,4 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 package stainless
 package codegen
@@ -7,17 +7,12 @@ import inox.utils.UniqueCounter
 import runtime.Monitor
 
 import cafebabe._
-import cafebabe.AbstractByteCodes._
 import cafebabe.ByteCodes._
 import cafebabe.ClassFileTypes._
 import cafebabe.Flags._
 
-import scala.collection.JavaConverters._
-
 import java.lang.reflect.Constructor
 import java.lang.reflect.InvocationTargetException
-
-import evaluators._
 
 import scala.collection.mutable.{Map => MutableMap}
 
@@ -102,13 +97,15 @@ trait CompilationUnit extends CodeGeneration {
   private[this] val adtConstructors: MutableMap[ADTConstructor, Constructor[_]] = MutableMap.empty
 
   private[this] def adtConstructor(cons: ADTConstructor): Constructor[_] =
-    adtConstructors.getOrElseUpdate(cons, {
+    adtConstructors.getOrElse(cons, {
       val cf = getClass(cons)
       val klass = loader.loadClass(cf.className)
       // This is a hack: we pick the constructor with the most arguments.
       val conss = klass.getConstructors.sortBy(_.getParameterTypes.length)
       assert(conss.nonEmpty)
-      conss.last
+      val res = conss.last
+      adtConstructors(cons) = res
+      res
     })
 
   private[this] lazy val tupleConstructor: Constructor[_] = {
@@ -129,7 +126,7 @@ trait CompilationUnit extends CodeGeneration {
     case Int16Literal(v) => java.lang.Short.valueOf(v)
     case Int32Literal(v) => java.lang.Integer.valueOf(v)
     case Int64Literal(v) => java.lang.Long.valueOf(v)
-    case bi @ BVLiteral(_, _, size) => println(s"NOT IMPLEMENTED!!!"); ???
+    case bi @ BVLiteral(_, _, size) => sys.error(s"NOT IMPLEMENTED");
 
     case BooleanLiteral(v) =>
       java.lang.Boolean.valueOf(v)
@@ -364,7 +361,7 @@ trait CompilationUnit extends CodeGeneration {
 
       val tparams: Seq[TypeParameter] = {
         var tpSeq: Seq[TypeParameter] = Seq.empty
-        object collector extends TreeTraverser {
+        object collector extends SelfTreeTraverser {
           override def traverse(tpe: Type): Unit = tpe match {
             case tp: TypeParameter => tpSeq :+= tp
             case _ => super.traverse(tpe)

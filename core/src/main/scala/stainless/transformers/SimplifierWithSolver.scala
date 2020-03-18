@@ -1,4 +1,4 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 package stainless
 package transformers
@@ -6,15 +6,31 @@ package transformers
 import scala.language.existentials
 import scala.concurrent.duration._
 
+import inox.solvers.optCheckModels
+
 trait SimplifierWithSolver extends inox.transformers.SimplifierWithPC { self =>
   import trees._
   import symbols._
 
   implicit val context: inox.Context
-  protected val semantics: inox.SemanticsProvider { val trees: self.trees.type }
 
-  protected val program = inox.Program(trees)(symbols)
-  protected val solver = semantics.getSemantics(program).getSolver(context).withTimeout(150.millis).toAPI
+  protected val semantics: inox.SemanticsProvider {
+    val trees: self.trees.type
+  }
+
+  protected val program: inox.Program {
+    val trees: self.trees.type
+    val symbols: self.symbols.type
+  } = inox.Program(trees)(symbols)
+
+  protected val solver =
+    semantics.getSemantics(program)
+      .getSolver(context.withOpts(optCheckModels(false)))
+      .withTimeout(150.millis)
+      .toAPI
+      .asInstanceOf[inox.solvers.SimpleSolverAPI {
+        val program: self.program.type
+      }]
 
   class Env private (val path: Path) extends PathLike[Env] with SolvingPath {
     override def implies(cond: Expr): Boolean = {

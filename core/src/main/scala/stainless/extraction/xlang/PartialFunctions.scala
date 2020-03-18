@@ -1,4 +1,4 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 package stainless
 package extraction
@@ -10,17 +10,19 @@ trait PartialFunctions
   extends oo.SimplePhase
      with SimplyCachedFunctions
      with SimplyCachedSorts
+     with oo.IdentityTypeDefs
      with oo.SimplyCachedClasses { self =>
 
   val t: self.s.type
   import s._
 
   override protected def getContext(symbols: Symbols) = new TransformerContext(symbols)
+
   protected class TransformerContext(symbols: s.Symbols) extends oo.TreeTransformer {
     override final val s: self.s.type = self.s
     override final val t: self.t.type = self.t
 
-    val optPFClass = symbols.lookup.get[ClassDef]("stainless.lang.$tilde$greater")
+    val optPFClass = symbols.lookup.get[ClassDef]("stainless.lang.~>")
 
     /** Infer the partial function's precondition, by replacing every
      *  right-hand side of the pattern match with `true`.

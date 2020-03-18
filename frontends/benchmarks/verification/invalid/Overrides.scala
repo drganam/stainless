@@ -1,4 +1,4 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 object Overrides {
   abstract class A {
@@ -9,7 +9,7 @@ object Overrides {
     def x(a: Int) = {
       require(a > 0)
       42
-    } ensuring { _ >= 0 }
+    }
   }
 
   case class C(c: Int) extends B {
@@ -17,7 +17,7 @@ object Overrides {
       require(i >= 0)
       if (i == 0) 0
       else c + x(i-1)
-    } ensuring ( _ != c * i )
+    }
   }
 
   case class D() extends B

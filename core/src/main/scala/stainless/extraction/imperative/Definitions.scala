@@ -1,10 +1,10 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 package stainless
 package extraction
 package imperative
 
-trait Definitions extends extraction.Trees { self: Trees =>
+trait Definitions extends oo.Trees { self: Trees =>
   override type Symbols >: Null <: AbstractSymbols
 
   trait AbstractSymbols

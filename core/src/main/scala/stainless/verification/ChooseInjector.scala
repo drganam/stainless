@@ -1,9 +1,9 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 package stainless
 package verification
 
-trait ChooseInjector extends inox.ast.SymbolTransformer {
+trait ChooseInjector extends inox.transformers.SymbolTransformer {
   val trees: ast.Trees
   val s: trees.type = trees
   val t: trees.type = trees
@@ -57,7 +57,7 @@ trait ChooseInjector extends inox.ast.SymbolTransformer {
 }
 
 object ChooseInjector {
-  def apply(p: Program): inox.ast.SymbolTransformer {
+  def apply(p: Program): inox.transformers.SymbolTransformer {
     val s: p.trees.type
     val t: p.trees.type
   } = new {

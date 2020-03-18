@@ -1,4 +1,4 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 package stainless
 package ast
@@ -7,6 +7,7 @@ trait Trees
   extends inox.ast.Trees
      with Definitions
      with Expressions
+     with Types
      with Constructors
      with Deconstructors
      with TreeOps { self =>

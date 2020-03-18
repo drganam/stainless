@@ -1,4 +1,4 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 package stainless
 package extraction
@@ -16,6 +16,18 @@ package object inlining {
     object printer extends Printer { val trees: inlining.trees.type = inlining.trees }
   }
 
-  def extractor(implicit ctx: inox.Context) = 
-    utils.DebugPipeline("inlining.FunctionInlining", FunctionInlining(trees, extraction.trees))
+  def extractor(implicit ctx: inox.Context) = {
+    utils.DebugPipeline("FunctionInlining", FunctionInlining(trees, induction.trees))
+  }
+
+  def fullExtractor(implicit ctx: inox.Context) = extractor andThen nextExtractor
+  def nextExtractor(implicit ctx: inox.Context) = induction.fullExtractor
+
+  def phaseSemantics(implicit ctx: inox.Context): inox.SemanticsProvider { val trees: inlining.trees.type } = {
+    ???
+  }
+
+  def nextPhaseSemantics(implicit ctx: inox.Context): inox.SemanticsProvider { val trees: induction.trees.type } = {
+    induction.phaseSemantics
+  }
 }

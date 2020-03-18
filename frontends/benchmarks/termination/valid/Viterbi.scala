@@ -1,4 +1,4 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 import stainless._
 import lang._
@@ -14,9 +14,9 @@ import collection._
 object Viterbi {
 
   @extern
-  var xstring = Array[BigInt]()
+  def xstring = Array[BigInt]()
   @extern
-  var ystring = Array[BigInt]()
+  def ystring = Array[BigInt]()
   /**
    * Observation space, O
    */

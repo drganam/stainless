@@ -1,15 +1,33 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 package stainless
 package extraction
 package oo
 
-trait TypeOps extends imperative.TypeOps {
+trait TypeOps extends innerfuns.TypeOps {
   protected val trees: Trees
   import trees._
   import symbols._
 
   protected def typeBound(tp1: Type, tp2: Type, upper: Boolean): Type = ((tp1, tp2) match {
+    case (Untyped, _) => Some(Untyped)
+    case (_, Untyped) => Some(Untyped)
+
+    // We need to disallow ? <: Any, otherwise it becomes possible to prove that A <: B for any A, B.
+    case (UnknownType(_), AnyType()) if upper  => Some(Untyped)
+    case (AnyType(), UnknownType(_)) if !upper => Some(Untyped)
+
+    // Impure unknown type is not a subtype of pure unknown type
+    case (UnknownType(false), UnknownType(true)) =>
+      Some(Untyped)
+
+    case (UnknownType(true), UnknownType(false)) =>
+      if (upper) Some(UnknownType(false))
+      else Some(UnknownType(true))
+
+    case (tp, UnknownType(_)) if tp.getType.isTyped => Some(tp)
+    case (UnknownType(_), tp) if tp.getType.isTyped => Some(tp)
+
     case (ct: ClassType, _) if ct.lookupClass.isEmpty => Some(Untyped)
     case (_, ct: ClassType) if ct.lookupClass.isEmpty => Some(Untyped)
     case (ct1: ClassType, ct2: ClassType) =>
@@ -19,8 +37,47 @@ trait TypeOps extends imperative.TypeOps {
         greatestLowerClassBound(ct1, ct2)
       }
 
+    case (ta: TypeApply, _) if ta.lookupTypeDef.isEmpty => Some(Untyped)
+    case (_, ta: TypeApply) if ta.lookupTypeDef.isEmpty => Some(Untyped)
+
+    case (ta1: TypeApply, ta2: TypeApply) if ta1 == ta2 => Some(ta1)
+
+    // NOTE: Below are the DOT rules for type members subtyping, which unfortunately do not
+    //       work in our context, as it erases too much information. @romac
+    //
+    // case (ta: TypeApply, tpe) if upper  && isSubtypeOf(ta.upperBound, tpe) => Some(tpe)
+    // case (ta: TypeApply, tpe) if !upper && isSubtypeOf(ta.upperBound, tpe) => Some(ta)
+    // case (tpe, ta: TypeApply) if upper  && isSubtypeOf(tpe, ta.lowerBound) => Some(ta)
+    // case (tpe, ta: TypeApply) if !upper && isSubtypeOf(tpe, ta.lowerBound) => Some(tpe)
+    // case (ta: TypeApply, tpe) => Some(typeBound(ta.bounds, tpe, upper))
+    // case (tpe, ta: TypeApply) => Some(typeBound(tpe, ta.bounds, upper))
+
+    case (ta: TypeApply, tpe) if !ta.isAbstract => typeBound(ta.resolve, tpe, upper) match {
+      case Untyped           => Some(Untyped)
+      case lub if lub == tpe => Some(tpe)
+      case _                 => Some(ta)
+    }
+
+    case (tpe, ta: TypeApply) if !ta.isAbstract => typeBound(tpe, ta.resolve, upper) match {
+      case Untyped           => Some(Untyped)
+      case lub if lub == tpe => Some(tpe)
+      case _                 => Some(ta)
+    }
+
+    case (ta: TypeApply, tpe) if ta.isAbstract => typeBound(ta.bounds, tpe, upper) match {
+      case Untyped           => Some(Untyped)
+      case _   if upper      => Some(tpe)
+      case _                 => Some(ta)
+    }
+    case (tpe, ta: TypeApply) if ta.isAbstract => typeBound(tpe, ta.bounds, upper) match {
+      case Untyped           => Some(Untyped)
+      case _ if upper        => Some(ta)
+      case _                 => Some(tpe)
+    }
+
     case (adt: ADTType, _) if adt.lookupSort.isEmpty => Some(Untyped)
     case (_, adt: ADTType) if adt.lookupSort.isEmpty => Some(Untyped)
+
     case (adt1: ADTType, adt2: ADTType) if adt1 == adt2 => Some(adt1)
 
     case (rt: RefinementType, _) => Some(typeBound(rt.getType, tp2, upper))
@@ -32,8 +89,8 @@ trait TypeOps extends imperative.TypeOps {
     case (sigma: SigmaType, _) => Some(typeBound(sigma.getType, tp2, upper))
     case (_, sigma: SigmaType) => Some(typeBound(tp1, sigma.getType, upper))
 
-    case (TypeBounds(lo, hi), tpe) => Some(typeBound(if (upper) hi else lo, tpe, upper))
-    case (tpe, TypeBounds(lo, hi)) => Some(typeBound(tpe, if (upper) hi else lo, upper))
+    case (TypeBounds(lo, hi, _), tpe) => Some(typeBound(if (upper) hi else lo, tpe, upper))
+    case (tpe, TypeBounds(lo, hi, _)) => Some(typeBound(tpe, if (upper) hi else lo, upper))
 
     case (tp1: TypeParameter, tp2: TypeParameter) if tp1 == tp2 => Some(tp1)
     case (tp: TypeParameter, tpe) if upper && isSubtypeOf(tpe, tp.lowerBound) => Some(tp)
@@ -81,11 +138,18 @@ trait TypeOps extends imperative.TypeOps {
     (ans1, ans2) match {
       case (Some(tcd1), Some(tcd2)) =>
         val tps = (tcd1.cd.typeArgs zip tcd1.tps zip tcd2.tps).map {
+          // NOTE: We need to preserve type applications for the subtyping checks to go through. @romac
+          case ((tp, tpe1: TypeApply), tpe2) if typesCompatible(tpe1, tpe2) => Some(tpe1)
+          case ((tp, tpe1), tpe2: TypeApply) if typesCompatible(tpe1, tpe2) => Some(tpe2)
+
           case ((tp, tpe1), tpe2) =>
-            if (tp.isCovariant) Some(leastUpperBound(tpe1, tpe2))
-            else if (tp.isContravariant) Some(greatestLowerBound(tpe1, tpe2))
-            else if (tpe1 == tpe2) Some(tpe1)
-            else None
+            lazy val lub = leastUpperBound(tpe1, tpe2)
+            lazy val glb = greatestLowerBound(tpe1, tpe2)
+
+            if      (tp.isCovariant)     Some(lub)
+            else if (tp.isContravariant) Some(glb)
+            else if (tpe1 == tpe2)       Some(tpe2)
+            else                         None
         }
         if (tps.forall(_.isDefined)) Some(ClassType(tcd1.id, tps.map(_.get)))
         else None
@@ -101,11 +165,18 @@ trait TypeOps extends imperative.TypeOps {
     (desc1, desc2) match {
       case (Some(tcd1), Some(tcd2)) =>
         val tps = (tcd1.cd.typeArgs zip tcd1.tps zip tcd2.tps).map {
+          // NOTE: We need to preserve type applications for the subtyping checks to go through. @romac
+          case ((tp, tpe1: TypeApply), tpe2) if typesCompatible(tpe1, tpe2) => Some(tpe1)
+          case ((tp, tpe1), tpe2: TypeApply) if typesCompatible(tpe1, tpe2) => Some(tpe2)
+
           case ((tp, tpe1), tpe2) =>
-            if (tp.isCovariant) Some(greatestLowerBound(tpe1, tpe2))
-            else if (tp.isContravariant) Some(leastUpperBound(tpe1, tpe2))
-            else if (tpe1 == tpe2) Some(tpe1)
-            else None
+            lazy val lub = leastUpperBound(tpe1, tpe2)
+            lazy val glb = greatestLowerBound(tpe1, tpe2)
+
+            if      (tp.isCovariant)     Some(glb)
+            else if (tp.isContravariant) Some(lub)
+            else if (tpe1 == tpe2)       Some(tpe1)
+            else                         None
         }
         if (tps.forall(_.isDefined)) Some(ClassType(tcd1.id, tps.map(_.get)))
         else None
@@ -120,7 +191,8 @@ trait TypeOps extends imperative.TypeOps {
   override def greatestLowerBound(tps: Seq[Type]): Type = typeBound(tps, false)
 
   override def isSubtypeOf(t1: Type, t2: Type): Boolean = {
-    (!t1.isTyped && !t2.isTyped) || (t1.isTyped && t2.isTyped && leastUpperBound(t1, t2) == t2.getType)
+    lazy val lub = leastUpperBound(t1, t2)
+    t1.isTyped && t2.isTyped && (lub == t2.getType || lub.getType == t2.getType)
   }
 
   def typesCompatible(t1: Type, t2s: Type*) = {
@@ -136,6 +208,9 @@ trait TypeOps extends imperative.TypeOps {
     case (ct: ClassType, _) if ct.lookupClass.isEmpty => unsolvable
     case (_, ct: ClassType) if ct.lookupClass.isEmpty => unsolvable
 
+    case (ta: TypeApply, _) if ta.lookupTypeDef.isEmpty => unsolvable
+    case (_, ta: TypeApply) if ta.lookupTypeDef.isEmpty => unsolvable
+
     case (adt: ADTType, _) if adt.lookupSort.isEmpty => unsolvable
     case (_, adt: ADTType) if adt.lookupSort.isEmpty => unsolvable
 
@@ -143,6 +218,15 @@ trait TypeOps extends imperative.TypeOps {
 
     case (ct1: ClassType, ct2: ClassType) if ct1.tcd.cd == ct2.tcd.cd =>
       (ct1.tps zip ct2.tps).toList flatMap (p => unificationConstraints(p._1, p._2, free))
+
+    case (ta1: TypeApply, ta2: TypeApply) if ta1.selector == ta2.selector =>
+      (ta1.tps zip ta2.tps).toList flatMap (p => unificationConstraints(p._1, p._2, free))
+
+    case (ta1: TypeApply, tp2) =>
+      unificationConstraints(ta1.bounds, tp2, free)
+
+    case (tp1, ta2: TypeApply) =>
+      unificationConstraints(tp1, ta2.bounds, free)
 
     case (adt1: ADTType, adt2: ADTType) if adt1.id == adt2.id =>
       (adt1.tps zip adt2.tps).toList flatMap (p => unificationConstraints(p._1, p._2, free))
@@ -156,8 +240,8 @@ trait TypeOps extends imperative.TypeOps {
     case (sigma: SigmaType, _) => unificationConstraints(sigma.getType, t2, free)
     case (_, sigma: SigmaType) => unificationConstraints(t1, sigma.getType, free)
 
-    case (TypeBounds(lo, hi), tpe) if lo == hi => unificationConstraints(hi, tpe, free)
-    case (tpe, TypeBounds(lo, hi)) if lo == hi => unificationConstraints(hi, tpe, free)
+    case (TypeBounds(lo, hi, _), tpe) if lo == hi => unificationConstraints(hi, tpe, free)
+    case (tpe, TypeBounds(lo, hi, _)) if lo == hi => unificationConstraints(hi, tpe, free)
 
     case (tp: TypeParameter, _) if !(typeOps.typeParamsOf(t2) contains tp) && (free contains tp) => List(tp -> t2)
     case (_, tp: TypeParameter) if !(typeOps.typeParamsOf(t1) contains tp) && (free contains tp) => List(tp -> t1)
@@ -201,26 +285,6 @@ trait TypeOps extends imperative.TypeOps {
     }
   }
 
-  def freshenTypeParams(tps: Seq[TypeParameter]): Seq[TypeParameter] = {
-    class Freshener(mapping: Map[TypeParameter, TypeParameter]) extends oo.TreeTransformer {
-      val s: trees.type = trees
-      val t: trees.type = trees
-
-      override def transform(tpe: s.Type): t.Type = tpe match {
-        case tp: TypeParameter if mapping contains tp => mapping(tp)
-        case _ => super.transform(tpe)
-      }
-    }
-
-    val tpMap = tps.foldLeft(Map[TypeParameter, TypeParameter]()) { case (tpMap, tp) =>
-      val freshener = new Freshener(tpMap)
-      val freshTp = freshener.transform(tp.freshen).asInstanceOf[TypeParameter]
-      tpMap + (tp -> freshTp)
-    }
-
-    tps.map(tpMap)
-  }
-
   def patternInType(pat: Pattern): Type = pat match {
     case WildcardPattern(ob) => ob.map(_.getType).getOrElse(AnyType())
     case LiteralPattern(_, lit) => lit.getType
@@ -231,9 +295,11 @@ trait TypeOps extends imperative.TypeOps {
     case TuplePattern(_, subs) => TupleType(subs map patternInType)
     case ClassPattern(_, ct, subs) => ct
     case UnapplyPattern(_, recs, id, tps, _) =>
-      lookupFunction(id).filter(fd => fd.tparams.size == tps.size)
-        .filter(_.params.size == recs.size - 1)
-        .map(_.typed(tps).params.last.getType)
+      lookupFunction(id)
+        .filter(fd => fd.tparams.size == tps.size)
+        // .filter(_.params.size == recs.size - 1)
+        .map(_.typed(tps))
+        .map(_.params.last.getType)
         .getOrElse(Untyped)
     case InstanceOfPattern(_, tpe) => tpe.getType
   }

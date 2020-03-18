@@ -1,15 +1,8 @@
-
 import stainless.lang._
 import stainless.collection._
 import stainless.annotation._
 
-import stainless.annotation._
-
-import scala.annotation.meta.field
-
 object actors {
-
-  //class ignore extends scala.annotation.Annotation
 
   abstract class Msg
 
@@ -19,7 +12,7 @@ object actors {
 
   case class ActorRef(
     name: String,
-    @(ignore @field)
+    @extern @pure
     underlying: akka.actor.ActorRef
   ) {
 
@@ -35,14 +28,12 @@ object actors {
     var toSend: List[(ActorRef, Msg)] = Nil()
   ) {
 
-    @inline
     def send(to: ActorRef, msg: Msg): Unit = {
       toSend = (to, msg) :: toSend
-
       sendUnderlying(to, msg)
     }
 
-    @extern
+    @extern @pure
     private def sendUnderlying(to: ActorRef, msg: Msg): Unit = {
       to.underlying ! msg
     }
@@ -50,8 +41,8 @@ object actors {
 
   @ghost
   case class ActorSystem(
-    behaviors: Map[ActorRef, Behavior],
-    inboxes: Map[(ActorRef, ActorRef), List[Msg]]
+    behaviors: CMap[ActorRef, Behavior],
+    inboxes: CMap[(ActorRef, ActorRef), List[Msg]]
   ) {
 
     def step(from: ActorRef, to: ActorRef): ActorSystem = {

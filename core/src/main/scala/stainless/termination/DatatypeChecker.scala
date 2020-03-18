@@ -1,4 +1,4 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 package stainless
 package termination
@@ -12,7 +12,7 @@ trait DatatypeChecker {
   import program.trees._
   import program.symbols._
 
-  private class DependencyFinder(deps: MutableSet[Identifier]) extends TreeTraverser {
+  private class DependencyFinder(deps: MutableSet[Identifier]) extends SelfTreeTraverser {
     override def traverse(e: Expr): Unit = e match {
       case FunctionInvocation(id, _, _) =>
         deps += id
@@ -42,7 +42,7 @@ trait DatatypeChecker {
       dependencyCache(id) = deps
       lookupFunction(id) match {
         case Some(fd) => finder.traverse(fd)
-        case None => finder.traverse(getSort(id))
+        case None     => finder.traverse(getSort(id))
       }
       deps.toSet
   }
@@ -53,11 +53,11 @@ trait DatatypeChecker {
     val notWellFormed = sorts.filter { sort =>
       def isPositive(tpe: Type, pol: Boolean, seen: Set[ADTType]): Boolean = tpe match {
         case ADTType(sort.id, _) if !pol => false
-        case adt: ADTType if seen(adt) => true
+        case adt: ADTType if seen(adt)   => true
         case adt: ADTType =>
           adt.getSort.constructors.forall(tc => tc.fields.map(_.tpe).forall(isPositive(_, pol, seen + adt)))
         case FunctionType(from, to) => from.forall(isPositive(_, !pol, seen)) && isPositive(to, pol, seen)
-        case NAryType(tps, _) => tps.forall(isPositive(_, pol, seen))
+        case NAryType(tps, _)       => tps.forall(isPositive(_, pol, seen))
       }
 
       !isPositive(ADTType(sort.id, sort.typeArgs), true, Set.empty)

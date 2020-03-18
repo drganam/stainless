@@ -1,10 +1,10 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 package stainless
 package extraction
 package inlining
 
-trait Trees extends extraction.Trees { self =>
+trait Trees extends induction.Trees { self =>
 
   case object Inline extends Flag("inline", Seq())
   case object InlineOnce extends Flag("inlineOnce", Seq())
@@ -25,11 +25,11 @@ trait Trees extends extraction.Trees { self =>
   }
 }
 
-trait Printer extends extraction.Printer {
+trait Printer extends induction.Printer {
   protected val trees: Trees
 }
 
-trait TreeDeconstructor extends extraction.TreeDeconstructor {
+trait TreeDeconstructor extends induction.TreeDeconstructor {
   protected val s: Trees
   protected val t: Trees
 

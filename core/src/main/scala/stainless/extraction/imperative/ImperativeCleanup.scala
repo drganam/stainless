@@ -1,4 +1,4 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 package stainless
 package extraction
@@ -12,15 +12,17 @@ package imperative
   * Unit in it, which can be safely eliminated.
   */
 trait ImperativeCleanup
-  extends SimplePhase
+  extends oo.SimplePhase
      with SimplyCachedFunctions
-     with SimplyCachedSorts { self =>
+     with SimplyCachedSorts
+     with oo.SimplyCachedTypeDefs
+     with oo.SimplyCachedClasses { self =>
 
   val s: Trees
-  val t: extraction.Trees
+  val t: oo.Trees
 
   override protected def getContext(symbols: s.Symbols) = new TransformerContext(symbols)
-  protected class TransformerContext(val symbols: s.Symbols) extends CheckingTransformer {
+  protected class TransformerContext(val symbols: s.Symbols) extends oo.TreeTransformer { // CheckingTransformer {
     val s: self.s.type = self.s
     val t: self.t.type = self.t
     import symbols._
@@ -31,8 +33,11 @@ trait ImperativeCleanup
     }
 
     override def transform(tpe: s.Type): t.Type = tpe match {
+      case s.MutableMapType(from, to) => t.MapType(transform(from), transform(to))
       case s.TypeParameter(id, flags) if flags exists isImperativeFlag =>
         t.TypeParameter(id, flags filterNot isImperativeFlag map transform).copiedFrom(tpe)
+      case s.TypeBounds(lo, hi, flags) if flags exists isImperativeFlag =>
+        t.TypeBounds(transform(lo), transform(hi), flags filterNot isImperativeFlag map transform)
       case _ => super.transform(tpe)
     }
 
@@ -54,6 +59,12 @@ trait ImperativeCleanup
       case s.Variable(id, tpe, flags) =>
         t.Variable(id, transform(tpe), flags filterNot isImperativeFlag map transform).copiedFrom(expr)
 
+      case s.MutableMapWithDefault(from, to, default) =>
+        t.FiniteMap(Seq(), t.Application(transform(default), Seq()), transform(from), transform(to))
+      case s.MutableMapApply(map, index) => t.MapApply(transform(map), transform(index))
+      case s.MutableMapUpdated(map, key, value) => t.MapUpdated(transform(map), transform(key), transform(value))
+      case s.MutableMapDuplicate(map) => transform(map)
+
       case _ => super.transform(expr)
     }
 
@@ -65,16 +76,19 @@ trait ImperativeCleanup
 
   private def checkNoOld(expr: s.Expr): Unit = s.exprOps.preTraversal {
     case o @ s.Old(_) =>
-      throw MissformedStainlessCode(o, s"Stainless `old` can only occur in postconditions.")
+      throw MalformedStainlessCode(o, s"Stainless `old` can only occur in postconditions.")
     case _ => ()
   } (expr)
 
   private def checkValidOldUsage(expr: s.Expr): Unit = s.exprOps.preTraversal {
     case o @ s.Old(s.ADTSelector(v: s.Variable, id)) =>
-      throw MissformedStainlessCode(o,
+      throw MalformedStainlessCode(o,
+        s"Stainless `old` can only occur on `this` and variables. Did you mean `old($v).$id`?")
+    case o @ s.Old(s.ClassSelector(v: s.Variable, id)) =>
+      throw MalformedStainlessCode(o,
         s"Stainless `old` can only occur on `this` and variables. Did you mean `old($v).$id`?")
     case o @ s.Old(e) =>
-      throw MissformedStainlessCode(o, s"Stainless `old` is only defined on `this` and variables.")
+      throw MalformedStainlessCode(o, s"Stainless `old` is only defined on `this` and variables.")
     case _ => ()
   } (expr)
 
@@ -90,10 +104,22 @@ trait ImperativeCleanup
 
     super.extractFunction(context, fd.copy(flags = fd.flags filterNot context.isImperativeFlag))
   }
+
+  override protected def extractSort(context: TransformerContext, sort: s.ADTSort): t.ADTSort = {
+    super.extractSort(context, sort.copy(flags = sort.flags filterNot context.isImperativeFlag))
+  }
+
+  override protected def extractClass(context: TransformerContext, cd: s.ClassDef): t.ClassDef = {
+    super.extractClass(context, cd.copy(flags = cd.flags filterNot context.isImperativeFlag))
+  }
+
+  override protected def extractTypeDef(context: TransformerContext, td: s.TypeDef): t.TypeDef = {
+    super.extractTypeDef(context, td.copy(flags = td.flags filterNot context.isImperativeFlag))
+  }
 }
 
 object ImperativeCleanup {
-  def apply(ts: Trees, tt: extraction.Trees)(implicit ctx: inox.Context): ExtractionPipeline {
+  def apply(ts: Trees, tt: oo.Trees)(implicit ctx: inox.Context): ExtractionPipeline {
     val s: ts.type
     val t: tt.type
   } = new ImperativeCleanup {

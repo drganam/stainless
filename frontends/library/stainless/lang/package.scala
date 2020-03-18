@@ -1,15 +1,20 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 package stainless
 
 import stainless.annotation._
+import stainless.lang.StaticChecks._
+
 import scala.language.implicitConversions
 
 package object lang {
   import stainless.proof._
 
-  @inline @library
+  @library
   def ghost[A](@ghost value: A): Unit = ()
+
+  @library
+  def indexedAt[T](n: BigInt, t: T): T = (??? : T)
 
   @ignore
   implicit class BooleanDecorations(val underlying: Boolean) {
@@ -58,20 +63,14 @@ package object lang {
   @ignore def choose[A,B,C,D](predicate: (A,B,C,D) => Boolean): (A,B,C,D) = sys.error("Can't execute non-deterministic choose")
   @ignore def choose[A,B,C,D,E](predicate: (A,B,C,D,E) => Boolean): (A,B,C,D,E) = sys.error("Can't execute non-deterministic choose")
 
-  @ignore def decreases(@ghost r1: BigInt): Unit = ()
-  @ignore def decreases(@ghost r1: BigInt, @ghost r2: BigInt): Unit = ()
-  @ignore def decreases(@ghost r1: BigInt, @ghost r2: BigInt, @ghost r3: BigInt): Unit = ()
-  @ignore def decreases(@ghost r1: BigInt, @ghost r2: BigInt, @ghost r3: BigInt, @ghost r4: BigInt): Unit = ()
-  @ignore def decreases(@ghost r1: BigInt, @ghost r2: BigInt, @ghost r3: BigInt, @ghost r4: BigInt, @ghost r5: BigInt): Unit = ()
-
-  @ignore def decreases(@ghost r1: Int): Unit = ()
-  @ignore def decreases(@ghost r1: Int, @ghost r2: Int): Unit = ()
-  @ignore def decreases(@ghost r1: Int, @ghost r2: Int, @ghost r3: Int): Unit = ()
-  @ignore def decreases(@ghost r1: Int, @ghost r2: Int, @ghost r3: Int, @ghost r4: Int): Unit = ()
-  @ignore def decreases(@ghost r1: Int, @ghost r2: Int, @ghost r3: Int, @ghost r4: Int, @ghost r5: Int): Unit = ()
+  @ignore def decreases(@ghost r1: Any): Unit = ()
+  @ignore def decreases(@ghost r1: Any, @ghost r2: Any): Unit = ()
+  @ignore def decreases(@ghost r1: Any, @ghost r2: Any, @ghost r3: Any): Unit = ()
+  @ignore def decreases(@ghost r1: Any, @ghost r2: Any, @ghost r3: Any, @ghost r4: Any): Unit = ()
+  @ignore def decreases(@ghost r1: Any, @ghost r2: Any, @ghost r3: Any, @ghost r4: Any, @ghost r5: Any): Unit = ()
 
   @ignore
-  implicit class WhileDecorations(u: Unit) {
+  implicit class WhileDecorations(val u: Unit) {
     def invariant(x: Boolean): Unit = {
       require(x)
       u
@@ -84,6 +83,9 @@ package object lang {
   @ignore
   def old[T](value: T): T = value
 
+  @ignore @ghost
+  def snapshot[T](value: T): T = value
+
   @library
   @partialEval
   def partialEval[A](x: A): A = x
@@ -95,6 +97,18 @@ package object lang {
       underlying
     } ensuring {
       res => res == target
+    }
+  }
+
+  @ignore
+  implicit class Passes[A, B](io: (A, B)) {
+    val (in, out) = io
+
+    @ignore
+    def passes(tests: A => B): Boolean = try {
+      tests(in) == out
+    } catch {
+      case _ : MatchError => true
     }
   }
 
@@ -115,7 +129,7 @@ package object lang {
 
     def unapply(b: scala.math.BigInt): scala.Option[Int] = {
       if(b >= Integer.MIN_VALUE && b <= Integer.MAX_VALUE) {
-        scala.Some(b.intValue())
+        scala.Some(b.intValue)
       } else {
         scala.None
       }
@@ -131,5 +145,4 @@ package object lang {
   def print(x: String): Unit = {
     scala.Predef.print(x)
   }
-
 }

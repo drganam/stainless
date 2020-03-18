@@ -1,4 +1,4 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 package stainless
 package ast
@@ -49,7 +49,7 @@ trait TypeOps extends inox.ast.TypeOps {
       ob.forall(vd => isSubtypeOf(vd.getType, in)) &&
       lookupFunction(id).exists(_.tparams.size == tps.size) && {
         val unapp = up.getFunction
-        unapp.params.size >= 1 &&
+        unapp.params.nonEmpty &&
         ob.forall(vd => isSubtypeOf(unapp.params.last.getType, vd.getType))
         (recs zip unapp.params.init).forall { case (r, vd) => isSubtypeOf(r.getType, vd.getType) } &&
         unapp.flags
@@ -67,5 +67,14 @@ trait TypeOps extends inox.ast.TypeOps {
             }
           }
       }
+  }
+
+  def replaceKeepPositions(subst: Map[Variable, Expr], tpe: Type): Type = {
+    new SelfTreeTransformer {
+      override def transform(expr: Expr): Expr = expr match {
+        case v: Variable => subst.getOrElse(v, v).copiedFrom(v)
+        case _ => super.transform(expr)
+      }
+    }.transform(tpe)
   }
 }

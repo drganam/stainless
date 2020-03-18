@@ -1,4 +1,4 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 package stainless
 package extraction
@@ -8,17 +8,18 @@ trait ExceptionLifting
   extends oo.ExtractionPipeline
      with IdentityFunctions
      with IdentitySorts
+     with oo.IdentityTypeDefs
      with oo.IdentityClasses { self =>
 
   val s: Trees
-  val t: oo.Trees
+  val t: imperative.Trees
 
   override protected type TransformerContext = s.Symbols
   override protected def getContext(symbols: s.Symbols) = symbols
 }
 
 object ExceptionLifting {
-  def apply(ts: Trees, tt: oo.Trees)(implicit ctx: inox.Context): ExtractionPipeline {
+  def apply(ts: Trees, tt: imperative.Trees)(implicit ctx: inox.Context): ExtractionPipeline {
     val s: ts.type
     val t: tt.type
   } = new ExceptionLifting {

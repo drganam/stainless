@@ -1,4 +1,4 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 import stainless._
 import lang._
@@ -124,7 +124,7 @@ object LazyNumericalRep {
     (Val(nq), nsched)
   }
 
-  def Pay[T](q: NumStream, scheds: List[NumStream]): List[NumStream] = {
+  def Pay(q: NumStream, scheds: List[NumStream]): List[NumStream] = {
     scheds match {
       case c @ Cons(head, rest) =>
         head.get match {

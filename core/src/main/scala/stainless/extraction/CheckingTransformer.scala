@@ -1,11 +1,11 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 package stainless
 package extraction
 
 case class CheckFailedError(msg: String) extends Exception(s"Lowering failed on $msg")
 
-trait CheckingTransformer extends ast.TreeTransformer {
+trait CheckingTransformer extends transformers.TreeTransformer {
 
   override def transform(id: Identifier, tpe: s.Type): (Identifier, t.Type) = try {
     super.transform(id, tpe)

@@ -1,9 +1,9 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 package stainless
 package solvers
 
-import inox.ast._
+import inox.transformers._
 
 trait InoxEncoder extends ProgramEncoder {
   val sourceProgram: Program
@@ -18,8 +18,10 @@ trait InoxEncoder extends ProgramEncoder {
   import context._
 
   private[this] def keepFlag(flag: Flag): Boolean = flag match {
-    case Unchecked | Synthetic | PartialEval | Extern | Opaque | Private | Ghost => false
-    case Derived(_) | IsField(_) | IsUnapply(_, _) => false
+    case Unchecked | Library | Synthetic | PartialEval | Extern => false
+    case Opaque | Private | Final | Law | Ghost | Erasable | Wrapping => false
+    case Derived(_) | IsField(_) | IsUnapply(_, _) | IndexedAt(_) => false
+    case TerminationStatus(_) => false
     case _ => true
   }
 
@@ -74,6 +76,9 @@ trait InoxEncoder extends ProgramEncoder {
       case m: s.MatchExpr =>
         transform(matchToIfThenElse(m))
 
+      case p: s.Passes =>
+        transform(matchToIfThenElse(p.asConstraint))
+
       case s.NoTree(tpe) =>
         t.Choose(
           t.ValDef(FreshIdentifier("empty", true), transform(tpe)).copiedFrom(e),
@@ -112,6 +117,9 @@ trait InoxEncoder extends ProgramEncoder {
         t.Let(vd, transform(body), t.Assume(transform(postWithAssumes), vd.toVariable).copiedFrom(e)).copiedFrom(e)
 
       case s.Assert(pred, error, body) =>
+        transform(body)
+
+      case s.Decreases(measure, body) =>
         transform(body)
 
       case s.Annotated(body, _) => transform(body)
@@ -159,12 +167,24 @@ trait InoxEncoder extends ProgramEncoder {
         val s.FunctionType(from, to) = caller.getType
         t.Application(transform(caller).copiedFrom(e), args map transform).copiedFrom(e)
 
+      case s.SizedADT(sort, tps, args, size) => transform(s.ADT(sort, tps, args))
+
+      case m: s.Max =>
+        transform(maxToIfThenElse(m))
+
       case _ => super.transform(e)
     }
 
     override def transform(tpe: s.Type): t.Type = tpe match {
       case s.ArrayType(base) =>
         t.ADTType(arrayID, Seq(transform(base))).copiedFrom(tpe)
+
+      case s.RecursiveType(sort, tps, size) => transform(s.ADTType(sort, tps))
+
+      case s.ValueType(tpe) => transform(tpe)
+
+      case s.AnnotatedType(tpe, _) => transform(tpe)
+
       case _ => super.transform(tpe)
     }
 
@@ -194,7 +214,7 @@ trait InoxEncoder extends ProgramEncoder {
         Seq(s.FiniteMap(elems, dflt, _, _), s.Int32Literal(size))
       ) if size <= 10 =>
         val elemsMap = elems.toMap
-        t.FiniteArray((0 until size).toSeq.map {
+        t.FiniteArray((0 until size).map {
           i => transform(elemsMap.getOrElse(s.Int32Literal(i).copiedFrom(e), dflt))
         }, transform(base)).copiedFrom(e)
 
@@ -209,7 +229,7 @@ trait InoxEncoder extends ProgramEncoder {
       case _ => super.transform(e)
     }
 
-    override def transform(tpe: s.Type): t.Type = tpe match {
+  override def transform(tpe: s.Type): t.Type = tpe match {
       case s.ADTType(`arrayID`, Seq(base)) =>
         t.ArrayType(transform(base)).copiedFrom(tpe)
       case _ => super.transform(tpe)

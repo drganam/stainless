@@ -1,4 +1,4 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 import stainless._
 import lang._
@@ -25,7 +25,7 @@ object PackratParsing {
    * string(length-1) represents the first char and string(0) represents the last char.
    */
   @extern
-  var string = Array[Terminal]()
+  def string = Array[Terminal]()
 
   /**
    * looking up the ith token

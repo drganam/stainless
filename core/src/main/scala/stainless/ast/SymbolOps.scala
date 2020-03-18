@@ -1,28 +1,41 @@
-/* Copyright 2009-2018 EPFL, Lausanne */
+/* Copyright 2009-2019 EPFL, Lausanne */
 
 package stainless
 package ast
 
 import inox.utils.Position
-
-import scala.collection.mutable.{Map => MutableMap}
+import inox.transformers.{TransformerOp, TransformerWithExprOp, TransformerWithTypeOp}
 
 trait SymbolOps extends inox.ast.SymbolOps { self: TypeOps =>
   import trees._
   import trees.exprOps._
   import symbols._
 
-  override protected def createSimplifier(popts: inox.solvers.PurityOptions): SimplifierWithPC = new {
+  override protected def simplifierWithPC(popts: inox.solvers.PurityOptions): SimplifierWithPC = new {
     val opts: inox.solvers.PurityOptions = popts
   } with transformers.SimplifierWithPC with SimplifierWithPC with inox.transformers.SimplifierWithPath {
-    override def pp = implicitly[PathProvider[Env]]
+    override val pp = implicitly[PathProvider[Env]]
   }
 
-  override protected def createTransformer[P <: PathLike[P]](path: P, f: (Expr, P, TransformerOp[P]) => Expr)
-                                                            (implicit ppP: PathProvider[P]): TransformerWithPC[P] =
-    new TransformerWithPC[P](path, f) with transformers.TransformerWithPC with TransformerWithFun {
-      val pp = ppP
-    }
+  protected class TransformerWithPC[P <: PathLike[P]](
+    initEnv: P,
+    exprOp: (Expr, P, TransformerOp[Expr, P, Expr]) => Expr,
+    typeOp: (Type, P, TransformerOp[Type, P, Type]) => Type
+  )(implicit val pp: PathProvider[P]) extends super.TransformerWithPC[P](initEnv, exprOp, typeOp) {
+    self0: TransformerWithExprOp with TransformerWithTypeOp =>
+      val symbols = self.symbols
+  }
+
+  override protected def transformerWithPC[P <: PathLike[P]](
+    path: P,
+    exprOp: (Expr, P, TransformerOp[Expr, P, Expr]) => Expr,
+    typeOp: (Type, P, TransformerOp[Type, P, Type]) => Type
+  )(implicit pp: PathProvider[P]): TransformerWithPC[P] = {
+    new TransformerWithPC[P](path, exprOp, typeOp)
+      with transformers.TransformerWithPC
+      with TransformerWithExprOp
+      with TransformerWithTypeOp
+  }
 
   override def isImpureExpr(expr: Expr): Boolean = expr match {
     case (_: Require) | (_: Ensuring) | (_: Assert) => true
@@ -47,7 +60,7 @@ trait SymbolOps extends inox.ast.SymbolOps { self: TypeOps =>
         val tcons = getConstructor(id, tps)
         assert(tcons.fields.size == subps.size)
         val pairs = tcons.fields zip subps
-        val subTests = pairs.map(p => apply(adtSelector(in, p._1.id), p._2))
+        val subTests = pairs.map(p => apply(Annotated(adtSelector(in, p._1.id), Seq(Unchecked)), p._2))
         pp.empty withCond isCons(in, id) merge bind(ob, in) merge subTests
 
       case TuplePattern(ob, subps) =>
@@ -102,7 +115,7 @@ trait SymbolOps extends inox.ast.SymbolOps { self: TypeOps =>
         val tcons = getConstructor(id, tps)
         assert(tcons.fields.size == subps.size)
         val pairs = tcons.fields zip subps
-        val subMaps = pairs.map(p => mapForPattern(adtSelector(in, p._1.id), p._2))
+        val subMaps = pairs.map(p => mapForPattern(Annotated(adtSelector(in, p._1.id), Seq(Unchecked)), p._2))
         val together = subMaps.flatten.toMap
         bindIn(b) ++ together
 
@@ -146,7 +159,7 @@ trait SymbolOps extends inox.ast.SymbolOps { self: TypeOps =>
           val (cases :+ ((_, rhs, _))) = condsAndRhs
           (cases, rhs)
         } else {
-          (condsAndRhs, Error(m.getType, "Match is non-exhaustive").copiedFrom(m))
+          (condsAndRhs, Error(m.getType, "match exhaustiveness").copiedFrom(m))
         }
 
         val bigIte = branches.foldRight(elze)((p1, ex) => {
@@ -207,6 +220,18 @@ trait SymbolOps extends inox.ast.SymbolOps { self: TypeOps =>
     }
   }
 
+  /** Rewrites the given `max(e1, e2, ...)` into if-then-else expressions.
+    */
+  def maxToIfThenElse(max: Max): Expr = {
+    require(max.exprs.nonEmpty)
+    def go(exprs: Seq[Expr]): Expr = exprs match {
+      case e1 :: Nil      => e1
+      case e1 :: e2 :: es => IfExpr(GreaterThan(e1, e2).copiedFrom(max), e1, go(e2 :: es)).copiedFrom(max)
+    }
+
+    go(max.exprs)
+  }
+
 
   /* ======================
    * Stainless Constructors
@@ -263,7 +288,7 @@ trait SymbolOps extends inox.ast.SymbolOps { self: TypeOps =>
     * This method is useful to reconstruct if-expressions or assumptions
     * where the condition can be added to the expression in a position
     * that implies further assertions.
-    * 
+    *
     * The last argument `pos` is used to give a proper position to the
     * synthetic boolean literal `true` that is used as a base case.
     * Without it, we would lose position information in the resulting tree.
@@ -274,8 +299,8 @@ trait SymbolOps extends inox.ast.SymbolOps { self: TypeOps =>
     val (outers, rest) = path.elements span { !_.isInstanceOf[Condition] }
     val bindings = rest collect { case CloseBound(vd, e) => vd -> e }
     val cond = fold[Expr](
-      BooleanLiteral(true).setPos(pos), 
-      Let(_,_,_).setPos(pos), 
+      BooleanLiteral(true).setPos(pos),
+      Let(_,_,_).setPos(pos),
       And(_, _).setPos(pos)
     )(rest)
 
@@ -329,13 +354,14 @@ trait SymbolOps extends inox.ast.SymbolOps { self: TypeOps =>
     *
     * @see [[extraction.DebugPipeline]]
     */
-  def debugString(objs: Set[String])(implicit pOpts: PrinterOptions): String = {
-    wrapWith("Functions", objectsToString(functions.values, objs)) ++
-    wrapWith("Sorts", objectsToString(sorts.values, objs))
+  def debugString(filter: String => Boolean = (x: String) => true)(implicit pOpts: PrinterOptions): String = {
+    wrapWith("Functions", objectsToString(functions.values, filter)) ++
+    wrapWith("Sorts", objectsToString(sorts.values, filter))
   }
 
-  protected def objectsToString(m: Iterable[Definition], objs: Set[String])(implicit pOpts: PrinterOptions): String = {
-    m.collect { case d if objs.isEmpty || objs.contains(d.id.name) => d.asString(pOpts) } mkString "\n\n"
+  protected def objectsToString(m: Iterable[Definition], filter: String => Boolean)
+                               (implicit pOpts: PrinterOptions): String = {
+    m.collect { case d if filter(d.id.name) => d.asString(pOpts) } mkString "\n\n"
   }
 
   protected def wrapWith(header: String, s: String) = {
