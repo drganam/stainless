@@ -4,6 +4,9 @@ import stainless.collection._
 import stainless.proof._
 
 object TraceInductTest {
+	sealed abstract class IList
+  case class ICons(head: BigInt, tail: IList) extends IList
+  case class INil() extends IList
 
   def size(l: IList): BigInt = (l match {
     case INil()      => BigInt(0)

@@ -52,6 +52,8 @@ trait Trace extends CachingPhase with SimpleFunctions with IdentitySorts { self 
     })
 
     System.out.println(result.fullBody)
+    System.out.println("post")
+    System.out.println(result.postcondition)
     identity.transform(result.copy(flags = result.flags filterNot (f => f == TraceInduct)))    
   }
   
@@ -88,7 +90,7 @@ trait Trace extends CachingPhase with SimpleFunctions with IdentitySorts { self 
             val indexedFootprint = footprint.map { a => paramIndex(a) -> a }.toMap
             // create a tactFun invocation to mimic the recursion pattern
             val indexedArgs = framePositions.map {
-              case (f, i) => paramIndex(f) -> finv.args(i)
+              case (f, i) => paramIndex(f) -> args(i)
             }.toMap ++ indexedFootprint
             val recArgs = (0 until indexedArgs.size).map(indexedArgs)
             val recCall = FunctionInvocation(function.id, function.typeArgs, recArgs)
@@ -114,9 +116,9 @@ trait Trace extends CachingPhase with SimpleFunctions with IdentitySorts { self 
     val postcondition = function.postcondition
  
     val bodyPre = exprOps.withPrecondition(body, precondition)
-    val bodyPost = exprOps.withPostcondition(bodyPre,postcondition)
+    //val bodyPost = exprOps.withPostcondition(bodyPre,postcondition)
 
-    function.copy(function.id, function.tparams, function.params, function.returnType, bodyPost, function.flags)
+    function.copy(function.id, function.tparams, function.params, function.returnType, bodyPre, function.flags)
   }
  
 

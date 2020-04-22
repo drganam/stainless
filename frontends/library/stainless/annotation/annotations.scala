@@ -21,7 +21,7 @@ class induct extends Annotation
 
 /** Apply the "traceInduct" tactic during verification of the annotated function. */
 @ignore
-class traceInduct extends Annotation
+class traceInduct(fun: String) extends Annotation
 
 /** Replace @funEq annotation by equivalence proof */
 @ignore
