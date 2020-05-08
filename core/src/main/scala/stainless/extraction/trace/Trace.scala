@@ -51,9 +51,6 @@ trait Trace extends CachingPhase with SimpleFunctions with IdentitySorts { self 
       case Some(finv) => createTactFun(symbols, fd, finv)
     })
 
-    System.out.println(result.fullBody)
-    System.out.println("post")
-    System.out.println(result.postcondition)
     identity.transform(result.copy(flags = result.flags filterNot (f => f == TraceInduct)))    
   }
   

@@ -95,7 +95,7 @@ class XLangSerializer(override val trees: extraction.xlang.Trees, serializeProdu
     *
     * The new identifiers in the mapping range from 180 to 244.
     *
-    * NEXT ID: 246
+    * NEXT ID: 245
     */
   override protected def classSerializers: Map[Class[_], Serializer[_]] =
     super.classSerializers ++ Map(
@@ -104,8 +104,7 @@ class XLangSerializer(override val trees: extraction.xlang.Trees, serializeProdu
 
 
       // Induction trees
-      classSerializer[FunEq.type]      (244),
-      classSerializer[TraceInduct.type]      (245),
+      classSerializer[TraceInduct.type]      (244),
 
       // Inlining trees
       classSerializer[Inline.type]    (181),

@@ -23,9 +23,6 @@ class induct extends Annotation
 @ignore
 class traceInduct(fun: String) extends Annotation
 
-/** Replace @funEq annotation by equivalence proof */
-@ignore
-class funEq extends Annotation
 
 /** Only extract the contracts and replace the annotated function's body with a choose. */
 @ignore @field @getter @setter @param
