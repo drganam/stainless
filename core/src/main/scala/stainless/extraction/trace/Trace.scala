@@ -24,8 +24,100 @@ trait Trace extends CachingPhase with SimpleFunctions with IdentitySorts { self 
     override val t: self.t.type = self.t
   }
 
+  override protected def extractSymbols(context: TransformerContext, symbols: s.Symbols): t.Symbols = {
+    import symbols._
+    import trees._
+
+    var localCounter = 0
+
+    def freshId(): Identifier = {
+      localCounter = localCounter + 1
+      new Identifier("x"+localCounter,localCounter,localCounter)
+    }
+
+    def newFuns(funs1: List[s.FunDef], funs2: List[s.FunDef], acc: List[t.FunDef]): List[t.FunDef] = {
+      funs1 match {
+        case Nil => acc
+        case elem1::xs1 => {
+          funs2 match {
+            case Nil => newFuns(xs1, symbols.functions.values.toList, acc)
+            case elem2::xs2 if (elem1 != elem2) => {
+
+              //System.out.println(elem1.id)
+              //System.out.println(elem2.id)
+
+              val fd1 = extractFunction(symbols, elem1) //elem1 //identity.transform(elem1.copy(id = identity.transform(elem1.id)))
+              val fd2 = extractFunction(symbols, elem2) //elem2 //identity.transform(elem2.copy(id = identity.transform(elem2.id)))
+
+              //todo: check if both funs have same arg list
+              val newParams = fd1.params.map{param => param.freshen}
+              val newParamVars = newParams.map{param => param.toVariable}
+
+              val newParamTypes = fd1.tparams.map{tparam => tparam.freshen}
+              val newParamTps = newParamTypes.map{tparam => tparam.tp}
+
+              val vd = t.ValDef.fresh("holds", t.BooleanType())
+              val post = t.Lambda(Seq(vd), vd.toVariable)
+
+              val body = t.Ensuring(t.Equals(t.FunctionInvocation(fd1.id, newParamTps, newParamVars), t.FunctionInvocation(fd2.id, newParamTps, newParamVars)), post)
+              val flags: Seq[t.Flag] = Seq() //TraceInduct //Seq(Annotation("traceInduct", Seq()))
+
+              //todo fresh params
+              val newf = new t.FunDef(freshId(), newParamTypes, newParams, t.BooleanType(), body, flags)
+
+              //System.out.println(newf)
+              newFuns(funs1, xs2, newf::acc)
+            }
+            case _ => newFuns(funs1, funs2.tail, acc)
+          }
+        }
+      }
+    }
+
+    val extracted = super.extractSymbols(context, symbols)
+    val functions =  symbols.functions.values.map(elem => identity.transform(elem.copy(id = identity.transform(elem.id)))).toSeq//Seq()
+    //System.out.println(symbols.functions.size)
+
+    val funs = newFuns(symbols.functions.values.toList, symbols.functions.values.toList, Nil)
+    //funs.foreach(elem => System.out.println(elem))
+
+    registerFunctions(extracted, funs)
+  }
+
+  protected def extractFunction1(symbols: Symbols, fd: FunDef): t.FunDef = {
+    import symbols._
+    //System.out.println(fd)
+    var funInv: Option[FunctionInvocation] = None
+
+          exprOps.preTraversal {
+            case _ if funInv.isDefined => // do nothing
+            case fi @ FunctionInvocation(tfd, _, args) if symbols.isRecursive(tfd)
+            => {
+                  val paramVars = fd.params.map(_.toVariable)
+                  val argCheck = args.forall(paramVars.contains) && args.toSet.size == args.size
+                  if (argCheck) 
+                    funInv = Some(fi)
+                }
+            case _ => 
+          }(fd.fullBody)
+
+
+    val result: FunDef = (funInv match {
+      case None => fd
+      case Some(finv) => createTactFun(symbols, fd, finv)
+    })
+
+    //System.out.println(result)
+    identity.transform(result.copy(flags = result.flags filterNot (f => f == TraceInduct)))    
+  }
+
+
+  
   override protected def extractFunction(symbols: Symbols, fd: FunDef): t.FunDef = {
     import symbols._
+
+    //System.out.println(fd)
+
     var funInv: Option[FunctionInvocation] = None
 
     if(fd.flags.exists(elem => elem.name == "traceInduct")) {
@@ -50,6 +142,7 @@ trait Trace extends CachingPhase with SimpleFunctions with IdentitySorts { self 
       case None => fd
       case Some(finv) => createTactFun(symbols, fd, finv)
     })
+
 
     identity.transform(result.copy(flags = result.flags filterNot (f => f == TraceInduct)))    
   }
@@ -121,7 +214,8 @@ trait Trace extends CachingPhase with SimpleFunctions with IdentitySorts { self 
     val bodyPre = exprOps.withPrecondition(body, precondition)
     val bodyPost = exprOps.withPostcondition(bodyPre,postcondition)
 
-    function.copy(function.id, function.tparams, function.params, function.returnType, bodyPost, function.flags)
+    function.copy(function.id, function.tparams, function.params, function.returnType, bodyPost, function.flags)  
+
   }
 
 }
