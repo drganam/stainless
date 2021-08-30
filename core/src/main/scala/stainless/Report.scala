@@ -119,6 +119,16 @@ trait AbstractReport[SelfType <: AbstractReport[SelfType]] { self: SelfType =>
     val width = if (rows.isEmpty) 1 else rows.head.cellsSize // all rows must have the same size
     val color = if (isSuccess) Console.GREEN else Console.RED
 
+<<<<<<< HEAD
+=======
+/*
+    System.out.println("PRINTING COUNTER-EXAMPLE:")
+    annotatedRows.foreach(r => r match {
+      case RecordRow(id, pos, level, extra, time, example) => System.out.println(example)
+    })
+    */
+
+>>>>>>> a0e96152... Template updates
     val footer =
       f"total: ${stats.total}%-4d " +
       f"valid: ${stats.valid}%-4d (${stats.validFromCache} from cache) " +
