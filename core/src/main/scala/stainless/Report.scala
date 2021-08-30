@@ -119,24 +119,6 @@ trait AbstractReport[SelfType <: AbstractReport[SelfType]] { self: SelfType =>
     val rows  = processRows(full)
     val width = if (rows.isEmpty) 1 else rows.head.cellsSize // all rows must have the same size
     val color = if (isSuccess) Console.GREEN else Console.RED
-
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
-/*
-=======
->>>>>>> dfe2fa45... Add counter-example info to report
-    System.out.println("PRINTING COUNTER-EXAMPLE:")
-    annotatedRows.foreach(r => r match {
-      case RecordRow(id, pos, level, extra, time, example) => System.out.println(example)
-    })
-<<<<<<< HEAD
-    */
-
->>>>>>> a0e96152... Template updates
-=======
-
->>>>>>> dfe2fa45... Add counter-example info to report
     val footer =
       f"total: ${stats.total}%-4d " +
       f"valid: ${stats.valid}%-4d (${stats.validFromCache} from cache) " +
