@@ -33,7 +33,8 @@ case class RecordRow(
   pos: Position,
   level: Level.Type,
   extra: Seq[String],
-  time: Long
+  time: Long,
+  counter_example: Option[String]
 )
 
 /**
@@ -81,7 +82,7 @@ trait AbstractReport[SelfType <: AbstractReport[SelfType]] { self: SelfType =>
     val ordering = Ordering.Tuple2(implicitly[Ordering[Identifier]], implicitly[Ordering[inox.utils.Position]])
 
     for {
-      RecordRow(id, pos, level, extra, time) <- annotatedRows.sortBy(r => r.id -> r.pos)(ordering)
+      RecordRow(id, pos, level, extra, time, example) <- annotatedRows.sortBy(r => r.id -> r.pos)(ordering)
       if full || level != Level.Normal
       name = if (printUniqueName) id.uniqueName else id.name
       contents = Position.smartPos(pos) +: (name +: (extra :+ f"${time / 1000d}%3.1f"))
@@ -103,13 +104,13 @@ trait AbstractReport[SelfType <: AbstractReport[SelfType]] { self: SelfType =>
 
   def hasError(identifier: Identifier)(implicit ctx: inox.Context): Boolean = {
     annotatedRows.exists(elem => elem match {
-      case RecordRow(id, pos, level, extra, time) => level == Level.Error && id == identifier
+      case RecordRow(id, pos, level, extra, time, example) => level == Level.Error && id == identifier
     })
   }
 
   def hasUnknown(identifier: Identifier)(implicit ctx: inox.Context): Boolean = {
     annotatedRows.exists(elem => elem match {
-      case RecordRow(id, pos, level, extra, time) => level == Level.Warning && id == identifier
+      case RecordRow(id, pos, level, extra, time, example) => level == Level.Warning && id == identifier
     })
   }
 
@@ -120,15 +121,22 @@ trait AbstractReport[SelfType <: AbstractReport[SelfType]] { self: SelfType =>
     val color = if (isSuccess) Console.GREEN else Console.RED
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
 /*
+=======
+>>>>>>> dfe2fa45... Add counter-example info to report
     System.out.println("PRINTING COUNTER-EXAMPLE:")
     annotatedRows.foreach(r => r match {
       case RecordRow(id, pos, level, extra, time, example) => System.out.println(example)
     })
+<<<<<<< HEAD
     */
 
 >>>>>>> a0e96152... Template updates
+=======
+
+>>>>>>> dfe2fa45... Add counter-example info to report
     val footer =
       f"total: ${stats.total}%-4d " +
       f"valid: ${stats.valid}%-4d (${stats.validFromCache} from cache) " +

@@ -40,6 +40,11 @@ object VerificationReport {
       case VCStatus.ValidFromCache => ValidFromCache
       case inconclusive => Inconclusive(inconclusive.name)
     }
+
+    def getReason(status: Status) = status match {
+      case Invalid(reason: String) => Some(reason)
+      case _ => None
+    }
   }
 
   implicit val statusDecoder: Decoder[Status] = deriveDecoder
@@ -85,7 +90,9 @@ class VerificationReport(val results: Seq[VerificationReport.Record], val source
       val solver = solverName getOrElse ""
       val extra = Seq(kind, status.name, solver)
 
-      RecordRow(id, pos, level, extra, time)
+      val counter_example = Status.getReason(status)
+
+      RecordRow(id, pos, level, extra, time, counter_example)
   }
 
   private def levelOf(status: Status) = {
