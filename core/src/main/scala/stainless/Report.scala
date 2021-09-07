@@ -4,11 +4,13 @@ package stainless
 
 import inox.utils.Position
 import inox.utils.ASCIIHelpers._
+import inox.solvers.Solver
 
 import io.circe._
 import io.circe.syntax._
 
 import stainless.utils.JsonConvertions._
+import stainless.verification._
 
 case class ReportStats(total: Int, time: Long, valid: Int, validFromCache: Int, invalid: Int, unknown: Int) {
   def +(more: ReportStats) = ReportStats(
@@ -33,7 +35,8 @@ case class RecordRow(
   pos: Position,
   level: Level.Type,
   extra: Seq[String],
-  time: Long
+  time: Long,
+  counterexample: Option[inox.Model]
 )
 
 /**
@@ -81,7 +84,7 @@ trait AbstractReport[SelfType <: AbstractReport[SelfType]] { self: SelfType =>
     val ordering = Ordering.Tuple2(implicitly[Ordering[Identifier]], implicitly[Ordering[inox.utils.Position]])
 
     for {
-      RecordRow(id, pos, level, extra, time) <- annotatedRows.sortBy(r => r.id -> r.pos)(ordering)
+      RecordRow(id, pos, level, extra, time, model) <- annotatedRows.sortBy(r => r.id -> r.pos)(ordering)
       if full || level != Level.Normal
       name = if (printUniqueName) id.uniqueName else id.name
       contents = Position.smartPos(pos) +: (name +: (extra :+ f"${time / 1000d}%3.1f"))
@@ -101,15 +104,23 @@ trait AbstractReport[SelfType <: AbstractReport[SelfType]] { self: SelfType =>
     case Level.Error   => Console.RED
   }
 
+  var counterexample: Option[inox.Model] = None
+
   def hasError(identifier: Identifier)(implicit ctx: inox.Context): Boolean = {
     annotatedRows.exists(elem => elem match {
-      case RecordRow(id, pos, level, extra, time) => level == Level.Error && id == identifier
+      case RecordRow(id, pos, level, extra, time, model) => {
+        System.out.println(model)
+        counterexample = model
+        (level == Level.Error && id == identifier)
+      }
     })
   }
 
+  def getCounterExample = counterexample
+
   def hasUnknown(identifier: Identifier)(implicit ctx: inox.Context): Boolean = {
     annotatedRows.exists(elem => elem match {
-      case RecordRow(id, pos, level, extra, time) => level == Level.Warning && id == identifier
+      case RecordRow(id, pos, level, extra, time, model) => level == Level.Warning && id == identifier
     })
   }
 
