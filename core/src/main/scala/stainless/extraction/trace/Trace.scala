@@ -19,6 +19,48 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
     override val t: self.t.type = self.t
   }
 
+  private def makeEval(syms: s.Symbols, expr: Expr) = {
+    val prog = inox.Program(self.s)(syms)
+
+    Trace.setProg(prog)
+
+    val evaluator = new {
+    val context = self.context
+    val program: prog.type = prog
+    val semantics = new inox.Semantics {
+      val trees: self.s.type = self.s
+      val symbols: syms.type = syms
+      val program: prog.type = prog
+      def createEvaluator(ctx: inox.Context) = ???
+      def createSolver(ctx: inox.Context) = ???
+    }
+  } with evaluators.RecursiveEvaluator
+    with inox.evaluators.HasDefaultGlobalContext
+    with inox.evaluators.HasDefaultRecContext
+
+    val counterexample = Trace.counterexample /*match {
+      case Some(model) => model
+      case None => inox.Model.empty(prog)
+    }*/
+    //System.out.println(evaluator.eval(expr, counterexample))
+    evaluator
+  }
+
+  
+  //System.out.println(makeEval(symbols, helper.fullBody))
+
+  /*
+    for curent function f and model m
+      make an evaluator
+      for each counter-example c
+        create fc/mc = call f/m with c as an argument 
+        (or there is a way to eval model directly:
+          evaluator.eval(expr, inox.Model.empty(prog))
+        )
+        evaluate fc and mc and compare results
+        if not the same, put f in the error list and break all loops
+  */
+
   override protected def extractSymbols(context: TransformerContext, symbols: s.Symbols): t.Symbols = {
     import symbols._
     import exprOps._
@@ -420,15 +462,26 @@ object Trace {
     }
   }
 
+  var program: Option[inox.Program] = None
+  def setProg(prog: inox.Program) = program = Some(prog)
+
+  var counterexample = inox.Model.empty(program.get)
+
   def nextIteration[T <: AbstractReport[T]](report: AbstractReport[T])(implicit context: inox.Context): Boolean = {
     (function, proof, trace) match {
       case (Some(f), Some(p), Some(t)) => {
-        if (report.hasError(f) || report.hasError(p) || report.hasError(t)) reportError
+        if (report.hasError(f) || report.hasError(p) || report.hasError(t)) {
+          counterexample = report.counterexample.get
+          reportError
+        }
         else if (report.hasUnknown(f) || report.hasUnknown(p) || report.hasUnknown(t)) reportUnknown
         else reportValid
       }
       case (Some(f), _, Some(t)) => {
-        if (report.hasError(f) || report.hasError(t)) reportError
+        if (report.hasError(f) || report.hasError(t)) {
+          counterexample = report.counterexample.get
+          reportError
+        }
         else if (report.hasUnknown(f) || report.hasUnknown(t)) reportUnknown
         else reportValid
       }
@@ -441,6 +494,7 @@ object Trace {
 
   private def reportError = {
     errors = function.get::errors
+
     nextFunction
   }
 
