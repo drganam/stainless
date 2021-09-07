@@ -109,7 +109,7 @@ trait AbstractReport[SelfType <: AbstractReport[SelfType]] { self: SelfType =>
   def hasError(identifier: Identifier)(implicit ctx: inox.Context): Boolean = {
     annotatedRows.exists(elem => elem match {
       case RecordRow(id, pos, level, extra, time, model) => {
-        System.out.println(model)
+        //System.out.println(model)
         counterexample = model
         (level == Level.Error && id == identifier)
       }

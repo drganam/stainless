@@ -19,10 +19,14 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
     override val t: self.t.type = self.t
   }
 
-  private def makeEval(syms: s.Symbols, expr: Expr) = {
-    val prog = inox.Program(self.s)(syms)
+  private def makeEval(syms: s.Symbols, expr: Expr, fd: FunDef) = {
+    type ProgramType = inox.Program{val trees: Trace.this.s.type; val symbols: syms.type}
 
-    Trace.setProg(prog)
+    val prog: ProgramType = inox.Program(self.s)(syms)
+
+    type ModelType = prog.Model
+
+    implicit def modelToModel(s: inox.Model): ModelType = s
 
     val evaluator = new {
     val context = self.context
@@ -38,11 +42,40 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
     with inox.evaluators.HasDefaultGlobalContext
     with inox.evaluators.HasDefaultRecContext
 
-    val counterexample = Trace.counterexample /*match {
-      case Some(model) => model
-      case None => inox.Model.empty(prog)
-    }*/
+    val t: prog.Model = inox.Model.empty(prog)
+
+    //model.encode
+
+
+    val counterexample: ModelType = Trace.counterexample match {
+      //inox.Model.empty(prog))
+      case Some(model) => {
+        //check if empty
+        System.out.println("here111")
+        System.out.println((model))
+        System.out.println("here12")
+
+        model.vars.foreach(e => println(e))
+        //System.out.println((modelToModel(model)))
+        //System.out.println(evaluator.eval(expr, modelToModel(model)))
+
+        val paramTps = fd.tparams.map{tparam => tparam.tp}
+        val paramVars = model.vars.map{elem => elem._2}
+
+        //val toEval = s.FunctionInvocation(fd.id, paramTps, paramVars)
+        val toEval = expr
+        System.out.println(evaluator.eval(toEval))
+        //modelToModel(model)
+        inox.Model.empty(prog)
+      }
+      case None => {
+        System.out.println(evaluator.eval(expr))
+        inox.Model.empty(prog)
+      }
+    }
+    //Trace.setEvaluator(evaluator, expr)
     //System.out.println(evaluator.eval(expr, counterexample))
+    
     evaluator
   }
 
@@ -142,6 +175,9 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
         case (Some(model), Some(function)) => {
           val m = symbols.functions(model)
           val f = symbols.functions(function)
+
+          makeEval(symbols, f.fullBody, f)
+
           if (m.params.size == f.params.size)
             Some(equivalenceChek(m, f))
           else {
@@ -157,6 +193,12 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
       case Some(lemma) => lemma +: symbols.functions.values.toList
       case None => symbols.functions.values.toList
     }
+
+    functions.toList.foreach(fd => if (fd.flags.exists(elem => elem.name == "traceInduct")) {
+      System.out.println("a")
+      makeEval(symbols, fd.fullBody, fd)
+    }) 
+
 
     val inductFuns = functions.toList.flatMap(fd => if (fd.flags.exists(elem => elem.name == "traceInduct")) {
       //find the model for fd
@@ -462,16 +504,28 @@ object Trace {
     }
   }
 
-  var program: Option[inox.Program] = None
-  def setProg(prog: inox.Program) = program = Some(prog)
 
-  var counterexample = inox.Model.empty(program.get)
+  var counterexample: Option[inox.Model] = None
+
+/*
+
+  var program: Option[inox.Program] = None
+
+  var evaluator: Option[evaluators.RecursiveEvaluator] = None
+
+  def setEvaluator(e: evaluators.RecursiveEvaluator, expr: Expr) = {
+    evaluator.get.eval(expr, counterexample)
+    evaluator = Some(e)
+  }
+*/
+
 
   def nextIteration[T <: AbstractReport[T]](report: AbstractReport[T])(implicit context: inox.Context): Boolean = {
+    counterexample = None
     (function, proof, trace) match {
       case (Some(f), Some(p), Some(t)) => {
         if (report.hasError(f) || report.hasError(p) || report.hasError(t)) {
-          counterexample = report.counterexample.get
+          counterexample = report.counterexample
           reportError
         }
         else if (report.hasUnknown(f) || report.hasUnknown(p) || report.hasUnknown(t)) reportUnknown
@@ -479,7 +533,7 @@ object Trace {
       }
       case (Some(f), _, Some(t)) => {
         if (report.hasError(f) || report.hasError(t)) {
-          counterexample = report.counterexample.get
+          counterexample = report.counterexample
           reportError
         }
         else if (report.hasUnknown(f) || report.hasUnknown(t)) reportUnknown
