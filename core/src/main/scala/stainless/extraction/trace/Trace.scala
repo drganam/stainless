@@ -44,6 +44,21 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
     val t: prog.Model = inox.Model.empty(prog)
 
+/*
+    object encoder extends inox.transformers.ProgramTransformer {
+      val s: prog.trees.type = prog.trees
+      val t: stainless.trees.type = stainless.trees
+    }
+    */
+    
+    /*
+
+    val encoder: inox.transformers.ProgramTransformer {
+      val sourceProgram: prog.type
+      val targetProgram: Program { val trees: stainless.trees.type }
+    }
+    */
+
     //model.encode
 
 
@@ -58,25 +73,28 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
         model.vars.foreach(e => println(e))
         //System.out.println((modelToModel(model)))
         //System.out.println(evaluator.eval(expr, modelToModel(model)))
-
+/*
         val paramTps = fd.tparams.map{tparam => tparam.tp}
-        val paramVars = model.vars.map{elem => elem._2}
-
+        val paramVars = model.encode(new inox.transformers.ProgramTransformer {
+          val s: prog.type = prog
+          val t: stainless.trees.type = stainless.trees
+        }).vars.map{elem => elem._2}
+*/
         //val toEval = s.FunctionInvocation(fd.id, paramTps, paramVars)
         val toEval = expr
-        System.out.println(evaluator.eval(toEval))
+        //System.out.println(evaluator.eval(toEval))
         //modelToModel(model)
         inox.Model.empty(prog)
       }
       case None => {
-        System.out.println(evaluator.eval(expr))
+        //System.out.println(evaluator.eval(expr))
         inox.Model.empty(prog)
       }
     }
     //Trace.setEvaluator(evaluator, expr)
-    //System.out.println(evaluator.eval(expr, counterexample))
-    
-    evaluator
+    System.out.println(evaluator.eval(expr))
+    evaluator.eval(expr)
+    //evaluator
   }
 
   
@@ -176,7 +194,24 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
           val m = symbols.functions(model)
           val f = symbols.functions(function)
 
-          makeEval(symbols, f.fullBody, f)
+          val t = symbols.functions.values.toList.foreach(fd => if (fd.flags.exists(elem => elem.name == "traceInduct")) {
+            System.out.println("a")
+            
+            val getTest = s.FunctionInvocation(fd.id, Seq(), Seq(IntegerLiteral(1)))
+
+            makeEval(symbols, getTest, fd) match {
+              case inox.evaluators.EvaluationResults.Successful(a) => {
+                System.out.println(f)
+                val evalF = s.FunctionInvocation(f.id, Seq(), Seq(a))
+
+                makeEval(symbols, evalF, fd) match {
+                  case inox.evaluators.EvaluationResults.Successful(a) => System.out.println(a)
+                  case _ => None
+                }
+              }
+              case _ => None
+            }
+          })
 
           if (m.params.size == f.params.size)
             Some(equivalenceChek(m, f))
@@ -194,10 +229,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
       case None => symbols.functions.values.toList
     }
 
-    functions.toList.foreach(fd => if (fd.flags.exists(elem => elem.name == "traceInduct")) {
-      System.out.println("a")
-      makeEval(symbols, fd.fullBody, fd)
-    }) 
+     
 
 
     val inductFuns = functions.toList.flatMap(fd => if (fd.flags.exists(elem => elem.name == "traceInduct")) {
