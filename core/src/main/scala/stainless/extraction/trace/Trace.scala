@@ -19,14 +19,12 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
     override val t: self.t.type = self.t
   }
 
-  private def makeEval(syms: s.Symbols, expr: Expr, fd: FunDef) = {
+  private def evaluate(syms: s.Symbols, expr: Expr) = {
     type ProgramType = inox.Program{val trees: Trace.this.s.type; val symbols: syms.type}
-
     val prog: ProgramType = inox.Program(self.s)(syms)
 
-    type ModelType = prog.Model
-
-    implicit def modelToModel(s: inox.Model): ModelType = s
+    //type ModelType = prog.Model
+    //implicit def modelToModel(s: inox.Model): ModelType = s
 
     val evaluator = new {
     val context = self.context
@@ -42,9 +40,9 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
     with inox.evaluators.HasDefaultGlobalContext
     with inox.evaluators.HasDefaultRecContext
 
+/*
     val t: prog.Model = inox.Model.empty(prog)
 
-/*
     object encoder extends inox.transformers.ProgramTransformer {
       val s: prog.trees.type = prog.trees
       val t: stainless.trees.type = stainless.trees
@@ -61,7 +59,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
     //model.encode
 
-
+    /*
     val counterexample: ModelType = Trace.counterexample match {
       //inox.Model.empty(prog))
       case Some(model) => {
@@ -91,6 +89,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
         inox.Model.empty(prog)
       }
     }
+    */
     //Trace.setEvaluator(evaluator, expr)
     System.out.println(evaluator.eval(expr))
     evaluator.eval(expr)
@@ -147,7 +146,64 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
       }
     }
 
+    symbols.functions.values.toList.foreach(fd => if (fd.flags.exists(elem => elem.name == "traceInduct"))
+      Trace.setMkTest(fd.id))
+
     def generateEqLemma: Option[s.FunDef] = {
+
+      def evalCheck(f: FunDef): Boolean = {
+        Trace.getMkTest match { //todo just check for annotation here
+          case Some(t) => {
+            val test = symbols.functions(t)
+
+  /*
+      for current function f
+        (only if not already evaluated)
+        make an evaluator
+        for each counter-example c, until it fails
+          evaluate and compare to solution
+          if not the same, put f in the error list and break all loops
+        if f passes all the tests, continue with eq checking
+  */
+
+            //parametrize depending of the number of tests
+            val r: Range = 1 to 5
+
+            val passesAllTests = r.forall(i => {
+              val bval = {
+                System.out.println(i)
+
+                val getInput = s.TupleSelect(FunctionInvocation(test.id, test.tparams.map(_.tp), Seq(IntegerLiteral(i))), 1)
+                val getRes = s.TupleSelect(FunctionInvocation(test.id, test.tparams.map(_.tp), Seq(IntegerLiteral(i))), 2)
+
+                (evaluate(symbols, getInput), evaluate(symbols, getRes)) match {
+                  case (inox.evaluators.EvaluationResults.Successful(input), inox.evaluators.EvaluationResults.Successful(res)) => {
+                    val evalF = input match {
+                      case Tuple(paramVars) => s.FunctionInvocation(f.id, f.tparams.map(_.tp), paramVars)
+                      case paramVar => s.FunctionInvocation(f.id, f.tparams.map(_.tp), Seq(paramVar))
+                    }
+                    evaluate(symbols, evalF) match {
+                      case inox.evaluators.EvaluationResults.Successful(output) => {
+                        System.out.println(output)
+                        System.out.println(res)
+                        output == res
+                      }
+                      case _ => true
+                    }
+                  }
+                  case _ => true
+                }
+              }
+              bval 
+            })
+
+            System.out.println(passesAllTests)
+            passesAllTests
+          }
+          case None => true
+        }
+      }
+
       def equivalenceChek(fd1: s.FunDef, fd2: s.FunDef): s.FunDef = {
         val freshId = FreshIdentifier(CheckFilter.fixedFullName(fd1.id) + "$" + CheckFilter.fixedFullName(fd2.id))
         val eqLemma = exprOps.freshenSignature(fd1).copy(id = freshId)
@@ -194,27 +250,13 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
           val m = symbols.functions(model)
           val f = symbols.functions(function)
 
-          val t = symbols.functions.values.toList.foreach(fd => if (fd.flags.exists(elem => elem.name == "traceInduct")) {
-            System.out.println("a")
-            
-            val getTest = s.FunctionInvocation(fd.id, Seq(), Seq(IntegerLiteral(1)))
-
-            makeEval(symbols, getTest, fd) match {
-              case inox.evaluators.EvaluationResults.Successful(a) => {
-                System.out.println(f)
-                val evalF = s.FunctionInvocation(f.id, Seq(), Seq(a))
-
-                makeEval(symbols, evalF, fd) match {
-                  case inox.evaluators.EvaluationResults.Successful(a) => System.out.println(a)
-                  case _ => None
-                }
-              }
-              case _ => None
+          if (m.params.size == f.params.size) {
+            if(evalCheck(f)) Some(equivalenceChek(m, f))
+            else {
+              Trace.resetTrace //TODO make sure the loop is ok; maybe store counterexample
+              None
             }
-          })
-
-          if (m.params.size == f.params.size)
-            Some(equivalenceChek(m, f))
+          }
           else {
             Trace.resetTrace
             None
@@ -228,9 +270,6 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
       case Some(lemma) => lemma +: symbols.functions.values.toList
       case None => symbols.functions.values.toList
     }
-
-     
-
 
     val inductFuns = functions.toList.flatMap(fd => if (fd.flags.exists(elem => elem.name == "traceInduct")) {
       //find the model for fd
@@ -465,6 +504,7 @@ object Trace {
   var norm: Option[Identifier] = None
   var trace: Option[Identifier] = None
   var proof: Option[Identifier] = None
+  var mkTest: Option[Identifier] = None
 
   def apply(ts: Trees, tt: termination.Trees)(implicit ctx: inox.Context): ExtractionPipeline {
     val s: ts.type
@@ -500,10 +540,13 @@ object Trace {
 
   def getNorm = norm
 
+  def getMkTest = mkTest
+
   def setTrace(t: Identifier) = trace = Some(t)
   def setProof(p: Identifier) = proof = Some(p)
 
   def setNorm(n: Option[Identifier]) = norm = n
+  def setMkTest(t: Identifier) = mkTest = Some(t)
 
   def resetTrace = {
     trace = None
