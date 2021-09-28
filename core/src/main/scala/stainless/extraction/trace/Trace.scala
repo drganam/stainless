@@ -91,7 +91,6 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
     }
     */
     //Trace.setEvaluator(evaluator, expr)
-    System.out.println(evaluator.eval(expr))
     evaluator.eval(expr)
     //evaluator
   }
@@ -146,12 +145,13 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
       }
     }
 
-    symbols.functions.values.toList.foreach(fd => if (fd.flags.exists(elem => elem.name == "traceInduct"))
+    symbols.functions.values.toList.foreach(fd => if (fd.flags.exists(elem => elem.name == "mkTest"))
       Trace.setMkTest(fd.id))
 
-    def generateEqLemma: Option[s.FunDef] = {
+    def generateEqLemma: List[s.FunDef] = {
 
       def evalCheck(f: FunDef): Boolean = {
+
         Trace.getMkTest match { //todo just check for annotation here
           case Some(t) => {
             val test = symbols.functions(t)
@@ -166,12 +166,10 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
         if f passes all the tests, continue with eq checking
   */
 
-            //parametrize depending of the number of tests
-            val r: Range = 1 to 5
+            val r: Range = 1 to 5  //todo fix range
 
             val passesAllTests = r.forall(i => {
               val bval = {
-                System.out.println(i)
 
                 val getInput = s.TupleSelect(FunctionInvocation(test.id, test.tparams.map(_.tp), Seq(IntegerLiteral(i))), 1)
                 val getRes = s.TupleSelect(FunctionInvocation(test.id, test.tparams.map(_.tp), Seq(IntegerLiteral(i))), 2)
@@ -184,8 +182,6 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
                     }
                     evaluate(symbols, evalF) match {
                       case inox.evaluators.EvaluationResults.Successful(output) => {
-                        System.out.println(output)
-                        System.out.println(res)
                         output == res
                       }
                       case _ => true
@@ -196,7 +192,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
               }
               bval 
             })
-
+            
             System.out.println(passesAllTests)
             passesAllTests
           }
@@ -251,25 +247,33 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
           val f = symbols.functions(function)
 
           if (m.params.size == f.params.size) {
-            if(evalCheck(f)) Some(equivalenceChek(m, f))
+            if(evalCheck(f)) {
+              if (symbols.isRecursive(model))
+                List(equivalenceChek(m, f)) //whichever order of m and f is recursive first
+              else List(equivalenceChek(f, m))
+            }
             else {
               Trace.resetTrace //TODO make sure the loop is ok; maybe store counterexample
-              None
+              List()
             }
           }
           else {
             Trace.resetTrace
-            None
+            List()
           }
         }
-        case _ => None
+        case _ => List()
       }
     }
 
+    /*
     val functions = generateEqLemma match {
       case Some(lemma) => lemma +: symbols.functions.values.toList
       case None => symbols.functions.values.toList
     }
+    */
+
+    val functions = generateEqLemma ++ symbols.functions.values.toList
 
     val inductFuns = functions.toList.flatMap(fd => if (fd.flags.exists(elem => elem.name == "traceInduct")) {
       //find the model for fd
@@ -442,7 +446,12 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
         else path endsWith p
       }
   }
-
+/*
+  override protected def extractFunction(symbols: Symbols, fd: FunDef): t.FunDef = {
+    import symbols._
+    identity.transform(fd.copy(flags = fd.flags filterNot (f => f == MkTest)))
+  }
+*/
 }
 
 object Trace {
@@ -636,6 +645,10 @@ object Trace {
   }
 
   private def reportValid = {
+    System.out.println("")
+    System.out.println("unknowns in time of valid report")
+    System.out.println(function.get)
+    System.out.println(unknowns)
     if (!allModels.contains(function.get)) {
       state(function.get).status = Valid
       state(function.get).path = model.get +: state(model.get).path
