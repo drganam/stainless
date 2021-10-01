@@ -594,19 +594,6 @@ object Trace {
 
   var counterexample: Option[inox.Model] = None
 
-/*
-
-  var program: Option[inox.Program] = None
-
-  var evaluator: Option[evaluators.RecursiveEvaluator] = None
-
-  def setEvaluator(e: evaluators.RecursiveEvaluator, expr: Expr) = {
-    evaluator.get.eval(expr, counterexample)
-    evaluator = Some(e)
-  }
-*/
-
-  
 
   def nextIteration[T <: AbstractReport[T]](report: AbstractReport[T])(implicit context: inox.Context): Boolean = {
     counterexample = None
@@ -650,7 +637,6 @@ object Trace {
 
   private def reportUnknown = {
     nextModel
-    System.out.println(model)
     if (model == None) {
       unknowns = function.get::unknowns
       nextFunction
@@ -658,10 +644,6 @@ object Trace {
   }
 
   private def reportValid = {
-    System.out.println("")
-    System.out.println("unknowns in time of valid report")
-    System.out.println(function.get)
-    System.out.println(unknowns)
     if (!allModels.contains(function.get)) {
       state(function.get).status = Valid
       state(function.get).path = model.get +: state(model.get).path
@@ -670,9 +652,7 @@ object Trace {
     }
 
     clusters = clusters + (model.get -> (function.get::clusters.getOrElse(model.get, List())))
-    System.out.println(unknowns)
     unknowns = unknowns.filterNot(elem => elem == function.get)
-    System.out.println(unknowns)
     nextFunction
   }
 
