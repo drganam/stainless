@@ -515,6 +515,8 @@ object Trace {
   var proof: Option[Identifier] = None
   var mkTest: Option[Identifier] = None
 
+  var cnt = 0
+
   def apply(ts: Trees, tt: termination.Trees)(implicit ctx: inox.Context): ExtractionPipeline {
     val s: ts.type
     val t: tt.type
@@ -534,6 +536,7 @@ object Trace {
   def setFunctions(f: List[Identifier]) = {
     allFunctions = f
     tmpFunctions = f
+    cnt = f.size
     state = state ++ (f zip f.map(_ => State(Unknown, List()))).toMap
   }
 
@@ -603,6 +606,7 @@ object Trace {
   }
 */
 
+  
 
   def nextIteration[T <: AbstractReport[T]](report: AbstractReport[T])(implicit context: inox.Context): Boolean = {
     counterexample = None
@@ -625,6 +629,14 @@ object Trace {
       }
       case _ => reportWrong
     }
+    
+    if(isDone && unknowns.size < cnt) {
+      cnt = unknowns.size
+      tmpModels = allModels
+      tmpFunctions = unknowns
+      nextFunction
+    }
+    
     !isDone
   }
 
@@ -632,12 +644,13 @@ object Trace {
 
   private def reportError = {
     errors = function.get::errors
-
+    unknowns = unknowns.filterNot(elem => elem == function.get)
     nextFunction
   }
 
   private def reportUnknown = {
     nextModel
+    System.out.println(model)
     if (model == None) {
       unknowns = function.get::unknowns
       nextFunction
@@ -657,12 +670,15 @@ object Trace {
     }
 
     clusters = clusters + (model.get -> (function.get::clusters.getOrElse(model.get, List())))
-
+    System.out.println(unknowns)
+    unknowns = unknowns.filterNot(elem => elem == function.get)
+    System.out.println(unknowns)
     nextFunction
   }
 
   private def reportWrong = {
     if (function != None) wrong = function.get::wrong
+    unknowns = unknowns.filterNot(elem => elem == function.get)
     resetTrace
     nextFunction
   }
