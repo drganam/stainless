@@ -127,11 +127,14 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
         val newParamTps = eqLemma.tparams.map{tparam => tparam.tp}
         val newParamVars = eqLemma.params.map{param => param.toVariable}
 
-        val subst = (fd1.params.map(_.id) zip newParamVars).toMap
-        val tsubst = (fd1.tparams zip newParamTps).map { case (tparam, targ) => tparam.tp.id -> targ }.toMap
+
+        val fdSpecs = if(Trace.funFirst) fd2 else fd1 
+
+        val subst = (fdSpecs.params.map(_.id) zip newParamVars).toMap
+        val tsubst = (fdSpecs.tparams zip newParamTps).map { case (tparam, targ) => tparam.tp.id -> targ }.toMap
         val specializer = new Specializer(eqLemma, eqLemma.id, tsubst, subst)
 
-        val specs = BodyWithSpecs(fd1.fullBody).specs.filter(s => s.kind == LetKind || s.kind == PreconditionKind) 
+        val specs = BodyWithSpecs(fdSpecs.fullBody).specs.filter(s => s.kind == LetKind || s.kind == PreconditionKind) 
         val pre = specs.map(spec => spec match {
           case Precondition(cond) => Precondition(specializer.transform(cond))
           case LetInSpec(vd, expr) => LetInSpec(vd, specializer.transform(expr))
@@ -168,9 +171,13 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
           if (m.params.size == f.params.size) {
             if(evalCheck(f)) {
-              if (symbols.isRecursive(model))
-                List(equivalenceChek(m, f))
-              else List(equivalenceChek(f, m))
+              if(Trace.funFirst) List(equivalenceChek(f, m))
+              //else if (symbols.isRecursive(model)) List(equivalenceChek(m, f))
+              else if (symbols.isRecursive(model) || !symbols.isRecursive(function)) List(equivalenceChek(m, f))
+              else {
+                Trace.funFirst = true
+                List(equivalenceChek(f, m))
+              }
             }
             else {
               Trace.resetTrace //TODO make sure the loop is ok; maybe store counterexample
@@ -271,7 +278,8 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
     val specsTsubst = ((lemma.tparams zip fi.tps) ++ (model.tparams zip fi.tps)).map { case (tparam, targ) => tparam.tp.id -> targ }.toMap
     val specsSpecializer = new Specializer(indPattern, indPattern.id, specsTsubst, specsSubst)
 
-    val specs = BodyWithSpecs(model.fullBody).specs ++ BodyWithSpecs(lemma.fullBody).specs.filterNot(_.kind == MeasureKind)
+    //TODO check
+    val specs = BodyWithSpecs(model.fullBody).specs //++ BodyWithSpecs(lemma.fullBody).specs.filterNot(_.kind == MeasureKind)
     val pre = specs.filterNot(_.kind == PostconditionKind).map(spec => spec match {
       case Precondition(cond) => Precondition(specsSpecializer.transform(cond)).setPos(spec)
       case LetInSpec(vd, expr) => LetInSpec(vd, specsSpecializer.transform(expr)).setPos(spec)
@@ -374,7 +382,7 @@ object Trace {
 
   import Status._
 
-  case class State(var status: Status, var path: List[Identifier])
+  case class State(var status: Status, var path: List[Identifier], var counterexample: Option[inox.Model])
 
   var state: Map[Identifier, State] = Map()
 
@@ -404,6 +412,11 @@ object Trace {
         val l = state(f).path.map(CheckFilter.fixedFullName).mkString(", ")
         val m = CheckFilter.fixedFullName(f)
         reporter.info(s"Path for the function $m: $l")
+      })
+      allFunctions.foreach(f => {
+        val c = state(f).counterexample
+        val m = CheckFilter.fixedFullName(f)
+        reporter.info(s"Counterexample for the function $m: $c")
       })
     }
 
@@ -437,14 +450,14 @@ object Trace {
     allModels = m
     tmpModels = m
     clusters = (m zip m.map(_ => Nil)).toMap
-    state = state ++ (m zip m.map(_ => State(Valid, List()))).toMap
+    state = state ++ (m zip m.map(_ => State(Valid, List(), None))).toMap
   }
 
   def setFunctions(f: List[Identifier]) = {
     allFunctions = f
     tmpFunctions = f
     cnt = f.size
-    state = state ++ (f zip f.map(_ => State(Unknown, List()))).toMap
+    state = state ++ (f zip f.map(_ => State(Unknown, List(), None))).toMap
   }
 
   def getModels = allModels
@@ -498,17 +511,18 @@ object Trace {
     }
   }
 
-
   var counterexample: Option[inox.Model] = None
+  var counter = 0
 
 
   def nextIteration[T <: AbstractReport[T]](report: AbstractReport[T])(implicit context: inox.Context): Boolean = {
     counterexample = None
+    counter = counter + 1
     (function, proof, trace) match {
       case (Some(f), Some(p), Some(t)) => {
         if (report.hasError(f) || report.hasError(p) || report.hasError(t)) {
           counterexample = report.counterexample
-          reportError
+          reportError(counterexample)
         }
         else if (report.hasUnknown(f) || report.hasUnknown(p) || report.hasUnknown(t)) reportUnknown
         else reportValid
@@ -516,7 +530,7 @@ object Trace {
       case (Some(f), _, Some(t)) => {
         if (report.hasError(f) || report.hasError(t)) {
           counterexample = report.counterexample
-          reportError
+          reportError(counterexample)
         }
         else if (report.hasUnknown(f) || report.hasUnknown(t)) reportUnknown
         else reportValid
@@ -528,29 +542,48 @@ object Trace {
       cnt = unknowns.size
       tmpModels = allModels //only the new ones
       tmpFunctions = unknowns
+      unknowns = List()
       nextFunction
     }
-    
+    if(isDone) {
+      System.out.println("COUNTER - NUMBER OF ITERATIONS AND GENERATED PROOFS")
+      System.out.println(counter)
+    }
+
     !isDone
   }
 
   private def isDone = function == None
 
-  private def reportError = {
+  private def reportError(counterexample: Option[inox.Model]) = {
+    funFirst = false
     errors = function.get::errors //store counter-example
     unknowns = unknowns.filterNot(elem => elem == function.get)
+    state(function.get).status = Errorneus
+    state(function.get).path = model.get +: state(model.get).path
+    state(function.get).counterexample = counterexample
     nextFunction
   }
 
+  var funFirst: Boolean = false
+
   private def reportUnknown = {
-    nextModel
-    if (model == None) {
-      unknowns = function.get::unknowns
-      nextFunction
+    if(funFirst){
+      funFirst = false
+      nextModel
+      if (model == None) {
+        unknowns = function.get::unknowns
+        nextFunction
+      }
+    }
+    else {
+      System.out.println("\nFIRST UNKNOWN")
+      funFirst = true
     }
   }
 
   private def reportValid = {
+    funFirst = false
     if (!allModels.contains(function.get)) {
       state(function.get).status = Valid
       state(function.get).path = model.get +: state(model.get).path
@@ -564,6 +597,7 @@ object Trace {
   }
 
   private def reportWrong = {
+    funFirst = false
     if (function != None) wrong = function.get::wrong
     unknowns = unknowns.filterNot(elem => elem == function.get)
     resetTrace
