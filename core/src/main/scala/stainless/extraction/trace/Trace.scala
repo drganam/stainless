@@ -81,6 +81,11 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
     def generateEqLemma: List[s.FunDef] = {
 
       def evalCheck(f: FunDef): Boolean = {
+        val counterexample: Seq[Trace.this.s.Expr] = Trace.counterexample match {
+          case None => Seq()
+          case Some(model) => model.vars.values
+        }
+
 
         Trace.getMkTest match { //todo just check for annotation here
           case Some(t) => {
@@ -96,10 +101,12 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
                 (evaluate(symbols, getInput), evaluate(symbols, getRes)) match {
                   case (inox.evaluators.EvaluationResults.Successful(input), inox.evaluators.EvaluationResults.Successful(res)) => {
-                    val evalF = input match {
+                    /*val evalF = input match {
                       case Tuple(paramVars) => s.FunctionInvocation(f.id, f.tparams.map(_.tp), paramVars)
                       case paramVar => s.FunctionInvocation(f.id, f.tparams.map(_.tp), Seq(paramVar))
                     }
+                    */
+                    val evalF = s.FunctionInvocation(f.id, f.tparams.map(_.tp), counterexample)
                     evaluate(symbols, evalF) match {
                       case inox.evaluators.EvaluationResults.Successful(output) => {
                         output == res
@@ -185,11 +192,15 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
             }
           }
           else {
+            System.out.println(m)
+            System.out.println(f)
             Trace.resetTrace
             List()
           }
         }
-        case _ => List()
+        case _ => {
+          List()
+        }
       }
     }
 
@@ -236,6 +247,10 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
           Trace.setTrace(lemma.id)
           Trace.setProof(helper.id)
+
+          System.out.println(helper)
+          System.out.println(lemma)
+
           List(helper, lemma)
         }
         case None => {
@@ -279,7 +294,8 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
     val specsSpecializer = new Specializer(indPattern, indPattern.id, specsTsubst, specsSubst)
 
     //TODO check
-    val specs = BodyWithSpecs(model.fullBody).specs //++ BodyWithSpecs(lemma.fullBody).specs.filterNot(_.kind == MeasureKind)
+    //val specs = BodyWithSpecs(model.fullBody).specs
+    val specs = BodyWithSpecs(model.fullBody).specs ++ BodyWithSpecs(lemma.fullBody).specs.filterNot(_.kind == MeasureKind)
     val pre = specs.filterNot(_.kind == PostconditionKind).map(spec => spec match {
       case Precondition(cond) => Precondition(specsSpecializer.transform(cond)).setPos(spec)
       case LetInSpec(vd, expr) => LetInSpec(vd, specsSpecializer.transform(expr)).setPos(spec)
@@ -577,7 +593,6 @@ object Trace {
       }
     }
     else {
-      System.out.println("\nFIRST UNKNOWN")
       funFirst = true
     }
   }
