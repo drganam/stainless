@@ -26,6 +26,7 @@ object VerificationReport {
   }
 
   object Status {
+    //var prog: Option[inox.Program] = None
     var currModel: Option[inox.Model] = None
 
     case object Valid extends Status("valid")
@@ -37,6 +38,7 @@ object VerificationReport {
                                               (status: VCStatus[program.Model])
                                               (implicit opts: program.trees.PrinterOptions): Status = status match {
       case VCStatus.Invalid(VCStatus.CounterExample(model)) => {
+        //val mod: program.Model = model
         currModel = Some(model)
         Invalid("counter-example: " + model.asString)
       }

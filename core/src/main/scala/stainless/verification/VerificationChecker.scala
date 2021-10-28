@@ -265,6 +265,7 @@ trait VerificationChecker { self =>
             VCResult(status, s.getResultSolver, Some(time))
 
           case SatWithModel(model) if !vc.satisfiability =>
+            extraction.trace.Trace.f(program)(model)
             VCResult(VCStatus.Invalid(VCStatus.CounterExample(model)), s.getResultSolver, Some(time))
 
           case Sat if vc.satisfiability =>
@@ -363,6 +364,7 @@ object VerificationChecker {
     total = 0
     startedVerification = false
   }
+
 
   def verify(p: StainlessProgram, ctx: inox.Context)
             (vcs: Seq[VC[p.trees.type]]): Future[Map[VC[p.trees.type], VCResult[p.Model]]] = {
