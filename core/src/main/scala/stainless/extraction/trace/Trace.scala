@@ -27,7 +27,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
     val context = self.context
     val program: prog.type = prog
     val semantics = new inox.Semantics {
-      val trees: self.s.type = self.s
+      val trees: prog.trees.type = program.trees
       val symbols: syms.type = syms
       val program: prog.type = prog
       def createEvaluator(ctx: inox.Context) = ???
@@ -82,14 +82,15 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
       def evalCheck(f: FunDef): Boolean = {
 
-        val prog = Trace.pair.get.prog
+        val pair = Trace.pair.get
+        val prog = pair.prog
         val syms = prog.symbols
 
         val evaluator = new {
         val context = self.context
         val program: prog.type = prog
         val semantics = new inox.Semantics {
-          val trees: self.s.type = self.s
+          val trees: prog.trees.type = program.trees
           val symbols: syms.type = syms
           val program: prog.type = prog
           def createEvaluator(ctx: inox.Context) = ???
@@ -98,7 +99,6 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
       } with evaluators.RecursiveEvaluator
         with inox.evaluators.HasDefaultGlobalContext
         with inox.evaluators.HasDefaultRecContext
-
 
         Trace.getMkTest match { //todo just check for annotation here
           case Some(t) => {
@@ -114,7 +114,11 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
                 (evaluate(symbols, getInput), evaluate(symbols, getRes)) match {
                   case (inox.evaluators.EvaluationResults.Successful(input), inox.evaluators.EvaluationResults.Successful(res)) => {
-                    evaluator.eval(Trace.pair.get.prog.symbols.functions(f.id).fullBody, Trace.pair.get.counterexample) match {
+                    val expr = prog.symbols.functions(f.id).fullBody
+                    val counterex = pair.counterexample
+                    //val evalF = prog.trees.FunctionInvocation(f.id, Seq(), counterex.vars.values)
+                    //evaluator.eval(evalF) match {
+                    evaluator.eval(expr, counterex) match {
                       case inox.evaluators.EvaluationResults.Successful(output) => {
                         output == res
                       }
@@ -539,7 +543,7 @@ object Trace {
   var counter = 0
 
   
-  trait Pair {
+  trait Pair { 
     val prog: inox.Program
     val counterexample: prog.Model
   }
