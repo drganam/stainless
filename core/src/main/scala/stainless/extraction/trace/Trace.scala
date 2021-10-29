@@ -85,11 +85,15 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
         System.out.println("Evaluating function:")
         System.out.println(f)
 
-        val counterexamples = Trace.state.values.map(_.counterexample).filter(!_.isEmpty).map(_.get).filterNot(_.initial)
+        val counterexamples = (Trace.state.values zip Trace.state.keys).map(elem => (elem._1.counterexample, elem._2)).filter(!_._1.isEmpty).map(elem => (elem._1.get, elem._2)).filterNot(_._1.initial)
         System.out.println("counterex size:")
         println(counterexamples.size)
+        println(counterexamples.map(x => (x._1.counterexample, x._2)))
 
-        def passesAllNewTests = counterexamples.forall(pair => {
+        def passesAllNewTests = counterexamples.forall(counterexample => {
+          val pair = counterexample._1
+          val fun = pair.prog.symbols.functions(counterexample._2)
+
           val bval = {
             type ProgramType = inox.Program{val trees: pair.prog.trees.type; val symbols: pair.prog.symbols.type}
             val prog: ProgramType = pair.prog.asInstanceOf[ProgramType]
@@ -113,11 +117,16 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
             val counterex = pair.counterexample
 
             System.out.println(counterex)
+            System.out.println(f.params)
+            System.out.println(m.params)
+            System.out.println(fun.params)
 
-            val invocation = evaluator.program.trees.FunctionInvocation(f.id, Seq(), f.params.map(vd => 
+            //.get breaks if parameter names are not the same
+
+            val invocation = evaluator.program.trees.FunctionInvocation(f.id, Seq(), fun.params.map(vd => 
               pair.counterexample.collectFirst({ case (k, v) if(k.id.name == vd.id.name) => v }).get))
 
-            val invocationM = evaluator.program.trees.FunctionInvocation(m.id, Seq(), m.params.map(vd => 
+            val invocationM = evaluator.program.trees.FunctionInvocation(m.id, Seq(), fun.params.map(vd => 
               pair.counterexample.collectFirst({ case (k, v) if(k.id.name == vd.id.name) => v }).get))
 
             (evaluator.eval(invocation), evaluator.eval(invocationM)) match {
@@ -555,7 +564,11 @@ object Trace {
 
   def getMkTest = mkTest
 
-  def setTrace(t: Identifier) = trace = Some(t)
+  def setTrace(t: Identifier) = {
+    trace = Some(t)
+    state(function.get).prevModels = model.get :: state(function.get).prevModels
+  }
+
   def setProof(p: Identifier) = proof = Some(p)
 
   def setNorm(n: Option[Identifier]) = norm = n
@@ -640,7 +653,9 @@ object Trace {
         else if (report.hasUnknown(f) || report.hasUnknown(t)) reportUnknown
         else reportValid
       }
-      case (Some(f), _, _) => if(state(f).counterexample != None) reportError(state(f).counterexample)
+      case (Some(f), _, _) if(state(f).counterexample != None) =>
+        reportError(state(f).counterexample)
+        counter = counter - 1
       case _ => reportWrong
     }
     
