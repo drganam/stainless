@@ -82,11 +82,14 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
       def evalCheck(f: FunDef, m: FunDef): Boolean = {
 
-        val counterexamples = Trace.state.values.map(_.counterexample).filter(!_.isEmpty).map(_.get)
+        System.out.println("Evaluating function:")
+        System.out.println(f)
+
+        val counterexamples = Trace.state.values.map(_.counterexample).filter(!_.isEmpty).map(_.get).filterNot(_.initial)
         System.out.println("counterex size:")
         println(counterexamples.size)
 
-        val passesAllNewTests = counterexamples.forall(pair => {
+        def passesAllNewTests = counterexamples.forall(pair => {
           val bval = {
             type ProgramType = inox.Program{val trees: pair.prog.trees.type; val symbols: pair.prog.symbols.type}
             val prog: ProgramType = pair.prog.asInstanceOf[ProgramType]
@@ -112,10 +115,10 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
             System.out.println(counterex)
 
             val invocation = evaluator.program.trees.FunctionInvocation(f.id, Seq(), f.params.map(vd => 
-              pair.counterexample.vars.collectFirst({ case (k, v) if(k.id.name == vd.id.name) => v }).get))
+              pair.counterexample.collectFirst({ case (k, v) if(k.id.name == vd.id.name) => v }).get))
 
             val invocationM = evaluator.program.trees.FunctionInvocation(m.id, Seq(), m.params.map(vd => 
-              pair.counterexample.vars.collectFirst({ case (k, v) if(k.id.name == vd.id.name) => v }).get))
+              pair.counterexample.collectFirst({ case (k, v) if(k.id.name == vd.id.name) => v }).get))
 
             (evaluator.eval(invocation), evaluator.eval(invocationM)) match {
               case (inox.evaluators.EvaluationResults.Successful(output), inox.evaluators.EvaluationResults.Successful(expected)) => {
@@ -123,7 +126,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
                 System.out.println(output)
                 System.out.println("printing model evaluation results:")
                 System.out.println(expected)
-                if(output != expected) Trace.reportError(Some(pair))
+                if(output != expected) Trace.storeCounterexample(Some(pair))
                 output == expected
               }
               case error => 
@@ -136,7 +139,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
           bval 
         })
 
-        val passesAllTests = Trace.getMkTest match { //todo just check for annotation here
+        def passesAllTests = Trace.getMkTest match { //todo just check for annotation here
           case Some(t) => {
             val test = symbols.functions(t)
 
@@ -150,15 +153,19 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
                 (evaluate(symbols, getInput), evaluate(symbols, getRes)) match {
                   case (inox.evaluators.EvaluationResults.Successful(input), inox.evaluators.EvaluationResults.Successful(res)) => {
-                    val evalF = input match {
-                      case Tuple(paramVars) => s.FunctionInvocation(f.id, f.tparams.map(_.tp), paramVars)
-                      case paramVar => s.FunctionInvocation(f.id, f.tparams.map(_.tp), Seq(paramVar))
+                    val paramVars = input match {
+                      case Tuple(pvars) => pvars
+                      case pvar => Seq(pvar)
                     }
+                    val evalF = s.FunctionInvocation(f.id, f.tparams.map(_.tp), paramVars)
                     evaluate(symbols, evalF) match {
                       case inox.evaluators.EvaluationResults.Successful(output) => {
-                        if(output != res) Trace.f(inox.Program(self.s)(symbols))(???)
-
-                          //Trace.reportError(Some(new Trace.Pair{???, ???}))
+                        val counterexample = (f.params zip paramVars).toMap
+                        if(output != res) {
+                          val p = Trace.a(inox.Program(self.s)(symbols))(counterexample)
+                          Trace.storeCounterexample(p)
+                        }
+                        println(output)
                         output == res
                       }
                       case _ => true
@@ -452,7 +459,7 @@ object Trace {
 
   import Status._
 
-  case class State(var status: Status, var path: List[Identifier], var counterexample: Option[Pair])
+  case class State(var status: Status, var path: List[Identifier], var counterexample: Option[Pair], var prevModels: List[Identifier])
 
   var state: Map[Identifier, State] = Map()
 
@@ -523,14 +530,15 @@ object Trace {
     allModels = m
     tmpModels = m
     clusters = (m zip m.map(_ => Nil)).toMap
-    state = state ++ (m zip m.map(_ => State(Valid, List(), None))).toMap
+    state = state ++ (m zip m.map(_ => State(Valid, List(), None, List()))).toMap
   }
 
   def setFunctions(f: List[Identifier]) = {
     allFunctions = f
     tmpFunctions = f
+    System.out.println(tmpFunctions)
     cnt = f.size
-    state = state ++ (f zip f.map(_ => State(Unchecked, List(), None))).toMap
+    state = state ++ (f zip f.map(_ => State(Unchecked, List(), None, List()))).toMap
   }
 
   def getModels = allModels
@@ -573,7 +581,7 @@ object Trace {
     proof = None
       tmpFunctions match {
       case x::xs => {
-        tmpModels = allModels
+        tmpModels = allModels.filterNot(state(x).prevModels.contains)
         nextModel
         tmpFunctions = xs
         function = Some(x)
@@ -588,29 +596,37 @@ object Trace {
 
   trait Pair { 
     val prog: inox.Program
-    val counterexample: prog.Model
+    val counterexample: Map[prog.trees.ValDef, prog.trees.Expr]
+    val initial: Boolean
   }
 
   var pair: Option[Pair] = None
 
+  def a(pr: inox.Program)(counterex: Map[pr.trees.ValDef, pr.trees.Expr]): Option[Pair]  = {
+    pair = Some(new Pair {
+          val prog: pr.type = pr
+          val counterexample = counterex
+          val initial = true
+      })
+    pair
+  }
+
   def f(pr: inox.Program)(counterex: pr.Model): Unit = {
       pair = Some(new Pair {
           val prog: pr.type = pr
-          System.out.println("WRITING FROM PAIR INITIALISATION")
-          System.out.println(counterex)
-          val counterexample = counterex
+          val counterexample = counterex.vars
+          val initial = false
       })
   }
 
   def nextIteration[T <: AbstractReport[T]](report: AbstractReport[T])(implicit context: inox.Context): Boolean = {
+    println(tmpFunctions)
     //counterexample = None
     counter = counter + 1
     (function, proof, trace) match {
       case (Some(f), Some(p), Some(t)) => {
         if (report.hasError(f) || report.hasError(p) || report.hasError(t)) {
           //counterexample = report.counterexample
-          System.out.println("WRITING FROM REPORTING THE ERROR")
-          //System.out.println(pair.get.counterexample)
           reportError(pair)
         }
         else if (report.hasUnknown(f) || report.hasUnknown(p) || report.hasUnknown(t)) reportUnknown
@@ -619,14 +635,12 @@ object Trace {
       case (Some(f), _, Some(t)) => {
         if (report.hasError(f) || report.hasError(t)) {
           //counterexample = report.counterexample
-          System.out.println("WRITING FROM REPORTING THE ERROR")
-          //System.out.println(pair.get.counterexample)
           reportError(pair)
         }
         else if (report.hasUnknown(f) || report.hasUnknown(t)) reportUnknown
         else reportValid
       }
-      case (Some(f), _, _) => if(state(f).status == Unchecked) reportWrong
+      case (Some(f), _, _) => if(state(f).counterexample != None) reportError(state(f).counterexample)
       case _ => reportWrong
     }
     
@@ -647,7 +661,13 @@ object Trace {
 
   private def isDone = function == None
 
+  private def storeCounterexample(counterexample: Option[Pair]) = {
+    state(function.get).counterexample = counterexample
+  }
+
   private def reportError[T](counterexample: Option[Pair]) = {
+    println("reporting error")
+    System.out.println(tmpFunctions)
     funFirst = false
     errors = function.get::errors //store counter-example
     unknowns = unknowns.filterNot(elem => elem == function.get)
@@ -655,6 +675,7 @@ object Trace {
     state(function.get).path = model.get +: state(model.get).path
     state(function.get).counterexample = counterexample
     nextFunction
+    System.out.println(tmpFunctions)
   }
 
   var funFirst: Boolean = false
