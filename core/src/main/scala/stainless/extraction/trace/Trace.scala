@@ -82,25 +82,69 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
       def evalCheck(f: FunDef): Boolean = {
 
-/*
+        if(Trace.pair.isEmpty) return true
+
         val pair = Trace.pair.get
-        val prog = pair.prog
-        val syms = prog.symbols
+        val prog: inox.Program{val trees: pair.prog.trees.type; val symbols: pair.prog.symbols.type} = pair.prog.asInstanceOf[inox.Program{val trees: pair.prog.trees.type; val symbols: pair.prog.symbols.type}]
+        val syms: prog.symbols.type = prog.symbols
+
 
         val evaluator = new {
-        val context = self.context
-        val program: prog.type = prog
-        val semantics = new inox.Semantics {
-          val trees: self.s.type = self.s
-          val symbols: syms.type = syms
+          val context = self.context
+          val program: prog.type = prog
+          val semantics = new inox.Semantics {
+          val trees: prog.trees.type = prog.trees
+          val symbols: prog.symbols.type = prog.symbols
           val program: prog.type = prog
           def createEvaluator(ctx: inox.Context) = ???
           def createSolver(ctx: inox.Context) = ???
         }
-      } with evaluators.RecursiveEvaluator
-        with inox.evaluators.HasDefaultGlobalContext
-        with inox.evaluators.HasDefaultRecContext
-*/
+        } with inox.evaluators.RecursiveEvaluator
+          with inox.evaluators.HasDefaultGlobalContext
+          with inox.evaluators.HasDefaultRecContext
+
+        val expr = prog.symbols.functions(f.id).fullBody
+        val counterex = pair.counterexample
+
+        System.out.println(counterex)
+
+        val invocation = evaluator.program.trees.FunctionInvocation(f.id, Seq(), f.params.map(vd => pair.counterexample.vars.collectFirst(
+          {
+            case (k, v) if(k.id.name == vd.id.name) => v
+          }).get))
+
+        val po = evaluator.program.trees.PrinterOptions.fromContext(context) 
+
+        println(invocation.asString)
+
+        evaluator.eval(invocation) match {
+          case inox.evaluators.EvaluationResults.Successful(output) => {
+            System.out.println("printing evaluation results:")
+            System.out.println(output)
+            true
+          }
+          case error => 
+            System.out.println("eval ")
+            System.out.println(error)
+            true
+        }
+        
+        /*
+        evaluator.eval(expr, counterex.asInstanceOf[evaluator.program.Model]) match {
+          case inox.evaluators.EvaluationResults.Successful(output) => {
+            System.out.println("printing evaluation results:")
+            System.out.println(output)
+            true
+          }
+          case error => 
+            System.out.println("eval failed")
+            System.out.println(error)
+            true
+        }*/
+
+        //EvaluatorError(No value for variable i in mapping Map(ValDef(i, Int, List()) -> 2))
+
+
         Trace.getMkTest match { //todo just check for annotation here
           case Some(t) => {
             val test = symbols.functions(t)
@@ -115,29 +159,36 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
                 (evaluate(symbols, getInput), evaluate(symbols, getRes)) match {
                   case (inox.evaluators.EvaluationResults.Successful(input), inox.evaluators.EvaluationResults.Successful(res)) => {
-                    //val expr = prog.symbols.functions(f.id).fullBody
-                    //val counterex = pair.counterexample
-                    //val evalF = prog.trees.FunctionInvocation(f.id, Seq(), counterex.vars.values)
-                    //evaluator.eval(evalF) match {
-                      /*
-                    evaluator.eval(expr, counterex) match {
-                      case inox.evaluators.EvaluationResults.Successful(output) => {
-                        output == res
-                      }
-                      case _ => true
-                      */
-                      true
+                    
+                    true
                   }
                   case _ => true
                 }
               }
               bval 
             })
-          
+            
             System.out.println(passesAllTests)
             passesAllTests
           }
-          case None => true
+          case None => {
+
+            val expr = prog.symbols.functions(f.id).fullBody
+            val counterex = pair.counterexample
+            //val evalF = prog.trees.FunctionInvocation(f.id, Seq(), counterex.vars.values)
+            //evaluator.eval(evalF) match {
+            evaluator.eval(expr, counterex.asInstanceOf[evaluator.program.Model]) match {
+              case inox.evaluators.EvaluationResults.Successful(output) => {
+                System.out.println("printing evaluation results:")
+                System.out.println(output)
+                true
+              }
+              case _ => 
+                System.out.println("eval failed")
+                true
+            }
+            true
+          }
         }
       }
 
@@ -542,7 +593,7 @@ object Trace {
   }
 
   //var program: StainlessProgram =
-  //var counterexample: Option[program.Model] = None 
+  //var counterexample: Option[program.Model] = None //None
   var counter = 0
 
   
@@ -570,8 +621,11 @@ object Trace {
         if (report.hasError(f) || report.hasError(p) || report.hasError(t)) {
           //counterexample = report.counterexample
           System.out.println("WRITING FROM REPORTING THE ERROR")
-          System.out.println(pair.get.counterexample)
-          reportError(pair.get.counterexample)
+          //System.out.println(pair.get.counterexample)
+          reportError(pair match {
+            case None => None
+            case Some(c) => c
+          })
         }
         else if (report.hasUnknown(f) || report.hasUnknown(p) || report.hasUnknown(t)) reportUnknown
         else reportValid
@@ -580,8 +634,11 @@ object Trace {
         if (report.hasError(f) || report.hasError(t)) {
           //counterexample = report.counterexample
           System.out.println("WRITING FROM REPORTING THE ERROR")
-          System.out.println(pair.get.counterexample)
-          reportError(pair.get.counterexample)
+          //System.out.println(pair.get.counterexample)
+          reportError(pair match {
+            case None => None
+            case Some(c) => c
+          })
         }
         else if (report.hasUnknown(f) || report.hasUnknown(t)) reportUnknown
         else reportValid
@@ -606,13 +663,13 @@ object Trace {
 
   private def isDone = function == None
 
-  private def reportError[T](counterexample: inox.Model) = {
+  private def reportError[T](counterexample: T) = {
     funFirst = false
     errors = function.get::errors //store counter-example
     unknowns = unknowns.filterNot(elem => elem == function.get)
     state(function.get).status = Errorneus
     state(function.get).path = model.get +: state(model.get).path
-    state(function.get).counterexample = Some(counterexample)
+    //state(function.get).counterexample = counterexample
     nextFunction
   }
 
