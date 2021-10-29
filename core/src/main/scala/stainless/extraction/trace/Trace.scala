@@ -27,7 +27,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
     val context = self.context
     val program: prog.type = prog
     val semantics = new inox.Semantics {
-      val trees: prog.trees.type = program.trees
+      val trees: self.s.type = self.s
       val symbols: syms.type = syms
       val program: prog.type = prog
       def createEvaluator(ctx: inox.Context) = ???
@@ -82,6 +82,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
       def evalCheck(f: FunDef): Boolean = {
 
+/*
         val pair = Trace.pair.get
         val prog = pair.prog
         val syms = prog.symbols
@@ -90,7 +91,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
         val context = self.context
         val program: prog.type = prog
         val semantics = new inox.Semantics {
-          val trees: prog.trees.type = program.trees
+          val trees: self.s.type = self.s
           val symbols: syms.type = syms
           val program: prog.type = prog
           def createEvaluator(ctx: inox.Context) = ???
@@ -99,7 +100,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
       } with evaluators.RecursiveEvaluator
         with inox.evaluators.HasDefaultGlobalContext
         with inox.evaluators.HasDefaultRecContext
-
+*/
         Trace.getMkTest match { //todo just check for annotation here
           case Some(t) => {
             val test = symbols.functions(t)
@@ -114,23 +115,25 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
                 (evaluate(symbols, getInput), evaluate(symbols, getRes)) match {
                   case (inox.evaluators.EvaluationResults.Successful(input), inox.evaluators.EvaluationResults.Successful(res)) => {
-                    val expr = prog.symbols.functions(f.id).fullBody
-                    val counterex = pair.counterexample
+                    //val expr = prog.symbols.functions(f.id).fullBody
+                    //val counterex = pair.counterexample
                     //val evalF = prog.trees.FunctionInvocation(f.id, Seq(), counterex.vars.values)
                     //evaluator.eval(evalF) match {
+                      /*
                     evaluator.eval(expr, counterex) match {
                       case inox.evaluators.EvaluationResults.Successful(output) => {
                         output == res
                       }
                       case _ => true
-                    }
+                      */
+                      true
                   }
                   case _ => true
                 }
               }
               bval 
             })
-            
+          
             System.out.println(passesAllTests)
             passesAllTests
           }
@@ -539,7 +542,7 @@ object Trace {
   }
 
   //var program: StainlessProgram =
-  //var counterexample: Option[program.Model] = None //None
+  //var counterexample: Option[program.Model] = None 
   var counter = 0
 
   
@@ -603,13 +606,13 @@ object Trace {
 
   private def isDone = function == None
 
-  private def reportError[T](counterexample: T) = {
+  private def reportError[T](counterexample: inox.Model) = {
     funFirst = false
     errors = function.get::errors //store counter-example
     unknowns = unknowns.filterNot(elem => elem == function.get)
     state(function.get).status = Errorneus
     state(function.get).path = model.get +: state(model.get).path
-    //state(function.get).counterexample = counterexample
+    state(function.get).counterexample = Some(counterexample)
     nextFunction
   }
 
