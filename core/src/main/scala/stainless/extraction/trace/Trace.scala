@@ -82,16 +82,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
       def evalCheck(f: FunDef, m: FunDef): Boolean = {
 
-        System.out.println("Evaluating function:")
-        System.out.println(f)
-
-        System.out.println("counterexamples:")
-        System.out.println((Trace.state.values zip Trace.state.keys))
-
         val counterexamples = (Trace.state.values zip Trace.state.keys).map(elem => (elem._1.counterexample, elem._2)).filter(!_._1.isEmpty).map(elem => (elem._1.get, elem._2)).filterNot(_._1.initial)
-        System.out.println("counterex size:")
-        println(counterexamples.size)
-        println(counterexamples.map(x => (x._1.counterexample, x._1.prog.symbols.functions(x._2).params)))
 
         def passesAllNewTests = counterexamples.forall(counterexample => {
           val pair = counterexample._1
@@ -122,11 +113,6 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
             val expr = syms.functions(f.id).fullBody
             val counterex = pair.counterexample
 
-            System.out.println(counterex)
-            System.out.println(f.params)
-            System.out.println(m.params)
-            System.out.println(fun.params)
-
             //.get breaks if parameter names are not the same 
             //fix: store the info wheter the counterexample comes from the model or the function
 
@@ -138,16 +124,10 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
             (evaluator.eval(invocation), evaluator.eval(invocationM)) match {
               case (inox.evaluators.EvaluationResults.Successful(output), inox.evaluators.EvaluationResults.Successful(expected)) => {
-                System.out.println("printing evaluation results:")
-                System.out.println(output)
-                System.out.println("printing model evaluation results:")
-                System.out.println(expected)
                 if(output != expected) Trace.storeCounterexample(Some(pair))
                 output == expected
               }
               case error => 
-                System.out.println("eval ")
-                System.out.println(error)
                 true
             }
 
@@ -181,7 +161,6 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
                           val p = Trace.a(inox.Program(self.s)(symbols))(counterexample)
                           Trace.storeCounterexample(p)
                         }
-                        println(output)
                         output == res
                       }
                       case _ => true
@@ -196,7 +175,6 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
           } 
           case None => {
-            System.out.println("getmktest is isEmpty")
             true
           }
         }
@@ -269,8 +247,6 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
             }
           }
           else {
-            System.out.println(m)
-            System.out.println(f)
             Trace.resetTrace
             List()
           }
@@ -324,9 +300,6 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
           Trace.setTrace(lemma.id)
           Trace.setProof(helper.id)
-
-          System.out.println(helper)
-          System.out.println(lemma)
 
           List(helper, lemma)
         }
@@ -552,7 +525,6 @@ object Trace {
   def setFunctions(f: List[Identifier]) = {
     allFunctions = f
     tmpFunctions = f
-    System.out.println(tmpFunctions)
     cnt = f.size
     state = state ++ (f zip f.map(_ => State(Unchecked, List(), None, List()))).toMap
   }
@@ -634,9 +606,6 @@ object Trace {
   }
 
   def f(pr: inox.Program)(counterex: pr.Model)(fun: Identifier): Unit = {
-    if(!function.isEmpty || !proof.isEmpty || !trace.isEmpty) 
-      System.out.println("printing from f !!!!!")
-      println(fun)
     val ok = !function.isEmpty && function.get == fun ||
              !proof.isEmpty && proof.get == fun ||
              !trace.isEmpty && trace.get == fun
@@ -651,8 +620,6 @@ object Trace {
   }
 
   def nextIteration[T <: AbstractReport[T]](report: AbstractReport[T])(implicit context: inox.Context): Boolean = {
-    println(tmpFunctions)
-    //counterexample = None
     counter = counter + 1
     (function, proof, trace) match {
       case (Some(f), Some(p), Some(t)) => {
@@ -699,8 +666,6 @@ object Trace {
   }
 
   private def reportError[T](counterexample: Option[Pair]) = {
-    println("reporting error")
-    System.out.println(tmpFunctions)
     funFirst = false
     errors = function.get::errors //store counter-example
     unknowns = unknowns.filterNot(elem => elem == function.get)
@@ -708,7 +673,6 @@ object Trace {
     state(function.get).path = model.get +: state(model.get).path
     state(function.get).counterexample = counterexample
     nextFunction
-    System.out.println(tmpFunctions)
   }
 
   var funFirst: Boolean = false
