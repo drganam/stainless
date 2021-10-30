@@ -85,14 +85,20 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
         System.out.println("Evaluating function:")
         System.out.println(f)
 
+        System.out.println("counterexamples:")
+        System.out.println((Trace.state.values zip Trace.state.keys))
+
         val counterexamples = (Trace.state.values zip Trace.state.keys).map(elem => (elem._1.counterexample, elem._2)).filter(!_._1.isEmpty).map(elem => (elem._1.get, elem._2)).filterNot(_._1.initial)
         System.out.println("counterex size:")
         println(counterexamples.size)
-        println(counterexamples.map(x => (x._1.counterexample, x._2)))
+        println(counterexamples.map(x => (x._1.counterexample, x._1.prog.symbols.functions(x._2).params)))
 
         def passesAllNewTests = counterexamples.forall(counterexample => {
           val pair = counterexample._1
           val fun = pair.prog.symbols.functions(counterexample._2)
+          val mod = pair.prog.symbols.functions(Trace.state(fun.id).path.head)
+          val ref = if (pair.fromFunction) fun else mod
+
 
           val bval = {
             type ProgramType = inox.Program{val trees: pair.prog.trees.type; val symbols: pair.prog.symbols.type}
@@ -121,12 +127,13 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
             System.out.println(m.params)
             System.out.println(fun.params)
 
-            //.get breaks if parameter names are not the same
+            //.get breaks if parameter names are not the same 
+            //fix: store the info wheter the counterexample comes from the model or the function
 
-            val invocation = evaluator.program.trees.FunctionInvocation(f.id, Seq(), fun.params.map(vd => 
+            val invocation = evaluator.program.trees.FunctionInvocation(f.id, Seq(), ref.params.map(vd => 
               pair.counterexample.collectFirst({ case (k, v) if(k.id.name == vd.id.name) => v }).get))
 
-            val invocationM = evaluator.program.trees.FunctionInvocation(m.id, Seq(), fun.params.map(vd => 
+            val invocationM = evaluator.program.trees.FunctionInvocation(m.id, Seq(), ref.params.map(vd => 
               pair.counterexample.collectFirst({ case (k, v) if(k.id.name == vd.id.name) => v }).get))
 
             (evaluator.eval(invocation), evaluator.eval(invocationM)) match {
@@ -502,7 +509,7 @@ object Trace {
       allFunctions.foreach(f => {
         val c = state(f).counterexample match {
           case None => None
-          case Some(co) => co.counterexample
+          case Some(co) => (co.counterexample, co.initial)
         }
         val m = CheckFilter.fixedFullName(f)
         reporter.info(s"Counterexample for the function $m: $c")
@@ -611,6 +618,7 @@ object Trace {
     val prog: inox.Program
     val counterexample: Map[prog.trees.ValDef, prog.trees.Expr]
     val initial: Boolean
+    val fromFunction: Boolean
   }
 
   var pair: Option[Pair] = None
@@ -620,16 +628,26 @@ object Trace {
           val prog: pr.type = pr
           val counterexample = counterex
           val initial = true
+          val fromFunction = false
       })
     pair
   }
 
-  def f(pr: inox.Program)(counterex: pr.Model): Unit = {
+  def f(pr: inox.Program)(counterex: pr.Model)(fun: Identifier): Unit = {
+    if(!function.isEmpty || !proof.isEmpty || !trace.isEmpty) 
+      System.out.println("printing from f !!!!!")
+      println(fun)
+    val ok = !function.isEmpty && function.get == fun ||
+             !proof.isEmpty && proof.get == fun ||
+             !trace.isEmpty && trace.get == fun
+    if(ok) {
       pair = Some(new Pair {
           val prog: pr.type = pr
           val counterexample = counterex.vars
           val initial = false
+          val fromFunction = function.get == fun || funFirst
       })
+    } 
   }
 
   def nextIteration[T <: AbstractReport[T]](report: AbstractReport[T])(implicit context: inox.Context): Boolean = {

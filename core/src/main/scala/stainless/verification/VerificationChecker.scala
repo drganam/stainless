@@ -264,8 +264,8 @@ trait VerificationChecker { self =>
             val status = checkAdtInvariantModel(vc, invId, model)
             VCResult(status, s.getResultSolver, Some(time))
 
-          case SatWithModel(model) if !vc.satisfiability =>
-            extraction.trace.Trace.f(program)(model)
+          case SatWithModel(model) if !vc.satisfiability => 
+            extraction.trace.Trace.f(program)(model)(vc.fd)
             VCResult(VCStatus.Invalid(VCStatus.CounterExample(model)), s.getResultSolver, Some(time))
 
           case Sat if vc.satisfiability =>
