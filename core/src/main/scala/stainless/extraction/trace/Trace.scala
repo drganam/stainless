@@ -735,8 +735,9 @@ object Trace {
     if (!allModels.contains(function.get)) {
       state(function.get).status = Valid
       state(function.get).path = model.get +: state(model.get).path
-      //allModels = model.get :: (allModels.filterNot(_ == model.get) :+ function.get)
-      allModels = (allModels :+ function.get).sortBy(m => state(m).path.size)
+      allModels = model.get :: (allModels.filterNot(_ == model.get) :+ function.get).sortBy(m => -state.values.flatMap(_.path).count(_ == m))
+      //allModels = (allModels :+ function.get).sortBy(m => -state.values.flatMap(_.path).count(_ == m))  //sortBy(m => state(m).path.size)
+      //allModels = (allModels :+ function.get)
       clusters = clusters + (function.get -> List())
     }
 
