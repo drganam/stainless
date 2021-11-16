@@ -81,14 +81,12 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
     def generateEqLemma: List[s.FunDef] = {
 
       def evalCheck(f: FunDef, m: FunDef): Boolean = {
-        println("HEREHEREHERE1")
 
         //improvement: there could be functions with same counterexample values; use distinct mappings;
         val counterexamples = (Trace.state.values zip Trace.state.keys).map(elem => (elem._1.counterexample, elem._2)).filter(!_._1.isEmpty).map(elem => (elem._1.get, elem._2)).filterNot(_._1.existing).filterNot(_._1.counterexample.isEmpty).filterNot(_._1.fromEval)
 
 
         def passesAllNewTests = counterexamples.forall(counterexample => {
-          println("HEREHEREHERE2")
           val pair = counterexample._1
           val fun = pair.prog.symbols.functions(counterexample._2)
           val mod = pair.prog.symbols.functions(Trace.state(fun.id).path.head)
@@ -126,14 +124,10 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
             val invocationM = evaluator.program.trees.FunctionInvocation(m.id, Seq(), ref.params.map(vd => 
               pair.counterexample.collectFirst({ case (k, v) if(k.id.name == vd.id.name) => v }).get))
 
-            System.out.println("HEREHREHREHRE4")
-
              
             (evaluator.eval(invocation), evaluator.eval(invocationM)) match {
               case (inox.evaluators.EvaluationResults.Successful(output), inox.evaluators.EvaluationResults.Successful(expected)) => {
-                println("HEREHEREHERE5")
                 if(output != expected) Trace.storeCounterexample(Some(new Trace.Pair {
-                  println("HEREHEREHERE")
                   val prog = pair.prog
                   val counterexample = pair.counterexample.asInstanceOf[Map[this.prog.trees.ValDef,this.prog.trees.Expr]]
                   val existing = false
@@ -143,12 +137,10 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
                 output == expected
               }
               case _ => 
-                println("HEREHEREHERE3")
                 true
             }
             }catch {
               case e => 
-                println("errorerrorerror")
                 true
             }
 
@@ -322,8 +314,6 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
           Trace.setTrace(lemma.id)
           Trace.setProof(helper.id)
 
-          System.out.println(lemma, helper)
-
           List(helper, lemma)
         }
         case None => {
@@ -481,9 +471,12 @@ object Trace {
       
   def printEverything(implicit ctx: inox.Context) = {
     import ctx.{ reporter, timers }
+    println("rank list")
+    println(allModels)
+    println(allModels.toList.sortBy(m => -m._2).map(_._1).take(5).map(CheckFilter.fixedFullName))
     if(!clusters.isEmpty || !errors.isEmpty || !unknowns.isEmpty || !wrong.isEmpty) {
       reporter.info(s"Printing equivalence checking results:")  
-      allModels.foreach(model => if (!clusters(model).isEmpty) {
+      allModels.keys.foreach(model => if (!clusters(model).isEmpty) {
         val l = clusters(model).map(CheckFilter.fixedFullName).mkString(", ")
         val m = CheckFilter.fixedFullName(model)
         reporter.info(s"List of functions that are equivalent to model $m: $l")
@@ -502,6 +495,7 @@ object Trace {
         val m = CheckFilter.fixedFullName(f)
         reporter.info(s"Path for the function $m: $l")
       })
+      /*
       allFunctions.foreach(f => {
         val c = state(f).counterexample match {
           case None => None
@@ -510,11 +504,12 @@ object Trace {
         val m = CheckFilter.fixedFullName(f)
         reporter.info(s"Counterexample for the function $m: $c")
       })
+      */
     }
 
   }
 
-  var allModels: List[Identifier] = List()
+  var allModels: Map[Identifier, Int] = Map()
   var tmpModels: List[Identifier] = List()
 
   var allFunctions: List[Identifier] = List()
@@ -539,7 +534,7 @@ object Trace {
   }
 
   def setModels(m: List[Identifier]) = {
-    allModels = m
+    allModels = m.map(elem => (elem, 100)).toMap
     tmpModels = m
     clusters = (m zip m.map(_ => Nil)).toMap
     state = state ++ (m zip m.map(_ => State(Valid, List(), None, List()))).toMap
@@ -596,8 +591,14 @@ object Trace {
     proof = None
       tmpFunctions match {
       case x::xs => {
-        tmpModels = allModels.filterNot(state(x).prevModels.contains).take(3)
-        if(tmpModels.isEmpty) tmpModels = allModels.take(1) //todo fix to skip this function
+        //val modsize = allModels.filterNot(state(x).prevModels.contains).size
+        //val n = if (modsize < 50) modsize else if(modsize < 100) 70 else 3
+        //tmpModels = allModels.filterNot(state(x).prevModels.contains).take(n)
+
+        val n = 5
+        tmpModels = allModels.toList.sortBy(m => -m._2).map(_._1).filterNot(state(x).prevModels.contains).take(n)
+
+        if(tmpModels.isEmpty) tmpModels = allModels.keys.take(1).toList //todo fix to skip this function
         nextModel
         tmpFunctions = xs
         function = Some(x)
@@ -654,7 +655,7 @@ object Trace {
 
   def nextIteration[T <: AbstractReport[T]](report: AbstractReport[T])(implicit context: inox.Context): Boolean = {
     counter = counter + 1
-    if(counter % 5 == 0) printEverything
+    if(counter % 10 == 0) printEverything
     (function, proof, trace) match {
       case (Some(f), Some(p), Some(t)) => {
         if (report.hasError(f) || report.hasError(p) || report.hasError(t)) {
@@ -680,7 +681,7 @@ object Trace {
     
     if(isDone && unknowns.size < cnt) {
       cnt = unknowns.size
-      tmpModels = allModels //only the new ones
+      tmpModels = allModels.keys.toList //only the new ones
       tmpFunctions = unknowns
       unknowns = List()
       nextFunction
@@ -700,11 +701,6 @@ object Trace {
   }
 
   private def reportError[T](counterexample: Option[Pair]) = {
-    println("ReportError")
-    System.out.println(counterexample match {
-          case None => None
-          case Some(co) => (co.counterexample, co.fromEval)
-        })
     funFirst = false
     errors = function.get::errors //store counter-example
     unknowns = unknowns.filterNot(elem => elem == function.get)
@@ -717,6 +713,7 @@ object Trace {
   var funFirst: Boolean = false
 
   private def reportUnknown = {
+    allModels = allModels.updated(model.get, allModels(model.get)-1)
     if(funFirst){
       funFirst = false
       nextModel
@@ -732,10 +729,16 @@ object Trace {
 
   private def reportValid = {
     funFirst = false
-    if (!allModels.contains(function.get)) {
+    if (!allModels.keys.toList.contains(function.get)) {
       state(function.get).status = Valid
       state(function.get).path = model.get +: state(model.get).path
-      allModels = model.get :: (allModels.filterNot(_ == model.get) :+ function.get).sortBy(m => -state.values.flatMap(_.path).count(_ == m))
+      //allModels = (allModels :+ function.get).sortBy(m => -state.values.flatMap(_.path).count(_ == m))
+
+      val inc = if (allModels(model.get) > 0) 20 else 100
+      allModels = allModels.updated(model.get, allModels(model.get) + inc)
+      allModels = (allModels + (function.get -> 0))//.sortBy(m => -m._2)
+
+
       //allModels = (allModels :+ function.get).sortBy(m => -state.values.flatMap(_.path).count(_ == m))  //sortBy(m => state(m).path.size)
       //allModels = (allModels :+ function.get)
       clusters = clusters + (function.get -> List())
