@@ -713,7 +713,7 @@ object Trace {
   var funFirst: Boolean = false
 
   private def reportUnknown = {
-    allModels = allModels.updated(model.get, allModels(model.get)-1)
+    allModels = allModels.updated(model.get, allModels(model.get)) //-1
     if(funFirst){
       funFirst = false
       nextModel
