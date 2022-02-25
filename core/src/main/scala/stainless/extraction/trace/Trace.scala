@@ -196,87 +196,50 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
       }
 
-      def getFunCalls(fd: FunDef) = {
-        var funs = List(fd.id)
+      // Finds all the function calls in the body of fd
+      def getFunCalls(fd: FunDef): List[FunDef] = {
+        var funs: List[Identifier] = List()
         s.exprOps.preTraversal {
-          case fi @ s.FunctionInvocation(tfd, tps, args) if  tfd != fd.id //symbols.isRecursive(tfd) &&
-          => {
-
-                System.out.println(fi)
-                funs = tfd::funs
-                //val paramVars = fd.params.map(_.toVariable)
-                //val argCheck = args.forall(paramVars.contains) && args.toSet.size == args.size
-                //if (argCheck) funInv = Some(fi)
-              }
+          case fi @ s.FunctionInvocation(tfd, tps, args) if tfd != fd.id //symbols.isRecursive(tfd) 
+            => funs = tfd::funs
           case _ => 
         }(fd.fullBody)
-        funs.filterNot(_ == fd.id).distinct
+        funs.distinct.map(symbols.functions(_))
       }
 
-      def makeSublemma(f1Calls: List[Identifier], f2Calls: List[Identifier]): List[s.FunDef] = (f1Calls, f2Calls) match {
-        case (m::mt, f::ft) if (m!=f && symbols.functions(m).params.size == symbols.functions(f).params.size) => {
-          println("making sublemma")
-          println(m)
-          println(f)
-          val sublemma = equivalenceChek(symbols.functions(m), symbols.functions(f))
-          println(sublemma)
-          sublemma // @traceInduct(R1 == S1)
-          //List() // to disable sublemma generation
-        }
-        case (m::mt, f::ft) => makeSublemma(mt, ft)
-        case _ => List()
+      // f1Calls: functions that are called from f1
+      // f2Calls: functions that are called from f2
+      // returns a list of sublemmas for each candidate pair (same signature + name?)
+      def makeSublemmas(fd1: s.FunDef, fd2: s.FunDef): List[(s.FunDef, s.FunDef, s.FunDef)] = {
+        val f1Calls = getFunCalls(fd1)
+        val f2Calls = getFunCalls(fd2)
+        for (
+          m <- f1Calls;
+          f <- f2Calls
+          if (m != f && m.params.size == f.params.size && m.returnType == f.returnType)
+        ) yield (equivalenceChek(m, f).head, m, f)
       }
-
-
-      def makeSublemma1(f1Calls: List[Identifier], f2Calls: List[Identifier]): List[(List[s.FunDef], Identifier, Identifier)] = f1Calls match {
-        case Nil => Nil 
-        case m::mt => f2Calls match {
-          case Nil => Nil
-          case f::ft if (m!=f && symbols.functions(m).params.size == symbols.functions(f).params.size) => {
-            println("making sublemma")
-            println(m)
-            println(f)
-            val sublemma = (equivalenceChek(symbols.functions(m), symbols.functions(f)), m, f)
-            println(sublemma)
-            sublemma :: makeSublemma1(m::mt, ft) // @traceInduct(R1 == S1)
-            //List() // to disable sublemma generation
-          }
-          case f::ft => makeSublemma1(m::mt, ft)
-        }
-      }
-
-
+      
       def equivalenceChek(fd1: s.FunDef, fd2: s.FunDef): List[s.FunDef] = {
         val freshId = FreshIdentifier(CheckFilter.fixedFullName(fd1.id) + "$" + CheckFilter.fixedFullName(fd2.id))
         val eqLemma = exprOps.freshenSignature(fd1).copy(id = freshId)
 
-        val f1Calls = getFunCalls(fd1)
-        val f2Calls = getFunCalls(fd2)
-
-        //val sublemmaInfo = makeSublemma1(f1Calls, f2Calls)
-        //val sublemma: List[s.FunDef] = sublemmaInfo.map(elem => elem._1).flatten
-
-        val sublemma: List[s.FunDef] = makeSublemma(f1Calls, f2Calls)
+        val sublemmas = makeSublemmas(fd1, fd2)
 
         println("list of sublemmas:")
-        println(sublemma)
+        println(sublemmas)
 
-        println("latest helper")
-
-        //body of fd2, with calls to subfunctions replaced 
-        val helper: List[s.FunDef] = sublemma match {
-          case Nil => Nil
-          case l::ls => {
-            //val helperCopy = inductPattern(symbols, fd2, fd2, "replacement", symbols.functions(sublemmaInfo.map(elem => elem._3).head), symbols.functions(sublemmaInfo.map(elem => elem._2).head)).setPos(fd2.getPos).copy(flags = Seq(s.Derived(Some(fd2.id))))
-            val helperCopy = inductPattern(symbols, fd2, fd2, "replacement", symbols.functions(f2Calls.head), symbols.functions(f1Calls.head)).setPos(fd2.getPos).copy(flags = Seq(s.Derived(Some(fd2.id))))
-
-            //val specializer1 = new Specializer(helperCopy, helperCopy.id, Map(), Map(f2Calls.head -> f1Calls.head))
-            // res = specializer1.transform(helperCopy.fullBody)
-            println(helperCopy)
-            List(helperCopy)
-            //Nil
-          }
+        //body of fd2, with calls to subfunctions replaced
+        val replacement: List[FunDef] = sublemmas match {
+          case Nil => List()
+          case _ => 
+            val sm = sublemmas.map(_._2).map(_.id)
+            val sf = sublemmas.map(_._3).map(_.id)
+            List(inductPattern(symbols, fd2, fd2, "replacement", (sf zip sm).toMap).setPos(fd2.getPos).copy(flags = Seq(s.Derived(Some(fd2.id)))))
         }
+
+        println("latest replacement")
+        println(replacement)
 
         val newParamTps = eqLemma.tparams.map{tparam => tparam.tp}
         val newParamVars = eqLemma.params.map{param => param.toVariable}
@@ -285,7 +248,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
         val subst = (fdSpecs.params.map(_.id) zip newParamVars).toMap
         val tsubst = (fdSpecs.tparams zip newParamTps).map { case (tparam, targ) => tparam.tp.id -> targ }.toMap
-        val specializer = new Specializer(eqLemma, eqLemma.id, tsubst, subst, eqLemma.id, eqLemma.id)
+        val specializer = new Specializer(eqLemma, eqLemma.id, tsubst, subst, Map())
 
         val specs = BodyWithSpecs(fdSpecs.fullBody).specs.filter(s => s.kind == LetKind || s.kind == PreconditionKind) 
         val pre = specs.map(spec => spec match {
@@ -294,13 +257,10 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
         })
 
         val fun1 = s.FunctionInvocation(fd1.id, newParamTps, newParamVars)
-        val fun2 = helper match {
+        val fun2 = replacement match {
           case Nil => s.FunctionInvocation(fd2.id, newParamTps, newParamVars)
           case h::t => s.FunctionInvocation(h.id, newParamTps, newParamVars)
         }
-
-        println("fun2:")
-        println(fun2)
 
         val (normFun1, normFun2) = Trace.getNorm match {
           case Some(n) => (
@@ -309,32 +269,28 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
           case None => (fun1, fun2)
         }
 
-
         val res = s.ValDef.fresh("res", s.UnitType())
-        val cond = sublemma match {
-          case Nil => s.Equals(normFun1, normFun2) 
-          //case _ => s.Equals(normFun1, normFun2) 
-          
-          case _ => s.And(// && sublemmas postcondition, if exists
-            s.Equals(s.FunctionInvocation(f1Calls.head, newParamTps, newParamVars), s.FunctionInvocation(f2Calls.head, newParamTps, newParamVars)),
-            s.Equals(normFun1, normFun2))
-
-        }
+        val cond = s.Equals(normFun1, normFun2) 
 
         val post = Postcondition(Lambda(Seq(res), cond)) 
 
-        val body = sublemma match {
-          case Nil =>  s.UnitLiteral()
-          //case _ =>  s.UnitLiteral()
-          case l::ls => Let(s.ValDef.fresh("sub$lemma", l.returnType), s.FunctionInvocation(l.id, newParamTps, newParamVars), s.UnitLiteral())
-        }
+        val body = s.UnitLiteral()
         val withPre = exprOps.reconstructSpecs(pre, Some(body), s.UnitType())
 
+        println("lemma's id before the transformation:")
+        println(eqLemma.id)
+
+        Trace.sublemmas = Trace.sublemmas ++ Map(eqLemma.id -> sublemmas.map(_._1).map(_.id))
+
+
+        // return the @traceInduct annotated eqLemma
+        // + potential sublemmas
+        // + the coressponding replacement functions
         (eqLemma.copy(
           fullBody = BodyWithSpecs(withPre).withSpec(post).reconstructed,
           flags = Seq(s.Derived(Some(fd1.id)), s.Annotation("traceInduct",List(StringLiteral(fd1.id.name)))),
           returnType = s.UnitType()
-        ).copiedFrom(eqLemma) :: sublemma) ++ helper
+        ).copiedFrom(eqLemma) :: sublemmas.map(_._1)) ++ replacement
       }
 
       (Trace.getModel, Trace.getFunction) match {
@@ -368,7 +324,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
       }
     }
 
-    println(generateEqLemma)
+    //println(generateEqLemma)
 
     val generatedFunctions = generateEqLemma
     val functions = generatedFunctions ++ symbols.functions.values.toList
@@ -397,9 +353,15 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
       funInv match {
         case Some(finv) => {
+
+          //TODO consider MAKING THE SUBLEMMA PART HERE
+          // benefits: works for @traceInduct when not in batched mode
+          // + easier to set it in the Trace object
+          // downsides: this part is not super recursive, not sure about going one level deeper
+
           // make a helper lemma:
-          val helper = inductPattern(symbols, symbols.functions(finv.id), fd, "indProof", fd, fd).setPos(fd.getPos)
-          println(helper)
+          val helper = inductPattern(symbols, symbols.functions(finv.id), fd, "indProof", Map()).setPos(fd.getPos)
+          //println(helper)
 
           val returnType = typeOps.instantiateType(helper.returnType, (helper.typeArgs zip fd.typeArgs).toMap)
 
@@ -409,14 +371,29 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
           val body = Let(s.ValDef.fresh("ind$proof", returnType), proof, exprOps.withoutSpecs(fd.fullBody).get)
           val withPre = exprOps.reconstructSpecs(BodyWithSpecs(fd.fullBody).specs, Some(body), fd.returnType)
 
-
-        
           val lemma = fd.copy(
             fullBody = BodyWithSpecs(withPre).reconstructed,
             flags = (s.Derived(Some(fd.id)) +: s.Derived(Some(finv.id)) +: (fd.flags.filterNot(f => f.name == "traceInduct"))).distinct
           ).copiedFrom(fd).setPos(fd.getPos)
 
+          // problem: sublemmas shouldn't be set with Trace.setTrace
+          // solution: annotate them as subInduct instead of traceInduct ?
+
+          // broken: user's @traceInduct functions get in the way
+          // solution: another annotation for generated equivalence lemmas OR ---> JUST DO Trace.setTrace from the other part ???
+          //                                                                       problematic when generating 2 lemmas (ref first, then stud) ???
+          //           keep @traceInduct for user defined lemmas
+          //           also use @traceInduct for sublemmas
+
+
+          println("lemma:")
+          println(lemma.id)
+          println("sublemmas of the lemma at the end:")
+          println(Trace.sublemmas(lemma.id))
+
+
           Trace.setTrace(lemma.id)
+          println("lemma")
           println(lemma.fullBody)
           Trace.setProof(helper.id)
 
@@ -441,7 +418,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
     registerFunctions(extracted, inductFuns.map(fun => identity.transform(fun)))
   }
 
-  def inductPattern(symbols: s.Symbols, model: FunDef, lemma: FunDef, suffix: String, replaceMe: FunDef, replacement: FunDef) = {
+  def inductPattern(symbols: s.Symbols, model: FunDef, lemma: FunDef, suffix: String, replacement: Map[Identifier, Identifier]) = {
     import symbols._
     import exprOps._
 
@@ -454,17 +431,13 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
     val tpairs = model.tparams zip fi.tps
     val tsubst = tpairs.map { case (tparam, targ) => tparam.tp.id -> targ } .toMap
     val subst = (model.params.map(_.id) zip fi.args).toMap
-    val specializer = new Specializer(model, indPattern.id, tsubst, subst, replaceMe.id, replacement.id)
+    val specializer = new Specializer(model, indPattern.id, tsubst, subst, replacement)
     
-    val fullBodySpecializedOld = specializer.transform(exprOps.withoutSpecs(model.fullBody).get)
-
-    // return false (zero of the corresponding type) (see mem benchmark)
-    val fullBodySpecialized = fullBodySpecializedOld //Let(s.ValDef.fresh("$body", indPattern.returnType), fullBodySpecializedOld, s.BooleanLiteral(false))
-          
+    val fullBodySpecialized = specializer.transform(exprOps.withoutSpecs(model.fullBody).get) 
 
     val specsSubst = (lemma.params.map(_.id) zip newParamVars).toMap ++ (model.params.map(_.id) zip newParamVars).toMap
     val specsTsubst = ((lemma.tparams zip fi.tps) ++ (model.tparams zip fi.tps)).map { case (tparam, targ) => tparam.tp.id -> targ }.toMap
-    val specsSpecializer = new Specializer(indPattern, indPattern.id, specsTsubst, specsSubst, indPattern.id, indPattern.id)
+    val specsSpecializer = new Specializer(indPattern, indPattern.id, specsTsubst, specsSubst, Map())
 
     //TODO check
     //val specs = BodyWithSpecs(model.fullBody).specs
@@ -506,8 +479,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
       newId: Identifier,
       tsubst: Map[Identifier, Type],
       vsubst: Map[Identifier, Expr],
-      replaceMe: Identifier,
-      replacement: Identifier
+      replacement: Map[Identifier, Identifier]
     ) extends s.SelfTreeTransformer {
 
       override def transform(expr: s.Expr): t.Expr = expr match {
@@ -518,8 +490,8 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
           val fi1 = FunctionInvocation(newId, tps = fi.tps, args = fi.args)
           super.transform(fi1.copiedFrom(fi))
 
-        case fi: FunctionInvocation if fi.id == replaceMe =>
-          val fi1 = FunctionInvocation(replacement, tps = fi.tps, args = fi.args)
+        case fi: FunctionInvocation if replacement.contains(fi.id) =>
+          val fi1 = FunctionInvocation(replacement.getOrElse(fi.id, fi.id), tps = fi.tps, args = fi.args)
           super.transform(fi1.copiedFrom(fi))
 
         case _ => super.transform(expr)
@@ -637,6 +609,8 @@ object Trace {
   var trace: Option[Identifier] = None
   var proof: Option[Identifier] = None
   var mkTest: Option[Identifier] = None
+
+  var sublemmas: Map[Identifier, List[Identifier]] = Map()
 
   var cnt = 0
 
@@ -769,6 +743,7 @@ object Trace {
     } 
   }
 
+  // TODO cleaning
   def nextIteration[T <: AbstractReport[T]](report: AbstractReport[T])(implicit context: inox.Context): Boolean = {
     counter = counter + 1
     if(counter % 10 == 0) printEverything
@@ -779,7 +754,15 @@ object Trace {
           reportError(pair)
         }
         else if (report.hasUnknown(f) || report.hasUnknown(p) || report.hasUnknown(t)) reportUnknown
-        else reportValid
+        else {
+          println("report valid")
+          println("lemma")
+          println(t)
+          println("sublemmas validity: sublemmas and then if there are no errors nor unknowns")
+          println(sublemmas(t))
+          println(sublemmas(t).forall(s => !report.hasError(s) && !report.hasUnknown(s)))
+          reportValid
+        }
       }
       case (Some(f), _, Some(t)) => {
         if (report.hasError(f) || report.hasError(t)) {
