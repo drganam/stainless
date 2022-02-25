@@ -209,22 +209,31 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
       // f1Calls: functions that are called from f1
       // f2Calls: functions that are called from f2
-      // returns a list of sublemmas for each candidate pair (same signature + name?)
-      def makeSublemmas(fd1: s.FunDef, fd2: s.FunDef): List[(s.FunDef, s.FunDef, s.FunDef)] = {
+      // returns a list of sublemmas for each candidate pair (same signature + name?) + replacement map
+      //ret._1 sublemma + its sublemmas and replacement
+      //ret._2 and ret._3 map for replacement
+      def makeSublemmas(fd1: s.FunDef, fd2: s.FunDef): List[(List[s.FunDef], s.FunDef, s.FunDef)] = {
         val f1Calls = getFunCalls(fd1)
         val f2Calls = getFunCalls(fd2)
         for (
           m <- f1Calls;
           f <- f2Calls
           if (m != f && m.params.size == f.params.size && m.returnType == f.returnType)
-        ) yield (equivalenceChek(m, f).head, m, f)
+        ) yield (equivalenceChek(m, f), m, f) 
       }
+
+
       
+     // call to eqCheck *12
+     // call to makeSublemmas
+     // call to eqCheck +12 returns (+12lemma, idlemma, replacement) //problem: keep idlemma + replacement
+
+
       def equivalenceChek(fd1: s.FunDef, fd2: s.FunDef): List[s.FunDef] = {
         val freshId = FreshIdentifier(CheckFilter.fixedFullName(fd1.id) + "$" + CheckFilter.fixedFullName(fd2.id))
         val eqLemma = exprOps.freshenSignature(fd1).copy(id = freshId)
 
-        val sublemmas = makeSublemmas(fd1, fd2)
+        val sublemmas = makeSublemmas(fd1, fd2) 
 
         println("list of sublemmas:")
         println(sublemmas)
@@ -280,7 +289,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
         println("lemma's id before the transformation:")
         println(eqLemma.id)
 
-        Trace.sublemmas = Trace.sublemmas ++ Map(eqLemma.id -> sublemmas.map(_._1).map(_.id))
+        
 
 
         // return the @traceInduct annotated eqLemma
@@ -290,7 +299,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
           fullBody = BodyWithSpecs(withPre).withSpec(post).reconstructed,
           flags = Seq(s.Derived(Some(fd1.id)), s.Annotation("traceInduct",List(StringLiteral(fd1.id.name)))),
           returnType = s.UnitType()
-        ).copiedFrom(eqLemma) :: sublemmas.map(_._1)) ++ replacement
+        ).copiedFrom(eqLemma) :: sublemmas.flatMap(_._1)) ++ replacement
       }
 
       (Trace.getModel, Trace.getFunction) match {
@@ -304,13 +313,19 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
               //else if (symbols.isRecursive(model)) List(equivalenceChek(m, f))
               else if (symbols.isRecursive(model) || !symbols.isRecursive(function)) {
                 val res = equivalenceChek(m, f)
-                if(!res.isEmpty) Trace.setTrace(res.head.id)
+                if(!res.isEmpty) {
+                  Trace.setTrace(res.head.id)
+                  Trace.sublemmas = res.tail.map(_.id)
+                }
                 res
               }
               else {
                 Trace.funFirst = true
                 val res = equivalenceChek(f, m)
-                if(!res.isEmpty) Trace.setTrace(res.head.id)
+                if(!res.isEmpty) {
+                  Trace.setTrace(res.head.id)
+                  Trace.sublemmas = res.tail.map(_.id)
+                }                
                 res
               }
             }
@@ -395,7 +410,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
           println("lemma:")
           println(lemma.id)
           println("sublemmas of the lemma at the end:")
-          println(Trace.sublemmas(lemma.id))
+          println(Trace.sublemmas)
 
 
           //Trace.setTrace(lemma.id)
@@ -406,6 +421,9 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
             case Some(t) if(t == lemma.id) => Trace.setProof(helper.id)
             case _ => 
           }
+
+          if(Trace.sublemmas.contains(lemma.id)) Trace.sublemmas = helper.id :: Trace.sublemmas
+
 
           List(helper, lemma)
         }
@@ -617,10 +635,10 @@ object Trace {
   var function: Option[Identifier] = None
   var norm: Option[Identifier] = None
   var trace: Option[Identifier] = None
-  var proof: Option[Identifier] = None
+  var proof: Option[Identifier] = None //TODO idea: store it within sublemmas
   var mkTest: Option[Identifier] = None
 
-  var sublemmas: Map[Identifier, List[Identifier]] = Map()
+  var sublemmas: List[Identifier] = List()
 
   var cnt = 0
 
@@ -662,6 +680,7 @@ object Trace {
   def getMkTest = mkTest
 
   def setTrace(t: Identifier) = {
+    proof = None // TODO this is a recent change
     trace = Some(t)
     state(function.get).prevModels = model.get :: state(function.get).prevModels
   }
@@ -676,6 +695,7 @@ object Trace {
   def resetTrace = {
     trace = None
     proof = None
+    sublemmas = List()
   }
 
   //iterate model for the current function
@@ -755,7 +775,7 @@ object Trace {
     } 
   }
 
-  // TODO cleaning
+  // TODO cleaning + check validity of sublemmas
   def nextIteration[T <: AbstractReport[T]](report: AbstractReport[T])(implicit context: inox.Context): Boolean = {
     counter = counter + 1
     if(counter % 10 == 0) printEverything
@@ -777,8 +797,8 @@ object Trace {
           println("lemma")
           println(t)
           println("sublemmas validity: sublemmas and then if there are no errors nor unknowns")
-          println(sublemmas(t))
-          println(sublemmas(t).forall(s => !report.hasError(s) && !report.hasUnknown(s)))
+          println(sublemmas)
+          println(sublemmas.forall(s => !report.hasError(s) && !report.hasUnknown(s)))
           reportValid
         }
       }
