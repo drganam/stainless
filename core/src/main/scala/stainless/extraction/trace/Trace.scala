@@ -302,10 +302,16 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
             if(evalCheck(f, m)) {
               if(Trace.funFirst) equivalenceChek(f, m)
               //else if (symbols.isRecursive(model)) List(equivalenceChek(m, f))
-              else if (symbols.isRecursive(model) || !symbols.isRecursive(function)) equivalenceChek(m, f)
+              else if (symbols.isRecursive(model) || !symbols.isRecursive(function)) {
+                val res = equivalenceChek(m, f)
+                if(!res.isEmpty) Trace.setTrace(res.head.id)
+                res
+              }
               else {
                 Trace.funFirst = true
-                equivalenceChek(f, m)
+                val res = equivalenceChek(f, m)
+                if(!res.isEmpty) Trace.setTrace(res.head.id)
+                res
               }
             }
             else {
@@ -392,10 +398,14 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
           println(Trace.sublemmas(lemma.id))
 
 
-          Trace.setTrace(lemma.id)
+          //Trace.setTrace(lemma.id)
+          //Trace.setProof(helper.id)
           println("lemma")
           println(lemma.fullBody)
-          Trace.setProof(helper.id)
+          Trace.getTrace match {
+            case Some(t) if(t == lemma.id) => Trace.setProof(helper.id)
+            case _ => 
+          }
 
           List(helper, lemma)
         }
@@ -403,7 +413,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
           val lemma = fd.copy(
             flags = (s.Derived(Some(fd.id)) +: (fd.flags.filterNot(f => f.name == "traceInduct")))
           ).copiedFrom(fd).setPos(fd.getPos)
-          Trace.setTrace(lemma.id)
+          //Trace.setTrace(lemma.id)
           List(lemma)
         }
       }
@@ -656,6 +666,8 @@ object Trace {
     state(function.get).prevModels = model.get :: state(function.get).prevModels
   }
 
+  def getTrace = trace
+
   def setProof(p: Identifier) = proof = Some(p)
 
   def setNorm(n: Option[Identifier]) = norm = n
@@ -747,6 +759,12 @@ object Trace {
   def nextIteration[T <: AbstractReport[T]](report: AbstractReport[T])(implicit context: inox.Context): Boolean = {
     counter = counter + 1
     if(counter % 10 == 0) printEverything
+
+     println("lemma form nextIteration loop lemma form nextIteration loop lemma form nextIteration loop")
+     println(trace)
+     //println("sublemmas validity: sublemmas and then if there are no errors nor unknowns")
+      //println(sublemmas(t))
+
     (function, proof, trace) match {
       case (Some(f), Some(p), Some(t)) => {
         if (report.hasError(f) || report.hasError(p) || report.hasError(t)) {
