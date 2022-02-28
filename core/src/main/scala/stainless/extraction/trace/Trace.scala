@@ -219,7 +219,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
           m <- f1Calls;
           f <- f2Calls
           if (m != f && m.params.size == f.params.size && m.returnType == f.returnType)
-        ) yield (equivalenceChek(m, f), m, f) 
+        ) yield (equivalenceCheck(m, f, true), m, f) 
       }
 
 
@@ -229,11 +229,11 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
      // call to eqCheck +12 returns (+12lemma, idlemma, replacement) //problem: keep idlemma + replacement
 
 
-      def equivalenceChek(fd1: s.FunDef, fd2: s.FunDef): List[s.FunDef] = {
+      def equivalenceCheck(fd1: s.FunDef, fd2: s.FunDef, sublemmaGeneration: Boolean): List[s.FunDef] = {
         val freshId = FreshIdentifier(CheckFilter.fixedFullName(fd1.id) + "$" + CheckFilter.fixedFullName(fd2.id))
         val eqLemma = exprOps.freshenSignature(fd1).copy(id = freshId)
 
-        val sublemmas = makeSublemmas(fd1, fd2) 
+        val sublemmas = if (sublemmaGeneration) makeSublemmas(fd1, fd2) else List() 
 
         println("list of sublemmas:")
         println(sublemmas)
@@ -307,35 +307,31 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
           val m = symbols.functions(model)
           val f = symbols.functions(function)
 
-          if (m.params.size == f.params.size) {
-            if(evalCheck(f, m)) {
-              if(Trace.funFirst) equivalenceChek(f, m)
-              //else if (symbols.isRecursive(model)) List(equivalenceChek(m, f))
-              else if (symbols.isRecursive(model) || !symbols.isRecursive(function)) {
-                val res = equivalenceChek(m, f)
-                if(!res.isEmpty) {
-                  Trace.setTrace(res.head.id)
-                  Trace.sublemmas = res.tail.map(_.id)
-                }
-                res
-              }
-              else {
-                Trace.funFirst = true
-                val res = equivalenceChek(f, m)
-                if(!res.isEmpty) {
-                  Trace.setTrace(res.head.id)
-                  Trace.sublemmas = res.tail.map(_.id)
-                }                
-                res
-              }
+          if (m.params.size == f.params.size && evalCheck(f, m)) {
+            val res: List[s.FunDef] = Trace.eqCheckState match {
+              case Trace.EqCheckState.ModelFirst => 
+                equivalenceCheck(m, f, false)
+              case Trace.EqCheckState.FunFirst =>
+                equivalenceCheck(f, m, false)
+              case Trace.EqCheckState.ModelFirstWithSublemmas =>
+                equivalenceCheck(m, f, true)
+              case Trace.EqCheckState.FunFirstWithSublemmas =>
+                equivalenceCheck(f, m, true)
             }
-            else {
-              Trace.resetTrace //TODO make sure the loop is ok; maybe store counterexample
-              List()
-            }
+
+            Trace.nextEqCheckState
+            
+            res match {
+              case t::sublemmas =>
+                Trace.setTrace(t.id)
+                Trace.sublemmas = sublemmas.map(_.id)
+              case _ => 
+            }                
+            res
           }
           else {
             Trace.resetTrace
+            Trace.resetEqCheckState
             List()
           }
         }
@@ -640,6 +636,32 @@ object Trace {
 
   var sublemmas: List[Identifier] = List()
 
+  var sublemmaGeneration: Boolean = false
+
+  object EqCheckState extends Enumeration {
+    type EqCheckState = Value
+    val ModelFirst, FunFirst, ModelFirstWithSublemmas, FunFirstWithSublemmas = Value
+  }
+
+  var eqCheckState = EqCheckState.ModelFirst // skip if !symbols.isRecursive(model) && symbols.isRecursive(function) ?
+
+  def nextEqCheckState: Unit = eqCheckState = eqCheckState match {
+    case EqCheckState.ModelFirst => EqCheckState.FunFirst
+    case EqCheckState.FunFirst => EqCheckState.ModelFirstWithSublemmas //  skip if there are no sublemmas ?
+    case EqCheckState.ModelFirstWithSublemmas => EqCheckState.ModelFirst  //EqCheckState.FunFirstWithSublemmas //  skip if there are no sublemmas ?
+    case EqCheckState.FunFirstWithSublemmas => EqCheckState.ModelFirst 
+  }
+  
+  def resetEqCheckState = eqCheckState = EqCheckState.ModelFirst
+  def isFinalEqCheckState = eqCheckState == EqCheckState.ModelFirstWithSublemmas
+
+  def funFirst = eqCheckState == EqCheckState.FunFirst || eqCheckState == EqCheckState.FunFirstWithSublemmas
+
+
+          //btw if any of the sublemmas is wrong, only classify as timeout
+          //if all the sublemmas are ok but the main is wrong, classify as wrong
+
+
   var cnt = 0
 
   def apply(ts: Trees, tt: termination.Trees)(implicit ctx: inox.Context): ExtractionPipeline {
@@ -770,7 +792,8 @@ object Trace {
           val counterexample = counterex.vars
           val existing = false
           val fromEval = false
-          val fromFunction = function.get == fun || funFirst
+          val fromFunction = function.get == fun || funFirst //TODO problem: the state already changed right after equivalence check
+                                                            // so this is not representative funFirst
       })
     } 
   }
@@ -785,11 +808,12 @@ object Trace {
      //println("sublemmas validity: sublemmas and then if there are no errors nor unknowns")
       //println(sublemmas(t))
 
+    val sublemmasAreValid = sublemmas.forall(s => !report.hasError(s) && !report.hasUnknown(s))
+
     (function, proof, trace) match {
       case (Some(f), Some(p), Some(t)) => {
         if (report.hasError(f) || report.hasError(p) || report.hasError(t)) {
-          //counterexample = report.counterexample
-          reportError(pair)
+          reportError(pair) //TODO only if not in the sublemma state
         }
         else if (report.hasUnknown(f) || report.hasUnknown(p) || report.hasUnknown(t)) reportUnknown
         else {
@@ -799,16 +823,16 @@ object Trace {
           println("sublemmas validity: sublemmas and then if there are no errors nor unknowns")
           println(sublemmas)
           println(sublemmas.forall(s => !report.hasError(s) && !report.hasUnknown(s)))
-          reportValid
+
+          if (sublemmasAreValid) reportValid
+          else reportUnknown
         }
       }
       case (Some(f), _, Some(t)) => {
-        if (report.hasError(f) || report.hasError(t)) {
-          //counterexample = report.counterexample
-          reportError(pair)
-        }
+        if (report.hasError(f) || report.hasError(t)) reportError(pair)
         else if (report.hasUnknown(f) || report.hasUnknown(t)) reportUnknown
-        else reportValid
+        else if (sublemmasAreValid) reportValid
+        else reportUnknown
       }
       case (Some(f), _, _) if(state(f).counterexample != None) =>
         reportError(state(f).counterexample)
@@ -838,7 +862,7 @@ object Trace {
   }
 
   private def reportError[T](counterexample: Option[Pair]) = {
-    funFirst = false
+    resetEqCheckState
     errors = function.get::errors //store counter-example
     unknowns = unknowns.filterNot(elem => elem == function.get)
     state(function.get).status = Errorneus
@@ -847,12 +871,12 @@ object Trace {
     nextFunction
   }
 
-  var funFirst: Boolean = false
-
+  
+  //if there is a new state go there, otherwise report as unknown
   private def reportUnknown = {
     allModels = allModels.updated(model.get, allModels(model.get)-1)
-    if(funFirst){
-      funFirst = false
+    if (isFinalEqCheckState) {
+      resetEqCheckState
       nextModel
       if (model == None) {
         unknowns = function.get::unknowns
@@ -860,12 +884,12 @@ object Trace {
       }
     }
     else {
-      funFirst = true
+      //nextEqCheckState
     }
   }
 
   private def reportValid = {
-    funFirst = false
+    resetEqCheckState
     if (!allModels.keys.toList.contains(function.get)) {
       state(function.get).status = Valid
       state(function.get).path = model.get +: state(model.get).path
@@ -887,7 +911,7 @@ object Trace {
   }
 
   private def reportWrong = {
-    funFirst = false
+    resetEqCheckState
     if (function != None) wrong = function.get::wrong
     unknowns = unknowns.filterNot(elem => elem == function.get)
     resetTrace
