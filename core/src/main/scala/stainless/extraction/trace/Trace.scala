@@ -44,6 +44,14 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
     import symbols._
     import exprOps._
 
+    def checkArgs(model: Identifier, norm: Identifier) = {
+      val m = symbols.functions(model)
+      val n = symbols.functions(norm)
+
+      n.params.size >= 1 && n.params.init.size == m.params.size && n.tparams.size == m.tparams.size &&
+      n.params.zip(n.params).forall(arg => arg._1.tpe == arg._2.tpe)
+    }
+
     if (Trace.getModels.isEmpty) {
       val models = symbols.functions.values.toList.filter(elem => !elem.flags.exists(_.name == "library") &&
         isModel(elem.id)).map(elem => elem.id)
@@ -60,13 +68,6 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
     if (Trace.getNorm.isEmpty) {
       val normOpt = symbols.functions.values.toList.find(elem => isNorm(elem.id)).map(elem => elem.id)
-
-      def checkArgs(model: Identifier, norm: Identifier) = {
-        val m = symbols.functions(model)
-        val n = symbols.functions(norm)
-
-        n.params.size >= 1 && n.params.init.size == m.params.size && n.tparams.size == m.tparams.size
-      }
 
       (Trace.getModel, normOpt) match {
         case (Some(model), Some(norm)) if checkArgs(model, norm) =>
@@ -218,7 +219,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
         for (
           m <- f1Calls;
           f <- f2Calls
-          if (m != f && m.params.size == f.params.size && m.returnType == f.returnType)
+          if (m != f && m.params.size == f.params.size && checkArgs(m.id, f.id) && m.returnType == f.returnType) // TODO  && same arg types, names ...
         ) yield (equivalenceCheck(m, f, true), m, f) 
       }
 
@@ -271,11 +272,12 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
           case h::t => s.FunctionInvocation(h.id, newParamTps, newParamVars)
         }
 
+
         val (normFun1, normFun2) = Trace.getNorm match {
-          case Some(n) => (
+          case Some(n) if (checkArgs(fun1.id, n)) => ( //normalization does not work for sublemmas
             s.FunctionInvocation(n, newParamTps, newParamVars :+ fun1), 
             s.FunctionInvocation(n, newParamTps, newParamVars :+ fun2))
-          case None => (fun1, fun2)
+          case _ => (fun1, fun2)
         }
 
         val res = s.ValDef.fresh("res", s.UnitType())
@@ -307,6 +309,8 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
           val m = symbols.functions(model)
           val f = symbols.functions(function)
 
+          Trace.nextEqCheckState
+
           if (m.params.size == f.params.size && evalCheck(f, m)) {
             val res: List[s.FunDef] = Trace.eqCheckState match {
               case Trace.EqCheckState.ModelFirst => 
@@ -315,12 +319,8 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
                 equivalenceCheck(f, m, false)
               case Trace.EqCheckState.ModelFirstWithSublemmas =>
                 equivalenceCheck(m, f, true)
-              case Trace.EqCheckState.FunFirstWithSublemmas =>
-                equivalenceCheck(f, m, true)
             }
 
-            Trace.nextEqCheckState
-            
             res match {
               case t::sublemmas =>
                 Trace.setTrace(t.id)
@@ -414,9 +414,12 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
           println("lemma")
           println(lemma.fullBody)
           Trace.getTrace match {
-            case Some(t) if(t == lemma.id) => Trace.setProof(helper.id)
+            case Some(t) if(t == lemma.id) =>
+              println(" alive") 
+              Trace.setProof(helper.id)
             case _ => 
           }
+          println("still alive")
 
           if(Trace.sublemmas.contains(lemma.id)) Trace.sublemmas = helper.id :: Trace.sublemmas
 
@@ -640,22 +643,22 @@ object Trace {
 
   object EqCheckState extends Enumeration {
     type EqCheckState = Value
-    val ModelFirst, FunFirst, ModelFirstWithSublemmas, FunFirstWithSublemmas = Value
+    val InitState, ModelFirst, FunFirst, ModelFirstWithSublemmas = Value
   }
 
-  var eqCheckState = EqCheckState.ModelFirst // skip if !symbols.isRecursive(model) && symbols.isRecursive(function) ?
+  var eqCheckState = EqCheckState.InitState // skip if !symbols.isRecursive(model) && symbols.isRecursive(function) ?
 
   def nextEqCheckState: Unit = eqCheckState = eqCheckState match {
+    case EqCheckState.InitState => EqCheckState.ModelFirst
     case EqCheckState.ModelFirst => EqCheckState.FunFirst
     case EqCheckState.FunFirst => EqCheckState.ModelFirstWithSublemmas //  skip if there are no sublemmas ?
-    case EqCheckState.ModelFirstWithSublemmas => EqCheckState.ModelFirst  //EqCheckState.FunFirstWithSublemmas //  skip if there are no sublemmas ?
-    case EqCheckState.FunFirstWithSublemmas => EqCheckState.ModelFirst 
+    case EqCheckState.ModelFirstWithSublemmas => EqCheckState.ModelFirst  //skip if there are no sublemmas ?
   }
   
-  def resetEqCheckState = eqCheckState = EqCheckState.ModelFirst
+  def resetEqCheckState = eqCheckState = EqCheckState.InitState
   def isFinalEqCheckState = eqCheckState == EqCheckState.ModelFirstWithSublemmas
 
-  def funFirst = eqCheckState == EqCheckState.FunFirst || eqCheckState == EqCheckState.FunFirstWithSublemmas
+  def funFirst = eqCheckState == EqCheckState.FunFirst
 
 
           //btw if any of the sublemmas is wrong, only classify as timeout
@@ -742,6 +745,9 @@ object Trace {
         val n = 5
         tmpModels = allModels.toList.sortBy(m => -m._2).map(_._1).filterNot(state(x).prevModels.contains).take(n)
 
+        //case without priorities
+        //tmpModels = allModels.toList.map(_._1).filterNot(state(x).prevModels.contains).take(n)
+
         if(tmpModels.isEmpty) tmpModels = allModels.keys.take(1).toList //todo fix to skip this function
         nextModel
         tmpFunctions = xs
@@ -792,8 +798,7 @@ object Trace {
           val counterexample = counterex.vars
           val existing = false
           val fromEval = false
-          val fromFunction = function.get == fun || funFirst //TODO problem: the state already changed right after equivalence check
-                                                            // so this is not representative funFirst
+          val fromFunction = function.get == fun || funFirst
       })
     } 
   }
