@@ -218,16 +218,10 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
         val f2Calls = getFunCalls(fd2)
         for (
           m <- f1Calls;
-          f <- f2Calls
-          if (m != f && m.params.size == f.params.size && checkArgs(m.id, f.id) && m.returnType == f.returnType) // TODO  && same arg types, names ...
+          f <- f2Calls;
+          if (m != f && m.params.size == f.params.size) // && checkArgs(m.id, f.id) ? TODO  && same arg types, names ...
         ) yield (equivalenceCheck(m, f, true), m, f) 
       }
-
-
-      
-     // call to eqCheck *12
-     // call to makeSublemmas
-     // call to eqCheck +12 returns (+12lemma, idlemma, replacement) //problem: keep idlemma + replacement
 
 
       def equivalenceCheck(fd1: s.FunDef, fd2: s.FunDef, sublemmaGeneration: Boolean): List[s.FunDef] = {
