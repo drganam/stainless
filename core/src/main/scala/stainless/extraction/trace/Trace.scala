@@ -44,12 +44,12 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
     import symbols._
     import exprOps._
 
-    def checkArgs(model: Identifier, norm: Identifier) = {
+    def checkArgsNorm(model: Identifier, norm: Identifier) = {
       val m = symbols.functions(model)
       val n = symbols.functions(norm)
 
       n.params.size >= 1 && n.params.init.size == m.params.size && n.tparams.size == m.tparams.size &&
-      n.params.zip(n.params).forall(arg => arg._1.tpe == arg._2.tpe)
+      n.params.init.zip(m.params).forall(arg => arg._1.tpe == arg._2.tpe)
     }
 
     if (Trace.getModels.isEmpty) {
@@ -70,7 +70,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
       val normOpt = symbols.functions.values.toList.find(elem => isNorm(elem.id)).map(elem => elem.id)
 
       (Trace.getModel, normOpt) match {
-        case (Some(model), Some(norm)) if checkArgs(model, norm) =>
+        case (Some(model), Some(norm)) if checkArgsNorm(model, norm) =>
           Trace.setNorm(normOpt)
         case _ =>
       }
@@ -85,7 +85,6 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
         //improvement: there could be functions with same counterexample values; use distinct mappings;
         val counterexamples = (Trace.state.values zip Trace.state.keys).map(elem => (elem._1.counterexample, elem._2)).filter(!_._1.isEmpty).map(elem => (elem._1.get, elem._2)).filterNot(_._1.existing).filterNot(_._1.counterexample.isEmpty).filterNot(_._1.fromEval)
-
 
         def passesAllNewTests = counterexamples.forall(counterexample => {
           val pair = counterexample._1
@@ -119,30 +118,27 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
             //.get breaks if parameter names are not the same 
             //fix: store the info wheter the counterexample comes from the model or the function
             try {
-            val invocation = evaluator.program.trees.FunctionInvocation(f.id, Seq(), ref.params.map(vd => 
-              pair.counterexample.collectFirst({ case (k, v) if(k.id.name == vd.id.name) => v }).get))
+              val invocation = evaluator.program.trees.FunctionInvocation(f.id, Seq(), ref.params.map(vd => 
+                pair.counterexample.collectFirst({ case (k, v) if(k.id.name == vd.id.name) => v }).get))
 
-            val invocationM = evaluator.program.trees.FunctionInvocation(m.id, Seq(), ref.params.map(vd => 
-              pair.counterexample.collectFirst({ case (k, v) if(k.id.name == vd.id.name) => v }).get))
+              val invocationM = evaluator.program.trees.FunctionInvocation(m.id, Seq(), ref.params.map(vd => 
+                pair.counterexample.collectFirst({ case (k, v) if(k.id.name == vd.id.name) => v }).get))
 
-             
-            (evaluator.eval(invocation), evaluator.eval(invocationM)) match {
-              case (inox.evaluators.EvaluationResults.Successful(output), inox.evaluators.EvaluationResults.Successful(expected)) => {
-                if(output != expected) Trace.storeCounterexample(Some(new Trace.Pair {
-                  val prog = pair.prog
-                  val counterexample = pair.counterexample.asInstanceOf[Map[this.prog.trees.ValDef,this.prog.trees.Expr]]
-                  val existing = false
-                  val fromEval = true
-                  val fromFunction = pair.fromFunction
-                } ))
-                output == expected
+              (evaluator.eval(invocation), evaluator.eval(invocationM)) match {
+                case (inox.evaluators.EvaluationResults.Successful(output), inox.evaluators.EvaluationResults.Successful(expected)) => {
+                  if(output != expected) Trace.storeCounterexample(Some(new Trace.Counterexample {
+                    val prog = pair.prog
+                    val counterexample = pair.counterexample.asInstanceOf[Map[this.prog.trees.ValDef,this.prog.trees.Expr]]
+                    val existing = false
+                    val fromEval = true
+                    val fromFunction = pair.fromFunction
+                  } ))
+                  output == expected
+                }
+                case _ =>  true
               }
-              case _ => 
-                true
-            }
-            }catch {
-              case e => 
-                true
+            } catch {
+              case e => true
             }
 
           }
@@ -172,7 +168,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
                       case inox.evaluators.EvaluationResults.Successful(output) => {
                         val counterexample = (f.params zip paramVars).toMap
                         if(output != res) {
-                          val p = Trace.a(inox.Program(self.s)(symbols))(counterexample)
+                          val p = Trace.toCounterexample(inox.Program(self.s)(symbols))(counterexample)
                           Trace.storeCounterexample(p)
                         }
                         output == res
@@ -208,21 +204,25 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
         funs.distinct.map(symbols.functions(_))
       }
 
+      def checkArgs(f1: FunDef, f2: FunDef) = {
+        f1.params.size == f2.params.size && f1.tparams.size == f2.tparams.size &&
+        f1.params.zip(f2.params).forall(arg => arg._1.tpe == arg._2.tpe)
+      }
+
       // f1Calls: functions that are called from f1
       // f2Calls: functions that are called from f2
       // returns a list of sublemmas for each candidate pair (same signature + name?) + replacement map
-      //ret._1 sublemma + its sublemmas and replacement
-      //ret._2 and ret._3 map for replacement
+      // res._1 sublemma + its sublemmas and replacement
+      // res._2 and res._3 map for replacement
       def makeSublemmas(fd1: s.FunDef, fd2: s.FunDef): List[(List[s.FunDef], s.FunDef, s.FunDef)] = {
         val f1Calls = getFunCalls(fd1)
         val f2Calls = getFunCalls(fd2)
         for (
           m <- f1Calls;
           f <- f2Calls;
-          if (m != f && m.params.size == f.params.size) // && checkArgs(m.id, f.id) ? TODO  && same arg types, names ...
+          if (m != f && checkArgs(m, f)) // TODO  && same ret type, names ..
         ) yield (equivalenceCheck(m, f, true), m, f) 
       }
-
 
       def equivalenceCheck(fd1: s.FunDef, fd2: s.FunDef, sublemmaGeneration: Boolean): List[s.FunDef] = {
         val freshId = FreshIdentifier(CheckFilter.fixedFullName(fd1.id) + "$" + CheckFilter.fixedFullName(fd2.id))
@@ -266,9 +266,8 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
           case h::t => s.FunctionInvocation(h.id, newParamTps, newParamVars)
         }
 
-
         val (normFun1, normFun2) = Trace.getNorm match {
-          case Some(n) if (checkArgs(fun1.id, n)) => ( //normalization does not work for sublemmas
+          case Some(n) if (checkArgsNorm(fun1.id, n)) => (
             s.FunctionInvocation(n, newParamTps, newParamVars :+ fun1), 
             s.FunctionInvocation(n, newParamTps, newParamVars :+ fun2))
           case _ => (fun1, fun2)
@@ -276,16 +275,10 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
         val res = s.ValDef.fresh("res", s.UnitType())
         val cond = s.Equals(normFun1, normFun2) 
-
         val post = Postcondition(Lambda(Seq(res), cond)) 
 
         val body = s.UnitLiteral()
         val withPre = exprOps.reconstructSpecs(pre, Some(body), s.UnitType())
-
-        println("lemma's id before the transformation:")
-        println(eqLemma.id)
-
-        
 
 
         // return the @traceInduct annotated eqLemma
@@ -329,13 +322,9 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
             List()
           }
         }
-        case _ => {
-          List()
-        }
+        case _ => List()
       }
     }
-
-    //println(generateEqLemma)
 
     val generatedFunctions = generateEqLemma
     val functions = generatedFunctions ++ symbols.functions.values.toList
@@ -365,14 +354,8 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
       funInv match {
         case Some(finv) => {
 
-          //TODO consider MAKING THE SUBLEMMA PART HERE
-          // benefits: works for @traceInduct when not in batched mode
-          // + easier to set it in the Trace object
-          // downsides: this part is not super recursive, not sure about going one level deeper
-
           // make a helper lemma:
           val helper = inductPattern(symbols, symbols.functions(finv.id), fd, "indProof", Map()).setPos(fd.getPos)
-          //println(helper)
 
           val returnType = typeOps.instantiateType(helper.returnType, (helper.typeArgs zip fd.typeArgs).toMap)
 
@@ -387,44 +370,25 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
             flags = (s.Derived(Some(fd.id)) +: s.Derived(Some(finv.id)) +: (fd.flags.filterNot(f => f.name == "traceInduct"))).distinct
           ).copiedFrom(fd).setPos(fd.getPos)
 
-          // problem: sublemmas shouldn't be set with Trace.setTrace
-          // solution: annotate them as subInduct instead of traceInduct ?
-
-          // broken: user's @traceInduct functions get in the way
-          // solution: another annotation for generated equivalence lemmas OR ---> JUST DO Trace.setTrace from the other part ???
-          //                                                                       problematic when generating 2 lemmas (ref first, then stud) ???
-          //           keep @traceInduct for user defined lemmas
-          //           also use @traceInduct for sublemmas
-
-
           println("lemma:")
           println(lemma.id)
           println("sublemmas of the lemma at the end:")
           println(Trace.sublemmas)
 
-
-          //Trace.setTrace(lemma.id)
-          //Trace.setProof(helper.id)
-          println("lemma")
-          println(lemma.fullBody)
           Trace.getTrace match {
-            case Some(t) if(t == lemma.id) =>
-              println(" alive") 
-              Trace.setProof(helper.id)
+            case Some(t) if(t == lemma.id) => Trace.setProof(helper.id)
             case _ => 
           }
-          println("still alive")
 
-          if(Trace.sublemmas.contains(lemma.id)) Trace.sublemmas = helper.id :: Trace.sublemmas
-
+          if (Trace.sublemmas.contains(lemma.id)) Trace.sublemmas = helper.id :: Trace.sublemmas
 
           List(helper, lemma)
         }
-        case None => {
+
+        case None => { // there are no recursive calls - no model function
           val lemma = fd.copy(
             flags = (s.Derived(Some(fd.id)) +: (fd.flags.filterNot(f => f.name == "traceInduct")))
           ).copiedFrom(fd).setPos(fd.getPos)
-          //Trace.setTrace(lemma.id)
           List(lemma)
         }
       }
@@ -439,6 +403,10 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
     registerFunctions(extracted, inductFuns.map(fun => identity.transform(fun)))
   }
 
+  // make a copy of the 'model'
+  // combine the specs of the 'lemma'
+  // 'suffix': only used for naming
+  // 'replacement': function calls that are supposed to be replaced according to given mapping
   def inductPattern(symbols: s.Symbols, model: FunDef, lemma: FunDef, suffix: String, replacement: Map[Identifier, Identifier]) = {
     import symbols._
     import exprOps._
@@ -500,7 +468,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
       newId: Identifier,
       tsubst: Map[Identifier, Type],
       vsubst: Map[Identifier, Expr],
-      replacement: Map[Identifier, Identifier]
+      replacement: Map[Identifier, Identifier] // replace function calls
     ) extends s.SelfTreeTransformer {
 
       override def transform(expr: s.Expr): t.Expr = expr match {
@@ -559,64 +527,9 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
 object Trace {
   var clusters: Map[Identifier, List[Identifier]] = Map()
-  var errors: List[Identifier] = List()
-  var unknowns: List[Identifier] = List()
-  var wrong: List[Identifier] = List() //bad signature
-
-  object Status extends Enumeration {
-    type Status = Value
-    val Unchecked, Valid, Unknown, Errorneus, Wrong = Value
-  }
-
-  import Status._
-
-  case class State(var status: Status, var path: List[Identifier], var counterexample: Option[Pair], var prevModels: List[Identifier])
-
-  var state: Map[Identifier, State] = Map()
-
-  def optionsError(implicit ctx: inox.Context): Boolean = 
-    !ctx.options.findOptionOrDefault(frontend.optBatchedProgram) && 
-    (!ctx.options.findOptionOrDefault(optModels).isEmpty || !ctx.options.findOptionOrDefault(optCompareFuns).isEmpty)
-      
-  def printEverything(implicit ctx: inox.Context) = {
-    import ctx.{ reporter, timers }
-    println("rank list")
-    println(allModels)
-    println(allModels.toList.sortBy(m => -m._2).map(_._1).take(5).map(CheckFilter.fixedFullName))
-    if(!clusters.isEmpty || !errors.isEmpty || !unknowns.isEmpty || !wrong.isEmpty) {
-      reporter.info(s"Printing equivalence checking results:")  
-      allModels.keys.foreach(model => if (!clusters(model).isEmpty) {
-        val l = clusters(model).map(CheckFilter.fixedFullName).mkString(", ")
-        val m = CheckFilter.fixedFullName(model)
-        reporter.info(s"List of functions that are equivalent to model $m: $l")
-      })
-
-      val errorneous = errors.map(CheckFilter.fixedFullName).mkString(", ")
-      reporter.info(s"List of erroneous functions: $errorneous")
-      val timeouts = unknowns.map(CheckFilter.fixedFullName).mkString(", ")
-      reporter.info(s"List of timed-out functions: $timeouts")
-      val wrongs = wrong.map(CheckFilter.fixedFullName).mkString(", ")
-      reporter.info(s"List of wrong functions: $wrongs")
-
-      reporter.info(s"Printing the final state:")  
-      allFunctions.foreach(f => {
-        val l = state(f).path.map(CheckFilter.fixedFullName).mkString(", ")
-        val m = CheckFilter.fixedFullName(f)
-        reporter.info(s"Path for the function $m: $l")
-      })
-      /*
-      allFunctions.foreach(f => {
-        val c = state(f).counterexample match {
-          case None => None
-          case Some(co) => (co.counterexample, co.fromEval)
-        }
-        val m = CheckFilter.fixedFullName(f)
-        reporter.info(s"Counterexample for the function $m: $c")
-      })
-      */
-    }
-
-  }
+  var errors: List[Identifier] = List()     // counter-example is found
+  var unknowns: List[Identifier] = List()   // timeout
+  var wrong: List[Identifier] = List()      // bad signature
 
   var allModels: Map[Identifier, Int] = Map()
   var tmpModels: List[Identifier] = List()
@@ -628,12 +541,23 @@ object Trace {
   var function: Option[Identifier] = None
   var norm: Option[Identifier] = None
   var trace: Option[Identifier] = None
-  var proof: Option[Identifier] = None //TODO idea: store it within sublemmas
+  var proof: Option[Identifier] = None
+  var sublemmas: List[Identifier] = List()
   var mkTest: Option[Identifier] = None
 
-  var sublemmas: List[Identifier] = List()
-
   var sublemmaGeneration: Boolean = false
+
+  object Status extends Enumeration {
+    type Status = Value
+    val Unchecked, Valid, Unknown, Errorneus, Wrong = Value
+  }
+
+  import Status._
+
+  // TODO only store the previous one in the chain, not the full path
+  case class State(var status: Status, var path: List[Identifier], var counterexample: Option[Counterexample], var prevModels: List[Identifier])
+
+  var state: Map[Identifier, State] = Map()
 
   object EqCheckState extends Enumeration {
     type EqCheckState = Value
@@ -653,11 +577,6 @@ object Trace {
   def isFinalEqCheckState = eqCheckState == EqCheckState.ModelFirstWithSublemmas
 
   def funFirst = eqCheckState == EqCheckState.FunFirst
-
-
-          //btw if any of the sublemmas is wrong, only classify as timeout
-          //if all the sublemmas are ok but the main is wrong, classify as wrong
-
 
   var cnt = 0
 
@@ -685,18 +604,12 @@ object Trace {
   }
 
   def getModels = allModels
-
   def getFunctions = allFunctions
-
-  //model for the current iteration
-  def getModel = model
-
-  //function to check in the current iteration
-  def getFunction = function
-
+  def getModel = model        // model for the current iteration
+  def getFunction = function  // function to check in the current iteration
   def getNorm = norm
-
   def getMkTest = mkTest
+  def getTrace = trace
 
   def setTrace(t: Identifier) = {
     proof = None // TODO this is a recent change
@@ -704,21 +617,19 @@ object Trace {
     state(function.get).prevModels = model.get :: state(function.get).prevModels
   }
 
-  def getTrace = trace
-
-  def setProof(p: Identifier) = proof = Some(p)
-
-  def setNorm(n: Option[Identifier]) = norm = n
-  def setMkTest(t: Identifier) = mkTest = Some(t)
-
   def resetTrace = {
     trace = None
     proof = None
     sublemmas = List()
   }
 
-  //iterate model for the current function
-  def nextModel = tmpModels match {
+  def setProof(p: Identifier) = proof = Some(p)
+  def setNorm(n: Option[Identifier]) = norm = n
+  def setMkTest(t: Identifier) = mkTest = Some(t)
+
+  
+  // iterate model for the current function
+  private def nextModel = tmpModels match {
     case x::xs => { 
       tmpModels = xs
       model = Some(x)
@@ -726,8 +637,8 @@ object Trace {
     case Nil => model = None
   }
 
-  //iterate function to check; reset model
-  def nextFunction = {
+  // iterate function to check; reset model
+  private def nextFunction = {
     trace = None
     proof = None
       tmpFunctions match {
@@ -747,15 +658,13 @@ object Trace {
         tmpFunctions = xs
         function = Some(x)
       }
-      case Nil => {
-        function = None
-      }
+      case Nil => function = None
     }
   }
 
-  var counter = 0
+  private def isDone = function == None
 
-  trait Pair { 
+  trait Counterexample { 
     val prog: inox.Program
     val counterexample: Map[prog.trees.ValDef, prog.trees.Expr]
     val existing: Boolean
@@ -763,39 +672,36 @@ object Trace {
     val fromEval: Boolean
   }
 
-  var pair: Option[Pair] = None
+  var pair: Option[Counterexample] = None
 
-  def a(pr: inox.Program)(counterex: Map[pr.trees.ValDef, pr.trees.Expr]): Option[Pair]  = {
-    pair = Some(new Pair {
+  def toCounterexample(pr: inox.Program)(counterex: Map[pr.trees.ValDef, pr.trees.Expr]): Option[Counterexample] = {
+    Some(new Counterexample {
           val prog: pr.type = pr
           val counterexample = counterex
           val existing = true
           val fromEval = true
           val fromFunction = false
       })
-    pair
-  }
-
-  def shouldVerify(fun: Identifier) = {
-    !function.isEmpty && function.get == fun ||
-    !proof.isEmpty && proof.get == fun ||
-    !trace.isEmpty && trace.get == fun
   }
 
   def f(pr: inox.Program)(counterex: pr.Model)(fun: Identifier): Unit = {
-    val ok = !function.isEmpty && function.get == fun ||
-             !proof.isEmpty && proof.get == fun ||
-             !trace.isEmpty && trace.get == fun
-    if(ok) {
-      pair = Some(new Pair {
+    def shouldVerify(fun: Identifier) = {
+      !function.isEmpty && function.get == fun ||
+      !proof.isEmpty && proof.get == fun ||
+      !trace.isEmpty && trace.get == fun
+    }
+
+    if (shouldVerify(fun))
+      pair = Some(new Counterexample {
           val prog: pr.type = pr
           val counterexample = counterex.vars
           val existing = false
           val fromEval = false
           val fromFunction = function.get == fun || funFirst
       })
-    } 
   }
+
+  var counter = 0
 
   // TODO cleaning + check validity of sublemmas
   def nextIteration[T <: AbstractReport[T]](report: AbstractReport[T])(implicit context: inox.Context): Boolean = {
@@ -805,35 +711,18 @@ object Trace {
      println("lemma form nextIteration loop lemma form nextIteration loop lemma form nextIteration loop")
      println(trace)
      //println("sublemmas validity: sublemmas and then if there are no errors nor unknowns")
-      //println(sublemmas(t))
+     //println(sublemmas(t))
 
-    val sublemmasAreValid = sublemmas.forall(s => !report.hasError(s) && !report.hasUnknown(s))
+    val sublemmasAreValid = sublemmas.forall(s => !report.hasError(Some(s)) && !report.hasUnknown(Some(s)))
 
-    (function, proof, trace) match {
-      case (Some(f), Some(p), Some(t)) => {
-        if (report.hasError(f) || report.hasError(p) || report.hasError(t)) {
-          reportError(pair) //TODO only if not in the sublemma state
-        }
-        else if (report.hasUnknown(f) || report.hasUnknown(p) || report.hasUnknown(t)) reportUnknown
-        else {
-          println("report valid")
-          println("lemma")
-          println(t)
-          println("sublemmas validity: sublemmas and then if there are no errors nor unknowns")
-          println(sublemmas)
-          println(sublemmas.forall(s => !report.hasError(s) && !report.hasUnknown(s)))
-
-          if (sublemmasAreValid) reportValid
-          else reportUnknown
-        }
-      }
-      case (Some(f), _, Some(t)) => {
-        if (report.hasError(f) || report.hasError(t)) reportError(pair)
-        else if (report.hasUnknown(f) || report.hasUnknown(t)) reportUnknown
+    (function, trace) match {
+      case (Some(f), Some(t)) => {
+        if (report.hasError(function) || report.hasError(proof) || report.hasError(trace)) reportError(pair) //TODO only if not in the sublemma state
+        else if (report.hasUnknown(function) || report.hasUnknown(proof) || report.hasUnknown(trace)) reportUnknown
         else if (sublemmasAreValid) reportValid
         else reportUnknown
       }
-      case (Some(f), _, _) if(state(f).counterexample != None) =>
+      case (Some(f), _) if(state(f).counterexample != None) =>
         reportError(state(f).counterexample)
         counter = counter - 1
       case _ => reportWrong
@@ -841,7 +730,7 @@ object Trace {
     
     if(isDone && unknowns.size < cnt) {
       cnt = unknowns.size
-      tmpModels = allModels.keys.toList //only the new ones
+      tmpModels = allModels.keys.toList // TODO only the new ones
       tmpFunctions = unknowns
       unknowns = List()
       nextFunction
@@ -854,31 +743,29 @@ object Trace {
     !isDone
   }
 
-  private def isDone = function == None
-
-  private def storeCounterexample(counterexample: Option[Pair]) = {
+  private def storeCounterexample(counterexample: Option[Counterexample]) = {
     state(function.get).counterexample = counterexample
   }
 
-  private def reportError[T](counterexample: Option[Pair]) = {
+  private def reportError[T](counterexample: Option[Counterexample]) = {
     resetEqCheckState
-    errors = function.get::errors //store counter-example
-    unknowns = unknowns.filterNot(elem => elem == function.get)
+    errors = function.get::errors // store the counter-example
+    noLongerUnknown(function.get)
     state(function.get).status = Errorneus
     state(function.get).path = model.get +: state(model.get).path
     state(function.get).counterexample = counterexample
     nextFunction
   }
-
   
-  //if there is a new state go there, otherwise report as unknown
+  // if there is a new state go there, otherwise report as unknown
   private def reportUnknown = {
-    allModels = allModels.updated(model.get, allModels(model.get)-1)
+    allModels = allModels.updated(model.get, allModels(model.get) - 1)
     if (isFinalEqCheckState) {
       resetEqCheckState
       nextModel
       if (model == None) {
         unknowns = function.get::unknowns
+        state(function.get).status = Unknown
         nextFunction
       }
     }
@@ -905,16 +792,64 @@ object Trace {
     }
 
     clusters = clusters + (model.get -> (function.get::clusters.getOrElse(model.get, List())))
-    unknowns = unknowns.filterNot(elem => elem == function.get)
+    noLongerUnknown(function.get)
     nextFunction
   }
 
   private def reportWrong = {
     resetEqCheckState
     if (function != None) wrong = function.get::wrong
-    unknowns = unknowns.filterNot(elem => elem == function.get)
+    state(function.get).status = Wrong
+    noLongerUnknown(function.get)
     resetTrace
     nextFunction
+  }
+
+  private def noLongerUnknown(f: Identifier) = unknowns = unknowns.filterNot(elem => elem == f)
+
+  def optionsError(implicit ctx: inox.Context): Boolean = 
+    !ctx.options.findOptionOrDefault(frontend.optBatchedProgram) && 
+    (!ctx.options.findOptionOrDefault(optModels).isEmpty || !ctx.options.findOptionOrDefault(optCompareFuns).isEmpty)
+
+  def printEverything(implicit ctx: inox.Context) = {
+    import ctx.{ reporter, timers }
+    println("rank list")
+    println(allModels)
+    println(allModels.toList.sortBy(m => -m._2).map(_._1).take(5).map(CheckFilter.fixedFullName))
+    if(!clusters.isEmpty || !errors.isEmpty || !unknowns.isEmpty || !wrong.isEmpty) {
+      reporter.info(s"Printing equivalence checking results:")  
+      allModels.keys.foreach(model => if (!clusters(model).isEmpty) {
+        val l = clusters(model).map(CheckFilter.fixedFullName).mkString(", ")
+        val m = CheckFilter.fixedFullName(model)
+        reporter.info(s"List of functions that are equivalent to model $m: $l")
+      })
+
+      val errorneous = errors.map(CheckFilter.fixedFullName).mkString(", ")
+      reporter.info(s"List of erroneous functions: $errorneous")
+      val timeouts = unknowns.map(CheckFilter.fixedFullName).mkString(", ")
+      reporter.info(s"List of timed-out functions: $timeouts")
+      val wrongs = wrong.map(CheckFilter.fixedFullName).mkString(", ")
+      reporter.info(s"List of wrong functions: $wrongs")
+
+      reporter.info(s"Printing the final state:")  
+      allFunctions.foreach(f => {
+        val l = state(f).path.map(CheckFilter.fixedFullName).mkString(", ")
+        val m = CheckFilter.fixedFullName(f)
+        reporter.info(s"Path for the function $m: $l")
+      })
+
+      /*
+      allFunctions.foreach(f => {
+        val c = state(f).counterexample match {
+          case None => None
+          case Some(co) => (co.counterexample, co.fromEval)
+        }
+        val m = CheckFilter.fixedFullName(f)
+        reporter.info(s"Counterexample for the function $m: $c")
+      })
+      */
+    }
+
   }
 
 }

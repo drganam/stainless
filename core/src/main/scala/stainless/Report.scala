@@ -104,23 +104,19 @@ trait AbstractReport[SelfType <: AbstractReport[SelfType]] { self: SelfType =>
     case Level.Error   => Console.RED
   }
 
-  var counterexample: Option[inox.Model] = None
-
-  def hasError(identifier: Identifier)(implicit ctx: inox.Context): Boolean = {
-    annotatedRows.exists(elem => elem match {
+  def hasError(identifier: Option[Identifier])(implicit ctx: inox.Context): Boolean = identifier match {
+    case None => false
+    case Some(i) => annotatedRows.exists(elem => elem match {
       case RecordRow(id, pos, level, extra, time, model) => {
-        //System.out.println(model)
-        counterexample = model
-        (level == Level.Error && id == identifier)
+        (level == Level.Error && id == i)
       }
     })
   }
 
-  def getCounterExample = counterexample
-
-  def hasUnknown(identifier: Identifier)(implicit ctx: inox.Context): Boolean = {
-    annotatedRows.exists(elem => elem match {
-      case RecordRow(id, pos, level, extra, time, model) => level == Level.Warning && id == identifier
+  def hasUnknown(identifier: Option[Identifier])(implicit ctx: inox.Context): Boolean = identifier match {
+    case None => false
+    case Some(i) => annotatedRows.exists(elem => elem match {
+      case RecordRow(id, pos, level, extra, time, model) => level == Level.Warning && id == i
     })
   }
 
