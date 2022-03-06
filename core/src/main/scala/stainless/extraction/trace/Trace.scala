@@ -569,12 +569,12 @@ object Trace {
   def nextEqCheckState: Unit = eqCheckState = eqCheckState match {
     case EqCheckState.InitState => EqCheckState.ModelFirst
     case EqCheckState.ModelFirst => EqCheckState.FunFirst
-    case EqCheckState.FunFirst => EqCheckState.ModelFirstWithSublemmas //  skip if there are no sublemmas ?
-    case EqCheckState.ModelFirstWithSublemmas => EqCheckState.ModelFirst  //skip if there are no sublemmas ?
+    case EqCheckState.FunFirst => EqCheckState.InitState //EqCheckState.ModelFirstWithSublemmas //  skip if there are no sublemmas ?
+    case EqCheckState.ModelFirstWithSublemmas => EqCheckState.InitState  //skip if there are no sublemmas ?
   }
   
   def resetEqCheckState = eqCheckState = EqCheckState.InitState
-  def isFinalEqCheckState = eqCheckState == EqCheckState.ModelFirstWithSublemmas
+  def isFinalEqCheckState = eqCheckState == EqCheckState.FunFirst //EqCheckState.ModelFirstWithSublemmas
 
   def funFirst = eqCheckState == EqCheckState.FunFirst
 
@@ -798,9 +798,11 @@ object Trace {
 
   private def reportWrong = {
     resetEqCheckState
-    if (function != None) wrong = function.get::wrong
-    state(function.get).status = Wrong
-    noLongerUnknown(function.get)
+    if (function != None) {
+      wrong = function.get::wrong
+      state(function.get).status = Wrong
+      noLongerUnknown(function.get)
+    }
     resetTrace
     nextFunction
   }
