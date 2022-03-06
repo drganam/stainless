@@ -759,7 +759,7 @@ object Trace {
   
   // if there is a new state go there, otherwise report as unknown
   private def reportUnknown = {
-    allModels = allModels.updated(model.get, allModels(model.get) - 1)
+    //allModels = allModels.updated(model.get, allModels(model.get) - 1)
     if (isFinalEqCheckState) {
       resetEqCheckState
       nextModel
@@ -781,7 +781,7 @@ object Trace {
       state(function.get).path = model.get +: state(model.get).path
       //allModels = (allModels :+ function.get).sortBy(m => -state.values.flatMap(_.path).count(_ == m))
 
-      val inc = if (allModels(model.get) > 0) 20 else 100
+      val inc = 1 //if (allModels(model.get) > 0) 20 else 100
       allModels = allModels.updated(model.get, allModels(model.get) + inc)
       allModels = (allModels + (function.get -> 0))//.sortBy(m => -m._2)
 
