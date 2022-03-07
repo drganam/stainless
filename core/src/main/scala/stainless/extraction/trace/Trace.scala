@@ -569,12 +569,12 @@ object Trace {
   def nextEqCheckState: Unit = eqCheckState = eqCheckState match {
     case EqCheckState.InitState => EqCheckState.ModelFirst
     case EqCheckState.ModelFirst => EqCheckState.FunFirst
-    case EqCheckState.FunFirst => EqCheckState.InitState //EqCheckState.ModelFirstWithSublemmas //  skip if there are no sublemmas ?
+    case EqCheckState.FunFirst => EqCheckState.ModelFirstWithSublemmas //  skip if there are no sublemmas ?
     case EqCheckState.ModelFirstWithSublemmas => EqCheckState.InitState  //skip if there are no sublemmas ?
   }
   
   def resetEqCheckState = eqCheckState = EqCheckState.InitState
-  def isFinalEqCheckState = eqCheckState == EqCheckState.FunFirst //EqCheckState.ModelFirstWithSublemmas
+  def isFinalEqCheckState = eqCheckState == EqCheckState.ModelFirstWithSublemmas
 
   def funFirst = eqCheckState == EqCheckState.FunFirst
 
@@ -759,7 +759,7 @@ object Trace {
   
   // if there is a new state go there, otherwise report as unknown
   private def reportUnknown = {
-    //allModels = allModels.updated(model.get, allModels(model.get) - 1)
+    allModels = allModels.updated(model.get, allModels(model.get) - 1)
     if (isFinalEqCheckState) {
       resetEqCheckState
       nextModel
@@ -781,7 +781,7 @@ object Trace {
       state(function.get).path = model.get +: state(model.get).path
       //allModels = (allModels :+ function.get).sortBy(m => -state.values.flatMap(_.path).count(_ == m))
 
-      val inc = 1 //if (allModels(model.get) > 0) 20 else 100
+      val inc = if (allModels(model.get) > 0) 20 else 100
       allModels = allModels.updated(model.get, allModels(model.get) + inc)
       allModels = (allModels + (function.get -> 0))//.sortBy(m => -m._2)
 
