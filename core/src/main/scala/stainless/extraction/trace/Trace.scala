@@ -306,6 +306,8 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
                 equivalenceCheck(f, m, false)
               case Trace.EqCheckState.ModelFirstWithSublemmas =>
                 equivalenceCheck(m, f, true)
+              case Trace.EqCheckState.FunFirstWithSublemmas =>
+                equivalenceCheck(f, m, true)
             }
 
             res match {
@@ -561,22 +563,23 @@ object Trace {
 
   object EqCheckState extends Enumeration {
     type EqCheckState = Value
-    val InitState, ModelFirst, FunFirst, ModelFirstWithSublemmas = Value
+    val InitState, ModelFirst, FunFirst, ModelFirstWithSublemmas, FunFirstWithSublemmas = Value
   }
 
   var eqCheckState = EqCheckState.InitState // skip if !symbols.isRecursive(model) && symbols.isRecursive(function) ?
 
   def nextEqCheckState: Unit = eqCheckState = eqCheckState match {
-    case EqCheckState.InitState => EqCheckState.ModelFirst
-    case EqCheckState.ModelFirst => EqCheckState.FunFirst
-    case EqCheckState.FunFirst => EqCheckState.ModelFirstWithSublemmas //  skip if there are no sublemmas ?
-    case EqCheckState.ModelFirstWithSublemmas => EqCheckState.InitState  //skip if there are no sublemmas ?
+    case EqCheckState.InitState =>  EqCheckState.ModelFirstWithSublemmas //EqCheckState.ModelFirst
+    //case EqCheckState.ModelFirst => EqCheckState.FunFirst
+    //case EqCheckState.FunFirst => EqCheckState.ModelFirstWithSublemmas //  skip if there are no sublemmas ?
+    case EqCheckState.ModelFirstWithSublemmas => EqCheckState.FunFirstWithSublemmas
+    case EqCheckState.FunFirstWithSublemmas => EqCheckState.InitState  //skip if there are no sublemmas ?
   }
   
   def resetEqCheckState = eqCheckState = EqCheckState.InitState
-  def isFinalEqCheckState = eqCheckState == EqCheckState.ModelFirstWithSublemmas
+  def isFinalEqCheckState = eqCheckState == EqCheckState.FunFirstWithSublemmas
 
-  def funFirst = eqCheckState == EqCheckState.FunFirst
+  def funFirst = eqCheckState == EqCheckState.FunFirst || eqCheckState == EqCheckState.FunFirstWithSublemmas
 
   var cnt = 0
 
@@ -647,7 +650,7 @@ object Trace {
         //val n = if (modsize < 50) modsize else if(modsize < 100) 70 else 3
         //tmpModels = allModels.filterNot(state(x).prevModels.contains).take(n)
 
-        val n = 5
+        val n = 6 //TODO change
         tmpModels = allModels.toList.sortBy(m => -m._2).map(_._1).filterNot(state(x).prevModels.contains).take(n)
 
         //case without priorities
