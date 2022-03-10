@@ -89,7 +89,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
         def passesAllNewTests = counterexamples.forall(counterexample => {
           val pair = counterexample._1
           val fun = pair.prog.symbols.functions(counterexample._2)
-          val mod = pair.prog.symbols.functions(Trace.state(fun.id).path.head)
+          val mod = pair.prog.symbols.functions(Trace.state(fun.id).directModel.get)
           val ref = if (pair.fromFunction) fun else mod
 
 
@@ -206,7 +206,8 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
       def checkArgs(f1: FunDef, f2: FunDef) = {
         f1.params.size == f2.params.size && f1.tparams.size == f2.tparams.size &&
-        f1.params.zip(f2.params).forall(arg => arg._1.tpe == arg._2.tpe)
+        f1.params.zip(f2.params).forall(arg => arg._1.tpe == arg._2.tpe) &&
+        f1.returnType == f2.returnType
       }
 
       // f1Calls: functions that are called from f1
@@ -556,8 +557,7 @@ object Trace {
 
   import Status._
 
-  // TODO only store the previous one in the chain, not the full path
-  case class State(var status: Status, var path: List[Identifier], var counterexample: Option[Counterexample], var prevModels: List[Identifier])
+  case class State(var directModel: Option[Identifier], var counterexample: Option[Counterexample], var prevModels: List[Identifier])
 
   var state: Map[Identifier, State] = Map()
 
@@ -569,7 +569,7 @@ object Trace {
   var eqCheckState = EqCheckState.InitState // skip if !symbols.isRecursive(model) && symbols.isRecursive(function) ?
 
   def nextEqCheckState: Unit = eqCheckState = eqCheckState match {
-    case EqCheckState.InitState =>  EqCheckState.ModelFirstWithSublemmas //EqCheckState.ModelFirst
+    case EqCheckState.InitState => EqCheckState.ModelFirstWithSublemmas //EqCheckState.ModelFirst
     //case EqCheckState.ModelFirst => EqCheckState.FunFirst
     //case EqCheckState.FunFirst => EqCheckState.ModelFirstWithSublemmas //  skip if there are no sublemmas ?
     case EqCheckState.ModelFirstWithSublemmas => EqCheckState.FunFirstWithSublemmas
@@ -580,6 +580,7 @@ object Trace {
   def isFinalEqCheckState = eqCheckState == EqCheckState.FunFirstWithSublemmas
 
   def funFirst = eqCheckState == EqCheckState.FunFirst || eqCheckState == EqCheckState.FunFirstWithSublemmas
+  def withSublemmas = eqCheckState == EqCheckState.ModelFirstWithSublemmas || eqCheckState == EqCheckState.FunFirstWithSublemmas
 
   var cnt = 0
 
@@ -596,14 +597,14 @@ object Trace {
     allModels = m.map(elem => (elem, 100)).toMap
     tmpModels = m
     clusters = (m zip m.map(_ => Nil)).toMap
-    state = state ++ (m zip m.map(_ => State(Valid, List(), None, List()))).toMap
+    state = state ++ (m zip m.map(_ => State(None, None, List()))).toMap
   }
 
   def setFunctions(f: List[Identifier]) = {
     allFunctions = f
     tmpFunctions = f
     cnt = f.size
-    state = state ++ (f zip f.map(_ => State(Unchecked, List(), None, List()))).toMap
+    state = state ++ (f zip f.map(_ => State(None, None, List()))).toMap
   }
 
   def getModels = allModels
@@ -720,7 +721,8 @@ object Trace {
 
     (function, trace) match {
       case (Some(f), Some(t)) => {
-        if (report.hasError(function) || report.hasError(proof) || report.hasError(trace)) reportError(pair) //TODO only if not in the sublemma state
+        if (report.hasError(function) || report.hasError(proof) || report.hasError(trace)) 
+          if (!withSublemmas) reportError(pair) // only if not in the sublemma state
         else if (report.hasUnknown(function) || report.hasUnknown(proof) || report.hasUnknown(trace)) reportUnknown
         else if (sublemmasAreValid) reportValid
         else reportUnknown
@@ -754,8 +756,8 @@ object Trace {
     resetEqCheckState
     errors = function.get::errors // store the counter-example
     noLongerUnknown(function.get)
-    state(function.get).status = Errorneus
-    state(function.get).path = model.get +: state(model.get).path
+    //state(function.get).status = Errorneus
+    state(function.get).directModel = model
     state(function.get).counterexample = counterexample
     nextFunction
   }
@@ -768,7 +770,7 @@ object Trace {
       nextModel
       if (model == None) {
         unknowns = function.get::unknowns
-        state(function.get).status = Unknown
+        //state(function.get).status = Unknown
         nextFunction
       }
     }
@@ -780,8 +782,8 @@ object Trace {
   private def reportValid = {
     resetEqCheckState
     if (!allModels.keys.toList.contains(function.get)) {
-      state(function.get).status = Valid
-      state(function.get).path = model.get +: state(model.get).path
+      //state(function.get).status = Valid
+      state(function.get).directModel = model
       //allModels = (allModels :+ function.get).sortBy(m => -state.values.flatMap(_.path).count(_ == m))
 
       val inc = if (allModels(model.get) > 0) 20 else 100
@@ -803,7 +805,7 @@ object Trace {
     resetEqCheckState
     if (function != None) {
       wrong = function.get::wrong
-      state(function.get).status = Wrong
+      //state(function.get).status = Wrong
       noLongerUnknown(function.get)
     }
     resetTrace
@@ -838,12 +840,22 @@ object Trace {
 
       reporter.info(s"Printing the final state:")  
       allFunctions.foreach(f => {
-        val l = state(f).path.map(CheckFilter.fixedFullName).mkString(", ")
+        val l = path(f).map(CheckFilter.fixedFullName).mkString(", ")
         val m = CheckFilter.fixedFullName(f)
         reporter.info(s"Path for the function $m: $l")
       })
 
+      def path(f: Identifier): List[Identifier] = {
+        val m = state(f).directModel
+        m match {
+          case Some(mm) => mm :: path(mm)
+          case None => List()
+        }
+        
+      }
+
       /*
+
       allFunctions.foreach(f => {
         val c = state(f).counterexample match {
           case None => None
