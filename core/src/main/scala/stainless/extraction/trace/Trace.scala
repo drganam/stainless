@@ -569,9 +569,9 @@ object Trace {
   var eqCheckState = EqCheckState.InitState // skip if !symbols.isRecursive(model) && symbols.isRecursive(function) ?
 
   def nextEqCheckState: Unit = eqCheckState = eqCheckState match {
-    case EqCheckState.InitState => EqCheckState.ModelFirstWithSublemmas //EqCheckState.ModelFirst
-    //case EqCheckState.ModelFirst => EqCheckState.FunFirst
-    //case EqCheckState.FunFirst => EqCheckState.ModelFirstWithSublemmas //  skip if there are no sublemmas ?
+    case EqCheckState.InitState => EqCheckState.ModelFirst
+    case EqCheckState.ModelFirst => EqCheckState.FunFirst
+    case EqCheckState.FunFirst => EqCheckState.ModelFirstWithSublemmas //  skip if there are no sublemmas ?
     case EqCheckState.ModelFirstWithSublemmas => EqCheckState.FunFirstWithSublemmas
     case EqCheckState.FunFirstWithSublemmas => EqCheckState.InitState  //skip if there are no sublemmas ?
   }
@@ -721,8 +721,10 @@ object Trace {
 
     (function, trace) match {
       case (Some(f), Some(t)) => {
-        if (report.hasError(function) || report.hasError(proof) || report.hasError(trace)) 
+        if (report.hasError(function) || report.hasError(proof) || report.hasError(trace)) {
           if (!withSublemmas) reportError(pair) // only if not in the sublemma state
+          else reportUnknown
+        } 
         else if (report.hasUnknown(function) || report.hasUnknown(proof) || report.hasUnknown(trace)) reportUnknown
         else if (sublemmasAreValid) reportValid
         else reportUnknown
