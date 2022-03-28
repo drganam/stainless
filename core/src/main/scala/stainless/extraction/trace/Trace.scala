@@ -205,6 +205,12 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
       }
 
       def checkArgs(f1: FunDef, f2: FunDef) = {
+        println("checkArgs")
+        println(f1)
+        println(f2)
+        println(f1.tparams.size == f2.tparams.size)
+        f1.params.zip(f2.params).forall(arg => arg._1.tpe == arg._2.tpe)
+
         f1.params.size == f2.params.size && f1.tparams.size == f2.tparams.size &&
         f1.params.zip(f2.params).forall(arg => arg._1.tpe == arg._2.tpe) &&
         f1.returnType == f2.returnType
@@ -216,13 +222,26 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
       // res._1 sublemma + its sublemmas and replacement
       // res._2 and res._3 map for replacement
       def makeSublemmas(fd1: s.FunDef, fd2: s.FunDef): List[(List[s.FunDef], s.FunDef, s.FunDef)] = {
-        val f1Calls = getFunCalls(fd1)
-        val f2Calls = getFunCalls(fd2)
+        val f1Calls = getFunCalls(fd1).filter(!_.flags.exists(_.name == "library"))
+        val f2Calls = getFunCalls(fd2).filter(!_.flags.exists(_.name == "library"))
+        println("from makeSublemmas")
+        println(f1Calls)
+        println(f2Calls)
+        val pairs = f1Calls zip f1Calls.map(m => f2Calls.find(f => m != f && checkArgs(m, f)))
+        val validpairs = pairs.filter(elem => elem._2 != None)
+
+        println(validpairs)
+        validpairs.map(elem => elem._2 match {
+          case Some(f) => (equivalenceCheck(elem._1, f, true), elem._1, f)
+        })
+         
+        /*
         for (
-          m <- f1Calls;
-          f <- f2Calls;
+          m <- f1Calls; //remove lib
+          f <- f2Calls; //remove lib
           if (m != f && checkArgs(m, f)) // TODO  && same ret type, names ..
         ) yield (equivalenceCheck(m, f, true), m, f) 
+        */
       }
 
       def equivalenceCheck(fd1: s.FunDef, fd2: s.FunDef, sublemmaGeneration: Boolean): List[s.FunDef] = {
@@ -557,6 +576,7 @@ object Trace {
 
   import Status._
 
+  //TODO prevModels is not updated?
   case class State(var directModel: Option[Identifier], var counterexample: Option[Counterexample], var prevModels: List[Identifier])
 
   var state: Map[Identifier, State] = Map()
@@ -569,9 +589,9 @@ object Trace {
   var eqCheckState = EqCheckState.InitState // skip if !symbols.isRecursive(model) && symbols.isRecursive(function) ?
 
   def nextEqCheckState: Unit = eqCheckState = eqCheckState match {
-    case EqCheckState.InitState => EqCheckState.ModelFirst
-    case EqCheckState.ModelFirst => EqCheckState.FunFirst
-    case EqCheckState.FunFirst => EqCheckState.ModelFirstWithSublemmas //  skip if there are no sublemmas ?
+    case EqCheckState.InitState => EqCheckState.ModelFirstWithSublemmas //EqCheckState.ModelFirst
+    //case EqCheckState.ModelFirst => EqCheckState.FunFirst
+    //case EqCheckState.FunFirst => EqCheckState.ModelFirstWithSublemmas //  skip if there are no sublemmas ?
     case EqCheckState.ModelFirstWithSublemmas => EqCheckState.FunFirstWithSublemmas
     case EqCheckState.FunFirstWithSublemmas => EqCheckState.InitState  //skip if there are no sublemmas ?
   }
@@ -646,12 +666,13 @@ object Trace {
     trace = None
     proof = None
       tmpFunctions match {
+        //TODO skip if x is model
       case x::xs => {
         //val modsize = allModels.filterNot(state(x).prevModels.contains).size
         //val n = if (modsize < 50) modsize else if(modsize < 100) 70 else 3
         //tmpModels = allModels.filterNot(state(x).prevModels.contains).take(n)
 
-        val n = 6 //TODO change
+        val n = 5 //TODO change
         tmpModels = allModels.toList.sortBy(m => -m._2).map(_._1).filterNot(state(x).prevModels.contains).take(n)
 
         //case without priorities
@@ -706,6 +727,8 @@ object Trace {
   }
 
   var counter = 0
+  var sublemmacounter = 0
+  var flippedcounter = 0
 
   // TODO cleaning + check validity of sublemmas
   def nextIteration[T <: AbstractReport[T]](report: AbstractReport[T])(implicit context: inox.Context): Boolean = {
@@ -722,7 +745,7 @@ object Trace {
     (function, trace) match {
       case (Some(f), Some(t)) => {
         if (report.hasError(function) || report.hasError(proof) || report.hasError(trace)) {
-          if (!withSublemmas) reportError(pair) // only if not in the sublemma state
+          if (!withSublemmas || sublemmasAreValid) reportError(pair) // only if not in the sublemma state or if they are valid
           else reportUnknown
         } 
         else if (report.hasUnknown(function) || report.hasUnknown(proof) || report.hasUnknown(trace)) reportUnknown
@@ -736,6 +759,10 @@ object Trace {
     }
     
     if(isDone && unknowns.size < cnt) {
+      println("pulling out the unknowns:")
+      println(unknowns)
+      println("COUNTER")
+      println(counter)
       cnt = unknowns.size
       tmpModels = allModels.keys.toList // TODO only the new ones
       tmpFunctions = unknowns
@@ -745,6 +772,10 @@ object Trace {
     if(isDone) {
       System.out.println("COUNTER - NUMBER OF ITERATIONS AND GENERATED PROOFS")
       System.out.println(counter)
+      System.out.println("COUNTER - NUMBER OF Valid thanks to sublemmas")
+      System.out.println(sublemmacounter)
+      System.out.println("COUNTER - NUMBER OF Valid thanks to funfirst")
+      System.out.println(flippedcounter)
     }
 
     !isDone
@@ -783,6 +814,8 @@ object Trace {
 
   private def reportValid = {
     resetEqCheckState
+    if(withSublemmas) sublemmacounter = sublemmacounter + 1
+    if(funFirst) flippedcounter = flippedcounter + 1
     if (!allModels.keys.toList.contains(function.get)) {
       //state(function.get).status = Valid
       state(function.get).directModel = model
