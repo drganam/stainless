@@ -201,6 +201,8 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
             => funs = tfd::funs
           case _ => 
         }(fd.fullBody)
+        // TODO
+        //(funs.distinct.map(symbols.functions(_)) ++ funs.distinct.flatMap(fd => getFunCalls(symbols.functions(fd)))).distinct
         funs.distinct.map(symbols.functions(_))
       }
 
@@ -393,7 +395,10 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
           ).copiedFrom(fd).setPos(fd.getPos)
 
           println("lemma:")
-          println(lemma.id)
+          println(lemma)
+
+          println("proof")
+          println(helper)
           println("sublemmas of the lemma at the end:")
           println(Trace.sublemmas)
 
@@ -672,7 +677,7 @@ object Trace {
         //val n = if (modsize < 50) modsize else if(modsize < 100) 70 else 3
         //tmpModels = allModels.filterNot(state(x).prevModels.contains).take(n)
 
-        val n = 5 //TODO change
+        val n = 8 //TODO change
         tmpModels = allModels.toList.sortBy(m => -m._2).map(_._1).filterNot(state(x).prevModels.contains).take(n)
 
         //case without priorities
