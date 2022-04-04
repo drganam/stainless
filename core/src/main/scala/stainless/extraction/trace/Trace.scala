@@ -207,10 +207,6 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
       }
 
       def checkArgs(f1: FunDef, f2: FunDef) = {
-        println("checkArgs")
-        println(f1)
-        println(f2)
-        println(f1.tparams.size == f2.tparams.size)
         f1.params.zip(f2.params).forall(arg => arg._1.tpe == arg._2.tpe)
 
         f1.params.size == f2.params.size && f1.tparams.size == f2.tparams.size &&
@@ -226,13 +222,14 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
       def makeSublemmas(fd1: s.FunDef, fd2: s.FunDef): List[(List[s.FunDef], s.FunDef, s.FunDef)] = {
         val f1Calls = getFunCalls(fd1).filter(!_.flags.exists(_.name == "library"))
         val f2Calls = getFunCalls(fd2).filter(!_.flags.exists(_.name == "library"))
-        println("from makeSublemmas")
-        println(f1Calls)
-        println(f2Calls)
+
+
         val pairs = f1Calls zip f1Calls.map(m => f2Calls.find(f => m != f && checkArgs(m, f)))
+
+
         val validpairs = pairs.filter(elem => elem._2 != None)
 
-        println(validpairs)
+
         validpairs.map(elem => elem._2 match {
           case Some(f) => (equivalenceCheck(elem._1, f, true), elem._1, f)
         })
@@ -252,8 +249,6 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
         val sublemmas = if (sublemmaGeneration) makeSublemmas(fd1, fd2) else List() 
 
-        println("list of sublemmas:")
-        println(sublemmas)
 
         //body of fd2, with calls to subfunctions replaced
         val replacement: List[FunDef] = sublemmas match {
@@ -264,8 +259,6 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
             List(inductPattern(symbols, fd2, fd2, "replacement", (sf zip sm).toMap).setPos(fd2.getPos).copy(flags = Seq(s.Derived(Some(fd2.id)))))
         }
 
-        println("latest replacement")
-        println(replacement)
 
         val newParamTps = eqLemma.tparams.map{tparam => tparam.tp}
         val newParamVars = eqLemma.params.map{param => param.toVariable}
@@ -394,13 +387,6 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
             flags = (s.Derived(Some(fd.id)) +: s.Derived(Some(finv.id)) +: (fd.flags.filterNot(f => f.name == "traceInduct"))).distinct
           ).copiedFrom(fd).setPos(fd.getPos)
 
-          println("lemma:")
-          println(lemma)
-
-          println("proof")
-          println(helper)
-          println("sublemmas of the lemma at the end:")
-          println(Trace.sublemmas)
 
           Trace.getTrace match {
             case Some(t) if(t == lemma.id) => Trace.setProof(helper.id)
@@ -818,9 +804,10 @@ object Trace {
   }
 
   private def reportValid = {
-    resetEqCheckState
     if(withSublemmas) sublemmacounter = sublemmacounter + 1
     if(funFirst) flippedcounter = flippedcounter + 1
+    resetEqCheckState
+
     if (!allModels.keys.toList.contains(function.get)) {
       //state(function.get).status = Valid
       state(function.get).directModel = model
