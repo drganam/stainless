@@ -663,7 +663,7 @@ object Trace {
         //val n = if (modsize < 50) modsize else if(modsize < 100) 70 else 3
         //tmpModels = allModels.filterNot(state(x).prevModels.contains).take(n)
 
-        val n = 8 //TODO change
+        val n = 3 //TODO change
         tmpModels = allModels.toList.sortBy(m => -m._2).map(_._1).filterNot(state(x).prevModels.contains).take(n)
 
         //case without priorities
@@ -720,11 +720,12 @@ object Trace {
   var counter = 0
   var sublemmacounter = 0
   var flippedcounter = 0
+  var valid = 0
 
   // TODO cleaning + check validity of sublemmas
   def nextIteration[T <: AbstractReport[T]](report: AbstractReport[T])(implicit context: inox.Context): Boolean = {
     counter = counter + 1
-    if(counter % 10 == 0) printEverything
+    //if(counter % 10 == 0) printEverything
 
      println("lemma form nextIteration loop lemma form nextIteration loop lemma form nextIteration loop")
      println(trace)
@@ -752,21 +753,32 @@ object Trace {
     if(isDone && unknowns.size < cnt) {
       println("pulling out the unknowns:")
       println(unknowns)
-      println("COUNTER")
+      println("count:")
       println(counter)
       cnt = unknowns.size
       tmpModels = allModels.keys.toList // TODO only the new ones
-      tmpFunctions = unknowns
+      tmpFunctions = unknowns.reverse
       unknowns = List()
       nextFunction
     }
     if(isDone) {
-      System.out.println("COUNTER - NUMBER OF ITERATIONS AND GENERATED PROOFS")
-      System.out.println(counter)
-      System.out.println("COUNTER - NUMBER OF Valid thanks to sublemmas")
-      System.out.println(sublemmacounter)
-      System.out.println("COUNTER - NUMBER OF Valid thanks to funfirst")
-      System.out.println(flippedcounter)
+      println("COUNTER - NUMBER OF candidate functions")
+      println(allFunctions.size)
+      println("COUNTER - NUMBER OF proven correct")
+      println(valid)
+      println("COUNTER - NUMBER OF proven incorrect")
+      println(errors.size)
+      println("COUNTER - NUMBER OF unknowns")
+      println(unknowns.size)
+      println("COUNTER - NUMBER OF wrong functions")
+      println(wrong.size)
+
+      println("COUNTER - NUMBER OF ITERATIONS AND GENERATED PROOFS")
+      println(counter)
+      println("COUNTER - NUMBER OF Valid thanks to sublemmas")
+      println(sublemmacounter)
+      println("COUNTER - NUMBER OF Valid thanks to funfirst")
+      println(flippedcounter)
     }
 
     !isDone
@@ -825,6 +837,7 @@ object Trace {
 
     clusters = clusters + (model.get -> (function.get::clusters.getOrElse(model.get, List())))
     noLongerUnknown(function.get)
+    valid = valid + 1
     nextFunction
   }
 
