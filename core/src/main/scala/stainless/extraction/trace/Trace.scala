@@ -580,9 +580,9 @@ object Trace {
   var eqCheckState = EqCheckState.InitState // skip if !symbols.isRecursive(model) && symbols.isRecursive(function) ?
 
   def nextEqCheckState: Unit = eqCheckState = eqCheckState match {
-    case EqCheckState.InitState => EqCheckState.ModelFirstWithSublemmas //EqCheckState.ModelFirst
-    //case EqCheckState.ModelFirst => EqCheckState.FunFirst
-    //case EqCheckState.FunFirst => EqCheckState.ModelFirstWithSublemmas //  skip if there are no sublemmas ?
+    case EqCheckState.InitState => EqCheckState.ModelFirst
+    case EqCheckState.ModelFirst => EqCheckState.FunFirst
+    case EqCheckState.FunFirst => EqCheckState.ModelFirstWithSublemmas //  skip if there are no sublemmas ?
     case EqCheckState.ModelFirstWithSublemmas => EqCheckState.FunFirstWithSublemmas
     case EqCheckState.FunFirstWithSublemmas => EqCheckState.InitState  //skip if there are no sublemmas ?
   }
