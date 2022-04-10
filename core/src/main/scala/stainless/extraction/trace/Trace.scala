@@ -87,9 +87,11 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
     if (Trace.getProveMe.isEmpty) {
       val proveMeOpt = symbols.functions.values.toList.find(elem => isProveMe(elem.id)).map(elem => elem.id)
+      println(proveMeOpt)
 
       (Trace.getModel, proveMeOpt) match {
         case (Some(model), Some(p)) if checkArgsProveMe(model, p) =>
+          println(proveMeOpt)
           Trace.setProveMe(proveMeOpt)
         case _ =>
       }
@@ -242,15 +244,13 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
         val f1Calls = getFunCalls(fd1).filter(!_.flags.exists(_.name == "library"))
         val f2Calls = getFunCalls(fd2).filter(!_.flags.exists(_.name == "library"))
 
-
-        val pairs = f1Calls zip f1Calls.map(m => f2Calls.find(f => m != f && checkArgs(m, f)))
-
+        val pairs = f1Calls zip f1Calls.map(m => f2Calls.find(f => m != f && checkArgs(m, f) && f.id.name == m.id.name).orElse(f2Calls.find(f => m != f && checkArgs(m, f))))
 
         val validpairs = pairs.filter(elem => elem._2 != None)
 
-
         validpairs.map(elem => elem._2 match {
-          case Some(f) => (equivalenceCheck(elem._1, f, true), elem._1, f)
+          case Some(f) => 
+            (equivalenceCheck(elem._1, f, true), elem._1, f)
         })
          
         /*
@@ -338,6 +338,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
           Trace.nextEqCheckState
 
           if (m.params.size == f.params.size && evalCheck(f, m)) {
+          //if (m.params.size == f.params.size) {
             val res: List[s.FunDef] = Trace.eqCheckState match {
               case Trace.EqCheckState.ModelFirst => 
                 equivalenceCheck(m, f, false)
@@ -695,7 +696,7 @@ object Trace {
         //val n = if (modsize < 50) modsize else if(modsize < 100) 70 else 3
         //tmpModels = allModels.filterNot(state(x).prevModels.contains).take(n)
 
-        val n = 3 //TODO change
+        val n = 5 //TODO change
         tmpModels = allModels.toList.sortBy(m => -m._2).map(_._1).filterNot(state(x).prevModels.contains).take(n)
 
         //case without priorities
@@ -757,7 +758,7 @@ object Trace {
   // TODO cleaning + check validity of sublemmas
   def nextIteration[T <: AbstractReport[T]](report: AbstractReport[T])(implicit context: inox.Context): Boolean = {
     counter = counter + 1
-    if(counter % 50 == 0) printEverything
+    if(counter % 10 == 0) printEverything
 
      println("lemma form nextIteration loop lemma form nextIteration loop lemma form nextIteration loop")
      println(trace)
@@ -765,13 +766,16 @@ object Trace {
      //println(sublemmas(t))
 
     val sublemmasAreValid = sublemmas.forall(s => !report.hasError(Some(s)) && !report.hasUnknown(Some(s)))
+    println(sublemmasAreValid)
+    println(sublemmas)
 
     val sublemmasHaveErrors = sublemmas.exists(s => report.hasError(Some(s)))
 
     (function, trace) match {
       case (Some(f), Some(t)) => {
         if (report.hasError(function) || report.hasError(proof) || report.hasError(trace)) {
-          if (!withSublemmas || sublemmasAreValid) reportError(pair) // only if not in the sublemma state or if they are valid
+          //if (!withSublemmas || sublemmasAreValid) reportError(pair) // only if not in the sublemma state or if they are valid
+          if (!withSublemmas) reportError(pair) // only if not in the sublemma state or if they are valid
           else reportUnknown
         } 
         else if (report.hasUnknown(function) || report.hasUnknown(proof) || report.hasUnknown(trace)) reportUnknown

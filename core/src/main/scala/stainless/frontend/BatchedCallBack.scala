@@ -108,6 +108,7 @@ class BatchedCallBack(components: Seq[Component])(implicit val context: inox.Con
         RunReport(run)(analysis.toReport)
       }
       report = Report(reports)
+      println("okokokookokokoko")
       rerunPipeline = Trace.nextIteration(report)
       if (!rerunPipeline) Trace.printEverything
     }
