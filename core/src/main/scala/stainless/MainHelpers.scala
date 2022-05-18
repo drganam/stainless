@@ -15,11 +15,14 @@ object MainHelpers {
 
 trait MainHelpers extends inox.MainHelpers { self =>
 
-  final object optVersion extends inox.FlagOptionDef("version", false)
+  object optVersion extends inox.FlagOptionDef("version", false)
 
   case object Pipelines extends Category
   case object Verification extends Category
   case object Termination extends Category
+  case object TestsGeneration extends Category {
+    override def toString: String = "Tests Generation"
+  }
 
   override protected def getOptions: Map[inox.OptionDef[_], Description] = super.getOptions - inox.solvers.optAssumeChecked ++ Map(
     optVersion -> Description(General, "Display the version number"),
@@ -31,8 +34,11 @@ trait MainHelpers extends inox.MainHelpers { self =>
     optProveMe -> Description(General, "Use function f as equivalence checking statement"),
     extraction.utils.optDebugObjects -> Description(General, "Only print debug output for functions/adts named o1,o2,..."),
     extraction.utils.optDebugPhases -> Description(General, {
+      // f interpolator does not process escape sequence, we workaround that with the following trick.
+      // See https://github.com/lampepfl/dotty/issues/11750
+      val nl = '\n'
       "Only print debug output for phases p1,p2,...\nAvailable: " +
-      extraction.phases.map { case (name, desc) => f"\n  $name%-26s : $desc" }.mkString("")
+      extraction.phases.map { case (name, desc) => f"$nl  $name%-26s : $desc" }.mkString("")
     }),
     extraction.imperative.optFullImperative -> Description(Verification, "Use the full imperative phase. That might be unstable because it is still under development."),
     extraction.imperative.optCheckHeapContracts -> Description(Verification, "Check that heap reads and modifies clauses are valid"),
@@ -58,12 +64,13 @@ trait MainHelpers extends inox.MainHelpers { self =>
     genc.optIncludes -> Description(General, "Add includes in GenC output"),
     optWatch -> Description(General, "Re-run stainless upon file changes"),
     optCompact -> Description(General, "Print only invalid elements of summaries"),
-    frontend.optPersistentCache -> Description(General, "Enable caching of program extraction & analysis"),
     frontend.optBatchedProgram -> Description(General, "Process the whole program together, skip dependency analysis"),
     frontend.optKeep -> Description(General, "Keep library objects marked by @keepFor(g) for some g in g1,g2,... (implies --batched)"),
     frontend.optExtraDeps -> Description(General, "Fetch the specified extra source dependencies and add their source files to the session"),
     frontend.optExtraResolvers -> Description(General, "Extra resolvers to use to fetch extra source dependencies"),
-    utils.Caches.optCacheDir -> Description(General, "Specify the directory in which cache files should be stored")
+    utils.Caches.optCacheDir -> Description(General, "Specify the directory in which cache files should be stored"),
+    testgen.optOutputFile -> Description(TestsGeneration, "Specify the output file"),
+    testgen.optGenCIncludes -> Description(TestsGeneration, "(GenC variant only) Specify header includes"),
   ) ++ MainHelpers.components.map { component =>
     val option = inox.FlagOptionDef(component.name, default = false)
     option -> Description(Pipelines, component.description)
@@ -86,7 +93,9 @@ trait MainHelpers extends inox.MainHelpers { self =>
     termination.DebugSectionMeasureInference,
     extraction.inlining.DebugSectionFunctionSpecialization,
     extraction.utils.DebugSectionTrees,
+    extraction.utils.DebugSectionSizes,
     extraction.utils.DebugSectionPositions,
+    frontend.DebugSectionCallGraph,
     frontend.DebugSectionExtraction,
     frontend.DebugSectionFrontend,
     frontend.DebugSectionStack,
@@ -99,7 +108,7 @@ trait MainHelpers extends inox.MainHelpers { self =>
     reporter.title("Stainless verification tool (https://github.com/epfl-lara/stainless)")
     reporter.info(s"Version: ${BuildInfo.version}")
     reporter.info(s"Built at: ${BuildInfo.builtAtString}")
-    reporter.info(s"Bundled Scala compiler version: ${BuildInfo.scalaVersion}")
+    reporter.info(s"Stainless Scala version: ${BuildInfo.scalaVersion}")
   }
 
   override protected def getName: String = "stainless"
@@ -123,11 +132,11 @@ trait MainHelpers extends inox.MainHelpers { self =>
   protected def newReporter(debugSections: Set[inox.DebugSection]): inox.Reporter =
     new stainless.DefaultReporter(debugSections)
 
-  def getConfigOptions(options: inox.Options)(implicit initReporter: inox.Reporter): Seq[inox.OptionValue[_]] = {
+  def getConfigOptions(options: inox.Options)(using inox.Reporter): Seq[inox.OptionValue[_]] = {
     Configuration.get(options, self.options.keys.toSeq)
   }
 
-  def getConfigContext(options: inox.Options)(implicit initReporter: inox.Reporter): inox.Context = {
+  def getConfigContext(options: inox.Options)(using inox.Reporter): inox.Context = {
     val ctx = super.processOptions(Seq.empty, getConfigOptions(options))
 
     if (ctx.options.findOptionOrDefault(inox.optNoColors)) {
@@ -138,13 +147,13 @@ trait MainHelpers extends inox.MainHelpers { self =>
 
   override
   protected def processOptions(files: Seq[File], cmdOptions: Seq[inox.OptionValue[_]])
-                              (implicit initReporter: inox.Reporter): inox.Context = {
+                              (using inox.Reporter): inox.Context = {
     val configOptions = getConfigOptions(inox.Options(cmdOptions))
 
     // Override config options with command-line options
     val options = (cmdOptions ++ configOptions)
       .groupBy(_.optionDef.name)
-      .mapValues(_.head)
+      .view.mapValues(_.head)
       .values
       .toSeq
 
@@ -157,21 +166,20 @@ trait MainHelpers extends inox.MainHelpers { self =>
   }
 
   def main(args: Array[String]): Unit = {
-    implicit val ctx: inox.Context = try {
+    val ctx: inox.Context = try {
       setup(args)
     } catch {
       case e: Throwable =>
-        topLevelErrorHandler(e)(Context.empty)
+        topLevelErrorHandler(e)(using Context.empty)
     }
-
+    import ctx.given
     try {
-
       if (ctx.options.findOptionOrDefault(optVersion)) {
         displayVersion(ctx.reporter)
         System.exit(0)
       }
 
-      import ctx.{ reporter, timers }
+      import ctx.{reporter, timers}
 
       if (extraction.trace.Trace.optionsError) {
         reporter.fatalError(s"Equivalence checking for --comparefuns and --models only works in batched mode.")
@@ -200,24 +208,24 @@ trait MainHelpers extends inox.MainHelpers { self =>
         baseRunCycle()
       } catch {
         case e @ extraction.MalformedStainlessCode(tree, msg) =>
-          reporter.debug(e)(frontend.DebugSectionStack)
+          reporter.debug(e)(using frontend.DebugSectionStack)
           ctx.reporter.error(tree.getPos, msg)
         case e @ inox.FatalError(msg) =>
           // we don't print the error message in this case because it was already printed before
           // the `FatalError` was thrown
-          reporter.debug(e)(frontend.DebugSectionStack)
+          reporter.debug(e)(using frontend.DebugSectionStack)
         case e: Throwable =>
-          reporter.debug(e)(frontend.DebugSectionStack)
+          reporter.debug(e)(using frontend.DebugSectionStack)
           reporter.error(e.getMessage)
       } finally {
         reporter.reset()
         compiler = newCompiler()
       }
 
-      val watchMode = isWatchModeOn(ctx)
+      val watchMode = isWatchModeOn
       if (watchMode) {
         val files: Set[File] = compiler.sources.toSet map {
-          file: String => new File(file).getAbsoluteFile
+          (file: String) => new File(file).getAbsoluteFile
         }
         val watcher = new utils.FileWatcher(ctx, files, action = () => watchRunCycle())
 

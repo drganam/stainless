@@ -6,14 +6,12 @@ package termination
 import scala.concurrent.duration._
 import scala.collection.mutable.{PriorityQueue, Map => MutableMap, Set => MutableSet}
 
-import scala.language.existentials
-
 trait ProcessingPipeline extends TerminationChecker with inox.utils.Interruptible { self =>
-  import context._
+  import context.{given, _}
   import program._
   import program.trees._
-  import program.symbols._
-  import CallGraphOrderings._
+  import program.symbols.{given, _}
+  import CallGraphOrderings.{given, _}
 
   trait Problem {
     def funSet: Set[FunDef]
@@ -35,9 +33,10 @@ trait ProcessingPipeline extends TerminationChecker with inox.utils.Interruptibl
     }
   }
 
-  private val dtChecker = new {
-    val checker: self.type = self
-  } with DatatypeChecker
+  private val dtChecker = {
+    class DatatypeCheckerImpl(override val checker: self.type) extends DatatypeChecker(checker)
+    new DatatypeCheckerImpl(self)
+  }
 
   interruptManager.registerForInterrupts(this)
 
@@ -57,9 +56,9 @@ trait ProcessingPipeline extends TerminationChecker with inox.utils.Interruptibl
     processors.toArray
   }
 
-  implicit private val debugSection = DebugSectionTermination
+  private given givenDebugSection: DebugSectionTermination.type = DebugSectionTermination
 
-  implicit object ProblemOrdering extends Ordering[(Problem, Int)] {
+  given ProblemOrdering: Ordering[(Problem, Int)] with
     def compare(a: (Problem, Int), b: (Problem, Int)): Int = {
       val comp = componentOrdering.compare(a._1.funSet, b._1.funSet)
       if (comp != 0) {
@@ -86,7 +85,6 @@ trait ProcessingPipeline extends TerminationChecker with inox.utils.Interruptibl
         }
       }
     }
-  }
 
   private val problems = new PriorityQueue[(Problem, Int)]
   private var running: Boolean = false
@@ -107,7 +105,7 @@ trait ProcessingPipeline extends TerminationChecker with inox.utils.Interruptibl
     problemDefs(fd) || (problemDefs intersect callees).nonEmpty
   }
 
-  private def printQueue() {
+  private def printQueue(): Unit = {
     val sb = new StringBuilder()
     sb.append("- Problems in Queue:\n")
     for (p @ (problem, index) <- problems) {
@@ -125,7 +123,7 @@ trait ProcessingPipeline extends TerminationChecker with inox.utils.Interruptibl
     reporter.debug(sb.toString)
   }
 
-  private def printResult(results: List[Result]) {
+  private def printResult(results: List[Result]): Unit = {
     val sb = new StringBuilder()
     sb.append("- Processing Result:\n")
     for (result <- results) result match {
@@ -175,7 +173,7 @@ trait ProcessingPipeline extends TerminationChecker with inox.utils.Interruptibl
       val popts = PrinterOptions.fromContext(context)
       reporter.debug(s"Result for ${fd.id}")
       reporter.debug(s" => BROKEN ($reason)")
-      reporter.debug("  " + msg.asString(popts).replaceAll("\n", "\n  "))
+      reporter.debug("  " + msg.asString(using popts).replaceAll("\n", "\n  "))
       brokenMap(fd) = (reason, msg)
   }
 
@@ -187,7 +185,7 @@ trait ProcessingPipeline extends TerminationChecker with inox.utils.Interruptibl
         if (funDefs(fd1) && funDefs(fd2)) Some(fd1 -> fd2) else None
     }
 
-    val callGraph = pairs.groupBy(_._1).mapValues(_.map(_._2))
+    val callGraph = pairs.groupBy(_._1).view.mapValues(_.map(_._2)).toMap
     val allComponents = inox.utils.SCC.scc(callGraph)
 
     val notWellFormed = (for (fd <- funDefs; reason <- dtChecker check fd) yield {
@@ -249,7 +247,7 @@ trait ProcessingPipeline extends TerminationChecker with inox.utils.Interruptibl
 
         if (dependencies.nonEmpty) {
           problems.enqueue(dependencies.map(_ -> 0).toSeq: _*)
-          dependencies.clear
+          dependencies.clear()
         }
 
         processor.name -> result.toList.flatten

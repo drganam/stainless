@@ -54,33 +54,35 @@ package innerclasses
   * }
   * ```
   */
-trait InnerClasses
+class InnerClasses(override val s: Trees, override val t: methods.Trees)
+                  (using override val context: inox.Context)
   extends oo.CachingPhase
      with IdentitySorts
      with oo.IdentityTypeDefs
      with oo.SimpleClasses
      with oo.SimplyCachedClasses { self =>
-
-  val s: Trees
-  val t: methods.Trees
   import s._
 
-  override protected def getContext(symbols: Symbols) = new TransformerContext(symbols)
+  override protected def getContext(symbols: Symbols) = new TransformerContext(self.s, self.t)(using symbols)
 
-  protected class TransformerContext(val symbols: s.Symbols) extends oo.TreeTransformer { ctx =>
-    override final val s: self.s.type = self.s
-    override final val t: self.t.type = self.t
-
+  protected class TransformerContext(override final val s: self.s.type,
+                                     override final val t: self.t.type)
+                                    (using val symbols: s.Symbols)
+    extends oo.ConcreteTreeTransformer(s, t) { ctx =>
     import s._
     import symbols._
 
     /** Represent a substitution for a lifted local class */
     case class ClassSubst(
-      cd: ClassDef,               // Lifted classd
+      cd: ClassDef,               // Lifted class
       methods: Seq[FunDef],       // Lifted methods
       typeMembers: Seq[TypeDef],  // Lifted type members
-      newTypeParams: Seq[Type],   // New (closed over) type params
-      newParams: Seq[ValDef],     // New (closed over) fields
+      // Closed over type params: the first element of the tuple corresponds to the captured free type parameter
+      // while the second to the freshened type parameter.
+      newTypeParams: Seq[(TypeParameter, TypeParameterDef)],
+      // Closed over fields: the first element of the tuple corresponds to the captured free variable
+      // while the second to the freshened ValDef.
+      newParams: Seq[(Variable, ValDef)],
       outerRefs: Seq[ValDef],     // Outer references
       classType: ClassType        // Type of lifted class
     ) {
@@ -88,8 +90,13 @@ trait InnerClasses
       def withMethods(methods: Seq[FunDef]): ClassSubst = copy(methods = methods)
       def withTypeMembers(typeMembers: Seq[TypeDef]): ClassSubst = copy(typeMembers = typeMembers)
 
-      /** Add required type parameters to the list of explictly given ones */
-      def addNewTypeParams(tps: Seq[Type]): Seq[Type] = tps ++ newTypeParams
+      /** Add required type parameters to the list of explicitly given ones */
+      def addNewTypeParams(tps: Seq[Type], context: Context): Seq[Type] = {
+        val scope = context.typeScope
+        val realNewTyParams = newTypeParams.map((freeTyParam, _) => scope.getOrElse(freeTyParam, freeTyParam))
+
+        tps ++ realNewTyParams
+      }
 
       /** Add required constructor parameters to the list of explictly given ones,
         * based on the current context.
@@ -98,8 +105,8 @@ trait InnerClasses
         * @see [[Context#toScope]]
         */
       def addNewParams(params: Seq[Expr], context: Context): Seq[Expr] = {
-        val scope = context.toScope
-        val realNewParams = newParams.map(p => scope.get(p.id).getOrElse(p.toVariable))
+        val scope = context.termScope
+        val realNewParams = newParams.map((freeVar, _) => scope.getOrElse(freeVar.id, freeVar))
         val realOuterRefs = context.currentClass.toSeq.flatMap(addOuterRefs)
 
         params ++ realNewParams ++ realOuterRefs
@@ -112,8 +119,9 @@ trait InnerClasses
       private def addOuterRefs(currentClass: ClassDef): Seq[Expr] = {
         val thiss = This(currentClass.typed.toType)
         outerRefs map {
-          case ValDef(id, ct: ClassType, _) if currentClass.id == ct.id => thiss
+          case ValDef(_, ct: ClassType, _) if currentClass.id == ct.id => thiss
           case ValDef(id, _, _) => ClassSelector(thiss, id)
+          case _ => sys.error("Unreachable") // To silence false positive warning
         }
       }
     }
@@ -126,20 +134,37 @@ trait InnerClasses
       currentFunction: Option[FunDef] = None           // Enclosing method
     ) extends PathLike[Context] {
 
-      /** Map each closed over field and parameters to the appropriate reference */
-      def toScope: Map[Identifier, Expr] = {
-        val fields = for {
-          cd    <- currentClass.toSeq
-          field <- cd.fields
-          thiss = This(ClassType(cd.id, cd.typeArgs).copiedFrom(field)).copiedFrom(field)
-        } yield (field.id -> ClassSelector(thiss, field.id).copiedFrom(field))
-
+      /** Map each closed over free variable and parameters to the appropriate reference */
+      def termScope: Map[Identifier, Expr] = {
         val params = for {
           fd    <- currentFunction.toSeq
           param <- fd.params
-        } yield (param.id -> param.toVariable)
+        } yield param.id -> param.toVariable
 
-        (fields ++ params).toMap
+        val fields = for {
+          cd    <- currentClass.toSeq
+          subst = substs.values.find(_.cd eq cd).get // Enclosing class is already lifted, so it must be in `substs`
+          (freeVar, field) <- subst.newParams
+          thiss = This(ClassType(cd.id, cd.typeArgs).copiedFrom(field)).copiedFrom(field)
+        } yield freeVar.id -> ClassSelector(thiss, field.id).copiedFrom(field)
+
+        (params ++ fields).toMap
+      }
+
+      /** Map each closed over free type parameter to the appropriate reference */
+      def typeScope: Map[TypeParameter, Type] = {
+        val fromFn = for {
+          fd     <- currentFunction.toSeq
+          tparam <- fd.tparams
+        } yield tparam.tp -> tparam.tp
+
+        val fromClass = for {
+          cd    <- currentClass.toSeq
+          subst = substs.values.find(_.cd eq cd).get // Enclosing class is already lifted, so it must be in `substs`
+          (freeTParam, tparamDef) <- subst.newTypeParams
+        } yield freeTParam -> tparamDef.tp
+
+        (fromFn ++ fromClass).toMap
       }
 
       /** Transform a local class type to a global one */
@@ -147,7 +172,9 @@ trait InnerClasses
         case lct: LocalClassType =>
           substs(lct.id).classType
         case ct: ClassType if substs.contains(ct.id) && ct.tps.size != substs(ct.id).cd.tparams.size =>
-          ClassType(ct.id, substs(ct.id).addNewTypeParams(ct.tps)).copiedFrom(ct)
+          val subst = substs(ct.id)
+          val tps = ct.tps ++ subst.newTypeParams.map(_._2.tp)
+          ClassType(ct.id, tps).copiedFrom(ct)
         case ct: ClassType =>
           ct
       }
@@ -195,15 +222,15 @@ trait InnerClasses
       (transform(result), newSymbols)
     }
 
-    class LiftingTransformer extends imperative.TransformerWithPC {
-      val s: self.s.type = self.s
-      val t: self.s.type = self.s
+    class LiftingTransformer(override val s: self.s.type, override val t: self.s.type)
+                            (using override val symbols: ctx.symbols.type)
+      extends imperative.TransformerWithPC {
       import s._
 
-      type Env = Context
-      implicit val pp = Context
+      def this() = this(self.s, self.s)(using ctx.symbols)
 
-      val symbols: ctx.symbols.type = ctx.symbols
+      type Env = Context
+      val pp = Context
 
       var result: Map[Identifier, ClassSubst] = Map.empty
 
@@ -255,12 +282,12 @@ trait InnerClasses
 
         case LocalThis(lct) =>
           val subst = ctx.substs(lct.id)
-          val ct = ClassType(lct.id, subst.addNewTypeParams(lct.tps) map (transform(_, ctx))).copiedFrom(lct)
+          val ct = ClassType(lct.id, subst.addNewTypeParams(lct.tps, ctx) map (transform(_, ctx))).copiedFrom(lct)
           t.This(ct).copiedFrom(e)
 
         case LocalClassConstructor(lct, args) =>
           val subst = ctx.substs(lct.id)
-          val ct = ClassType(lct.id, subst.addNewTypeParams(lct.tps) map (transform(_, ctx))).copiedFrom(lct)
+          val ct = ClassType(lct.id, subst.addNewTypeParams(lct.tps, ctx) map (transform(_, ctx))).copiedFrom(lct)
           t.ClassConstructor(ct, subst.addNewParams(args, ctx) map (transform(_, ctx))).copiedFrom(e)
 
         case LocalMethodInvocation(obj, m, _, tps, args) =>
@@ -276,14 +303,14 @@ trait InnerClasses
       override def transform(tp: Type, ctx: Context): t.Type = tp match {
         case lct: LocalClassType =>
           val subst = ctx.substs(lct.id)
-          t.ClassType(lct.id, subst.addNewTypeParams(lct.tps) map (transform(_, ctx))).copiedFrom(tp)
+          t.ClassType(lct.id, subst.addNewTypeParams(lct.tps, ctx) map (transform(_, ctx))).copiedFrom(tp)
 
         // We sometimes encounter a ClassType for a local class, which lacks the closed over type parameters.
         // eg. when we compute the parents of the lifted class in [[lift]].
         case ClassType(id, tps) if ctx.substs contains id =>
           val subst = ctx.substs(id)
           if (tps.size == subst.cd.tparams.size) t.ClassType(id, tps map (transform(_, ctx))).copiedFrom(tp)
-          else t.ClassType(id, subst.addNewTypeParams(tps) map (transform(_, ctx))).copiedFrom(tp)
+          else t.ClassType(id, subst.addNewTypeParams(tps, ctx) map (transform(_, ctx))).copiedFrom(tp)
 
         case _ => super.transform(tp, ctx)
       }
@@ -291,11 +318,9 @@ trait InnerClasses
 
     /** Collect applications of local functions with a method of a local class */
     def collectFreeLocalFunsCalls(fd: FunDef): Set[ApplyLetRec] = {
-      class FreeLocalFunsCollector extends stainless.transformers.Transformer
-        with inox.transformers.DefinitionTransformer {
-
-        val s: self.s.type = self.s
-        val t: self.s.type = self.s
+      class FreeLocalFunsCollector(override val s: self.s.type, override val t: self.s.type)
+        extends stainless.transformers.Transformer
+           with inox.transformers.DefinitionTransformer {
         val symbols: ctx.symbols.type = ctx.symbols
 
         type Env = Set[Identifier]
@@ -315,7 +340,7 @@ trait InnerClasses
         }
       }
 
-      val collector = new FreeLocalFunsCollector
+      val collector = new FreeLocalFunsCollector(self.s, self.s)
       collector.transform(fd)
       collector.result
     }
@@ -334,15 +359,15 @@ trait InnerClasses
     }
 
     /** Current path condition expressed as a class invariant, if not trivial */
-    def pathConditionToInvariant(pathCondition: Expr, lcd: LocalClassDef): Option[LocalMethodDef] = {
-      pathCondition match {
+    def pathConditionToInvariant(path: Path, lcd: LocalClassDef): Option[LocalMethodDef] = {
+      pathToClause(path, lcd) match {
         case BooleanLiteral(true) => None
-        case _ => Some(LocalMethodDef(
+        case pc => Some(LocalMethodDef(
           ast.SymbolIdentifier("inv"),
           Seq.empty,
           Seq.empty,
           BooleanType().setPos(lcd),
-          pathCondition.setPos(lcd),
+          pc.setPos(lcd),
           Seq(IsInvariant, IsMethodOf(lcd.id))
         ).setPos(lcd))
       }
@@ -357,40 +382,94 @@ trait InnerClasses
 
     /** Lift the local class to the top, taking into account the current context and path */
     def lift(lcd: LocalClassDef, context: Context): ClassSubst = {
-      val pathCondition = pathToClause(context.path, lcd)
-
+      val pc = context.path
       // Compute the variables, type parameters, and outer references being closed over by the local class.
-      val freeVars       = (exprOps.freeVariablesOf(lcd) ++ exprOps.variablesOf(pathCondition)).toSeq.sortBy(_.id.name)
-      val freeTypeParams = exprOps.freeTypeParamsOf(lcd).toSeq.sortBy(_.id.name)
-      val enclosingRef   = context.currentClass.map(cd => This(cd.typed(symbols).toType))
-      val freeOuterRefs  = (enclosingRef.toSet ++ exprOps.outerThisReferences(lcd).toSet).toSeq.sortBy(_.ct.id.name)
+      // Free variables that are actually defined in a let-binding of the PC will not be transformed into a field.
+      // Instead, these will be introduced in the body of each method, akin to what is done in FunctionClosure#closeFd.
+      // For example, if we have:
+      //   def test(x: BigInt): Unit = {
+      //      require(x > 10)
+      //      val y = x + 10
+      //      // The PC is `x > 10 && let y = x + 10 in true`
+      //      case class Local() {
+      //        def hello: Unit = {
+      //          assert(x > 10)  // OK
+      //          assert(y > 20)  // OK
+      //        }
+      //        def empty: Unit = ()
+      //      }
+      //   }
+      // Then we hoist `Local` as follows:
+      //   case class Local(x: BigInt) {
+      //     @invariant
+      //     def inv: Boolean = {
+      //       this.x > 10 &&
+      //       { val y = x + 10; true } // Note that we do not remove unused let-binding (but could do so)
+      //     }
+      //     // Note that `y` is not translated into a field, only `x`
+      //     // because `y` is a bound variable in the original VC
+      //     def hello: Unit = {
+      //       val y = @DropVCs (x + 10)
+      //       assert(x > 10)  // OK
+      //       assert(y > 20)  // OK
+      //     }
+      //     def empty: Unit = {
+      //       val y = @DropVCs (x + 10)
+      //     }
+      //   }
+      //   // `test` is transformed as usual
+      val allFreeVars      = (exprOps.freeVariablesOf(lcd) ++ exprOps.variablesOf(pc.toClause))
+                                .toSeq.sortBy(_.id.name)
+      val freeVarsAsFields = allFreeVars.filterNot(v => pc.bindings exists (_._1.id == v.id))
+      val freeTypeParams   = exprOps.freeTypeParamsOf(lcd).toSeq.sortBy(_.id.name)
+      val enclosingRef     = context.currentClass.map(cd => This(cd.typed(using symbols).toType))
+      val freeOuterRefs    = (enclosingRef.toSet ++ exprOps.outerThisReferences(lcd).toSet).toSeq.sortBy(_.ct.id.name)
 
       // New necessary fields and type parameters
-      val newTypeParams  = freeTypeParams.map(TypeParameterDef(_))
-      val freeVarFields  = freeVars.map(_.toVal)
+      val newTypeParams  = freeTypeParams.map(tp => TypeParameterDef(tp.freshen))
+
+      // Substitute the free type parameters to their freshened counterpart.
+      class TyMap extends TreeTransformer { mapSlf =>
+        override val s: self.s.type = self.s
+        override val t: self.s.type = self.s
+        override def transform(ty: mapSlf.s.Type): mapSlf.t.Type = ty match {
+          case t: mapSlf.s.TypeParameter if freeTypeParams.indexOf(t) >= 0 =>
+            newTypeParams(freeTypeParams.indexOf(t)).tp
+          case t =>
+            super.transform(t)
+        }
+        override def transform(e: mapSlf.s.Expr): mapSlf.t.Expr = e match {
+          // We need to explicitly transform LetClass to ensure we go through in each local methods
+          // because the deconstructor of LetClass does not deconstruct local methods.
+          case mapSlf.s.LetClass(classes, body) =>
+            LetClass(classes.map(transform), transform(body))
+          case e =>
+            super.transform(e)
+        }
+      }
+      val tyMap = new TyMap
+
+      val newVarFields  = freeVarsAsFields.map(_.toVal.freshen).map(tyMap.transform)
       val outerRefFields = freeOuterRefs.map { r =>
         ValDef(FreshIdentifier(s"outer${r.ct.id.name}"), context.toGlobalType(r.ct)).setPos(lcd.getPos)
-      }
+      }.map(tyMap.transform)
 
       // Convert all parents to a ClassType
-      val parents = lcd.parents map context.toGlobalType
+      val parents = lcd.parents.map(p => tyMap.transform(context.toGlobalType(p)).asInstanceOf[ClassType])
 
       // Build the new class
       val cd = new ClassDef(
         lcd.id,
         lcd.tparams ++ newTypeParams,
         parents,
-        lcd.fields ++ freeVarFields ++ outerRefFields,
+        lcd.fields.map(tyMap.transform) ++ newVarFields ++ outerRefFields,
         lcd.flags
       ).copiedFrom(lcd)
-
-      // Convert the current path condition to an invariant
-      val localInv = pathConditionToInvariant(pathCondition, lcd)
 
       val classType = ClassType(lcd.id, cd.typeArgs)
 
       // Map each free variable to the corresponding field selector
-      val freeVarsMap = freeVars.zip(freeVarFields).map { case (v, vd) =>
+      val freeVarsAsFieldsMap = freeVarsAsFields.zip(newVarFields).map { case (v, vd) =>
         v -> ClassSelector(This(classType).copiedFrom(v), vd.id).copiedFrom(v)
       }.toMap
 
@@ -401,14 +480,35 @@ trait InnerClasses
 
       /** Rewrite the given method to access free variables through the new fields,
         * and to supply the proper arguments when constructing an instance of its own class.
+        * Introduces fresh local variables for let-bound variables in PC, and rewrite the given
+        * method to use these locals.
         */
       def liftMethod(fd: LocalMethodDef): FunDef = {
-        val body = exprOps.preMap {
-          case v: Variable if freeVarsMap contains v =>
-            Some(freeVarsMap(v))
+        // We do something similar to what is done in FunctionClosure#closeFd, where we transform
+        // each let-binding of the PC in Expr let-binding.
+        // However, we do not need to do something about Path.Element.Condition (for the above example, `this.x > 10`),
+        // as these are already "handled" by the ADT invariant.
+        val body = Path.fold[Expr](fd.fullBody, {
+          case (vd, e, acc) => Let(vd, annotated(e, DropVCs), acc).setPos(fd.fullBody)
+        }, (_, acc) => acc)(pc.elements)
 
-          case a @ Assignment(v, e) if freeVarsMap contains v =>
-            val ClassSelector(rec, sel) = freeVarsMap(v)
+        doLiftMethod(fd.copy(fullBody = body))
+      }
+
+      def doLiftMethod(fd: LocalMethodDef): FunDef = {
+        val freshBindings = pc.bindings.map(p => p._1.toVariable -> p._1.toVariable.freshen).toMap
+        val body = exprOps.preMap {
+          case v: Variable if freeVarsAsFieldsMap contains v =>
+            Some(freeVarsAsFieldsMap(v))
+
+          case v: Variable if freshBindings contains v =>
+            Some(freshBindings(v))
+
+          case Let(vd, e, rest) if freshBindings contains vd.toVariable =>
+            Some(Let(freshBindings(vd.toVariable).toVal, e, rest))
+
+          case a @ Assignment(v, e) if freeVarsAsFieldsMap contains v =>
+            val ClassSelector(rec, sel) = freeVarsAsFieldsMap(v)
             Some(FieldAssignment(rec, sel, e).copiedFrom(a))
 
           case thiss: This if freeOuterRefsMap contains thiss.ct.id =>
@@ -419,25 +519,30 @@ trait InnerClasses
 
           case lcc @ LocalClassConstructor(lct, args) if lct.id == lcd.id =>
             val ct = ClassType(lcd.id, lct.tps ++ newTypeParams.map(_.tp))
-            Some(ClassConstructor(ct, args ++ freeVars ++ freeOuterRefs).copiedFrom(lcc))
+            Some(ClassConstructor(ct, args ++ freeVarsAsFields ++ freeOuterRefs).copiedFrom(lcc))
 
           case _ => None
         } (fd.fullBody)
 
-        new FunDef(fd.id, fd.tparams, fd.params, fd.returnType, body, fd.flags).copiedFrom(fd)
+        tyMap.transform(new FunDef(fd.id, fd.tparams, fd.params, fd.returnType, body, fd.flags).copiedFrom(fd))
       }
 
-      val methods = (localInv.toSeq ++ lcd.methods) map liftMethod
-      val typeMembers = lcd.typeMembers map (_.toTypeDef)
+      // Convert the current path condition to an invariant
+      val localInv = pathConditionToInvariant(pc, lcd)
+      // Because the invariant already contains the let-bound variables in its body,
+      // we do not want to introduce them again and therefore use doLiftMethod instead.
+      val methods = (localInv.toSeq map doLiftMethod) ++ (lcd.methods map liftMethod)
+      val typeMembers = lcd.typeMembers map (_.toTypeDef) map tyMap.transform
 
-      checkValidLiftedClass(cd, methods, freeVars)
+      // We use allFreeVars to ensure no mutable variable is captured
+      checkValidLiftedClass(cd, methods, allFreeVars)
 
       ClassSubst(
         cd,
         methods,
         typeMembers,
-        freeTypeParams,
-        freeVars.map(_.toVal),
+        freeTypeParams zip newTypeParams,
+        freeVarsAsFields zip newVarFields,
         outerRefFields,
         classType
       )
@@ -449,7 +554,7 @@ trait InnerClasses
   override protected val funCache: SimpleCache[s.FunDef, FunctionResult] = new SimpleCache[s.FunDef, FunctionResult]
 
   override protected def extractFunction(context: TransformerContext, fd: s.FunDef): FunctionResult = {
-    import context._
+    import context.{given, _}
 
     val optClass = fd.flags.collectFirst { case IsMethodOf(cid) => symbols.classes(cid) }
     liftLocalClasses(fd, Context(currentClass = optClass, currentFunction = Some(fd)))
@@ -457,11 +562,7 @@ trait InnerClasses
 
   override protected def registerFunctions(symbols: t.Symbols, results: Seq[FunctionResult]): t.Symbols = {
     val (functions, locals) = results.unzip
-
-    val (localClasses, localMethods, localTypeDefs) = locals.flatten.map {
-      case (cd, methods, typeDefs) => t.exprOps.freshenClass(cd, methods, typeDefs)
-    }.unzip3
-
+    val (localClasses, localMethods, localTypeDefs) = locals.flatten.unzip3
     symbols
       .withClasses(localClasses)
       .withTypeDefs(localTypeDefs.flatten)
@@ -469,18 +570,17 @@ trait InnerClasses
   }
 
   override protected def extractClass(context: TransformerContext, cd: s.ClassDef): t.ClassDef = {
-    import context._
+    import context.{given, _}
     context.transform((new LiftingTransformer).transform(cd, Context.empty))
   }
 }
 
 object InnerClasses {
-  def apply(ts: Trees, tt: methods.Trees)(implicit ctx: inox.Context): ExtractionPipeline {
+  def apply(ts: Trees, tt: methods.Trees)(using inox.Context): ExtractionPipeline {
     val s: ts.type
     val t: tt.type
-  } = new InnerClasses {
-    override val s: ts.type = ts
-    override val t: tt.type = tt
-    override val context = ctx
+  } = {
+    class Impl(override val s: ts.type, override val t: tt.type) extends InnerClasses(s, t)
+    new Impl(ts, tt)
   }
 }

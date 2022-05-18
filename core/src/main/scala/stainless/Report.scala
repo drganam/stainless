@@ -9,7 +9,7 @@ import inox.solvers.Solver
 import io.circe._
 import io.circe.syntax._
 
-import stainless.utils.JsonConvertions._
+import stainless.utils.JsonConvertions.given
 import stainless.verification._
 
 case class ReportStats(total: Int, time: Long, valid: Int, validFromCache: Int, invalid: Int, unknown: Int) {
@@ -57,8 +57,8 @@ trait AbstractReport[SelfType <: AbstractReport[SelfType]] { self: SelfType =>
   def stats: ReportStats
 
   final def emit(ctx: inox.Context): Unit = {
-    val compact = isCompactModeOn(ctx)
-    val table = emitTable(!compact)(ctx)
+    val compact = isCompactModeOn(using ctx)
+    val table = emitTable(!compact)(using ctx)
     val asciiOnly = ctx.options.findOptionOrDefault(inox.optNoColors)
     ctx.reporter.info(table.render(asciiOnly))
   }
@@ -76,25 +76,20 @@ trait AbstractReport[SelfType <: AbstractReport[SelfType]] { self: SelfType =>
   protected[stainless] def annotatedRows: Seq[RecordRow]
 
   /** Filter, sort & process rows. */
-  private def processRows(full: Boolean)(implicit ctx: inox.Context): Seq[Row] = {
+  private def processRows(full: Boolean)(using ctx: inox.Context): Seq[Row] = {
     val printUniqueName = ctx.options.findOptionOrDefault(inox.ast.optPrintUniqueIds)
-
-    // @nv: scala suddently came out with a divering implicit resolution here so we have no other choice
-    //      than to manually provide a correct odering to the sort below.
-    val ordering = Ordering.Tuple2(implicitly[Ordering[Identifier]], implicitly[Ordering[inox.utils.Position]])
-
     for {
-      RecordRow(id, pos, level, extra, time, model) <- annotatedRows.sortBy(r => r.id -> r.pos)(ordering)
+      RecordRow(id, pos, level, extra, time, model) <- annotatedRows.sortBy(r => r.id -> r.pos)
       if full || level != Level.Normal
       name = if (printUniqueName) id.uniqueName else id.name
       contents = Position.smartPos(pos) +: (name +: (extra :+ f"${time / 1000d}%3.1f"))
     } yield Row(contents map { str => Cell(withColor(str, level)) })
   }
 
-  private def withColor(str: String, level: Level)(implicit ctx: inox.Context): String =
+  private def withColor(str: String, level: Level)(using inox.Context): String =
     withColor(str, colorOf(level))
 
-  private def withColor(str: String, color: String)(implicit ctx: inox.Context): String =
+  private def withColor(str: String, color: String)(using ctx: inox.Context): String =
     if (ctx.options.findOptionOrDefault(inox.optNoColors)) str
     else s"$color$str${Console.RESET}"
 
@@ -104,7 +99,7 @@ trait AbstractReport[SelfType <: AbstractReport[SelfType]] { self: SelfType =>
     case Level.Error   => Console.RED
   }
 
-  def hasError(identifier: Option[Identifier])(implicit ctx: inox.Context): Boolean = identifier match {
+  def hasError(identifier: Option[Identifier])(using inox.Context): Boolean = identifier match {
     case None => false
     case Some(i) => annotatedRows.exists(elem => elem match {
       case RecordRow(id, pos, level, extra, time, model) => {
@@ -113,7 +108,7 @@ trait AbstractReport[SelfType <: AbstractReport[SelfType]] { self: SelfType =>
     })
   }
 
-  def hasUnknown(identifier: Option[Identifier])(implicit ctx: inox.Context): Boolean = identifier match {
+  def hasUnknown(identifier: Option[Identifier])(using inox.Context): Boolean = identifier match {
     case None => false
     case Some(i) => annotatedRows.exists(elem => elem match {
       case RecordRow(id, pos, level, extra, time, model) => level == Level.Warning && id == i
@@ -121,11 +116,11 @@ trait AbstractReport[SelfType <: AbstractReport[SelfType]] { self: SelfType =>
   }
 
   // Emit the report table, with all VCs when full is true, otherwise only with unknown/invalid VCs.
-  private def emitTable(full: Boolean)(implicit ctx: inox.Context): Table = {
+  private def emitTable(full: Boolean)(using inox.Context): Table = {
     val rows  = processRows(full)
     val width = if (rows.isEmpty) 1 else rows.head.cellsSize // all rows must have the same size
     val color = if (isSuccess) Console.GREEN else Console.RED
-    
+
     val footer =
       f"total: ${stats.total}%-4d " +
       f"valid: ${stats.valid}%-4d (${stats.validFromCache} from cache) " +
@@ -147,7 +142,8 @@ trait BuildableAbstractReport[Record <: AbstractReportHelper.Record,
                               SelfType <: BuildableAbstractReport[Record, SelfType]]
   extends AbstractReport[SelfType] { self: SelfType =>
 
-  protected implicit val encoder: Encoder[Record]
+  protected val encoder: Encoder[Record]
+  given Encoder[Record] = encoder
 
   protected val results: Seq[Record]
   protected val sources: Set[Identifier]

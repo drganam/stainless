@@ -17,14 +17,14 @@ import scala.collection.mutable.{ Map => MutableMap }
  * NOTE in C99 there's the concept of strict aliasing (cf. §6.5/7), but since we don't do any weird
  *      cast operation in our translation, the overapproximation mentioned above is not an issue.
  */
-trait ComputeFunCtxPhase extends LeonPipeline[Dependencies, FunCtxDB] {
+class ComputeFunCtxPhase(using override val context: inox.Context) extends LeonPipeline[Symbols, FunCtxDB](context) {
+  import context.{given, _}
+
   val name = "Function context computer"
-  implicit val context: inox.Context
-  import context._
 
-  private implicit val debugSection = DebugSectionGenC
+  private given givenDebugSection: DebugSectionGenC.type = DebugSectionGenC
 
-  def run(deps: Dependencies): FunCtxDB = {
+  def run(syms: Symbols): FunCtxDB = {
 
     val db = MutableMap[LocalFunDef, Seq[VarInfo]]()
 
@@ -40,7 +40,6 @@ trait ComputeFunCtxPhase extends LeonPipeline[Dependencies, FunCtxDB] {
     }
 
     def rec(expr: Expr, env: Seq[VarInfo]): Unit = expr match {
-      // Handle the interesting cases first, or they will fall into `case Operator(args, _)`.
       case Let(binder, value, rest) =>
         rec(value, env) // binder not yet available here!
         val env2 = env :+ VarInfo(binder, binder.tpe, isVar = false)
@@ -65,16 +64,9 @@ trait ComputeFunCtxPhase extends LeonPipeline[Dependencies, FunCtxDB] {
     }
 
     // Process every top level function to register function contexts for their inner functions;
-    val topLevelFuns: Set[FunDef] = deps.deps collect { case fd: FunDef => fd }
-    topLevelFuns foreach { fd => rec(fd.fullBody, fd.params map toVarInfo) }
+    for (fd <- syms.functions.values) rec(fd.fullBody, fd.params map toVarInfo)
 
     db.toMap // Make it immutable
   }
 
-}
-
-object ComputeFunCtxPhase {
-  def apply(implicit ctx: inox.Context): LeonPipeline[Dependencies, FunCtxDB] = new {
-    val context = ctx
-  } with ComputeFunCtxPhase
 }

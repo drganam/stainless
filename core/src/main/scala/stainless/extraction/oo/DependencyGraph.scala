@@ -6,11 +6,21 @@ package oo
 
 import inox.utils.Graphs._
 
-trait DependencyGraph extends ast.DependencyGraph {
+trait DependencyGraph extends ast.DependencyGraph { self =>
   protected val trees: oo.Trees
   import trees._
 
-  protected class ClassCollector extends Collector with TreeTraverser {
+  // We first extend TreeTraverser and then Collector, otherwise we get the following error:
+  //
+  //   cannot override final member:
+  //      final override def traverse(e: Expr, env: Env): Unit (defined in trait TreeTraverser)
+  //      with  override def traverse(e: Expr, env: Env): Unit (defined in trait Traverser)
+  //
+  protected class ClassCollector(override val trees: self.trees.type)
+    extends TreeTraverser with Collector {
+
+    def this() = this(self.trees)
+
     def traverseDef(defn: Definition): Unit = defn match {
       case as: ADTSort => traverse(as)
       case fd: FunDef => traverse(fd)
@@ -83,7 +93,7 @@ trait DependencyGraph extends ast.DependencyGraph {
       }
 
       if (cd.flags.contains(IsSealed))
-        cd.children(symbols) foreach { dd =>
+        cd.children(using symbols) foreach { dd =>
           g += SimpleEdge(cd.id, dd.id)
         }
     }

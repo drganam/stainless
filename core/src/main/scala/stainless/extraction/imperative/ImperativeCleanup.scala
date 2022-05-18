@@ -14,20 +14,18 @@ package imperative
   * We also eliminate expressions that deconstruct a tuple just to
   * reconstruct it right after.
   */
-trait ImperativeCleanup
+class ImperativeCleanup(override val s: Trees, override val t: oo.Trees)
+                       (using override val context: inox.Context)
   extends oo.SimplePhase
      with SimplyCachedFunctions
      with SimplyCachedSorts
      with oo.SimplyCachedTypeDefs
      with oo.SimplyCachedClasses { self =>
 
-  val s: Trees
-  val t: oo.Trees
+  override protected def getContext(symbols: s.Symbols) = new TransformerContext(self.s, self.t)(using symbols)
 
-  override protected def getContext(symbols: s.Symbols) = new TransformerContext(symbols)
-  protected class TransformerContext(val symbols: s.Symbols) extends oo.TreeTransformer { // CheckingTransformer {
-    val s: self.s.type = self.s
-    val t: self.t.type = self.t
+  protected class TransformerContext(override val s: self.s.type, override val t: self.t.type)
+                                    (using val symbols: s.Symbols) extends oo.ConcreteTreeTransformer(s, t) { // CheckingTransformer {
     import symbols._
 
     def isImperativeFlag(f: s.Flag): Boolean = f match {
@@ -56,51 +54,49 @@ trait ImperativeCleanup
     object ReconstructTuple {
       def unapply(e: s.Expr): Option[s.Expr] = e match {
         case s.Let(vd, tuple, Lets(lets, s.Tuple(es))) =>
-          val letsMap = lets.toMap
+          val letsMap = lets.map { case (vd, e) => (vd.id, e) }.toMap
           if (
             vd.getType.isInstanceOf[s.TupleType] &&
             es.length == vd.getType.asInstanceOf[s.TupleType].bases.length &&
             es.zipWithIndex.forall {
-            case (e0 : s.Variable, i) =>
-              letsMap.contains(e0.toVal) &&
-              letsMap(e0.toVal) == s.TupleSelect(vd.toVariable, i + 1)
-            case (e0, i) =>
-              e0 == s.TupleSelect(vd.toVariable, i + 1)
-          })
+              case (e0 : s.Variable, i) =>
+                letsMap.contains(e0.id) &&
+                letsMap(e0.id) == s.TupleSelect(vd.toVariable, i + 1)
+              case (e0, i) =>
+                e0 == s.TupleSelect(vd.toVariable, i + 1)
+            }
+          )
             Some(tuple)
           else
             None
+
+        case s.Let(vd, e, Lets(Seq(), v)) if v == vd.toVariable =>
+          Some(e)
+
         case _ => None
       }
     }
 
-    override def transform(expr: s.Expr): t.Expr = expr match {
-      // Desugar Boolean bitwise operations &, | and ^
-      case (_: s.BoolBitwiseAnd | _: s.BoolBitwiseOr | _: s.BoolBitwiseXor) =>
-        val (lhs, rhs, recons): (s.Expr, s.Expr, (t.Expr, t.Expr) => t.Expr) = expr match {
-          case s.BoolBitwiseAnd(lhs, rhs) => (lhs, rhs, t.And(_, _).copiedFrom(expr))
-          case s.BoolBitwiseOr(lhs, rhs) => (lhs, rhs, t.Or(_, _).copiedFrom(expr))
-          case s.BoolBitwiseXor(lhs, rhs) => (lhs, rhs, (l,r) => t.Not(t.Equals(l, r).copiedFrom(expr)).copiedFrom(expr))
-        }
+    override def transform(expr: s.Expr): t.Expr = {
+      super.transform(s.exprOps.postMap { expr => expr match {
+        case s.BoolBitwiseAnd(lhs, rhs) => Some(s.And(lhs, rhs).copiedFrom(expr))
+        case s.BoolBitwiseOr(lhs, rhs) => Some(s.Or(lhs, rhs).copiedFrom(expr))
+        case s.BoolBitwiseXor(lhs, rhs) => Some(s.Not(s.Equals(lhs, rhs).copiedFrom(expr)).copiedFrom(expr))
 
-        val l = t.ValDef(FreshIdentifier("lhs"), transform(lhs.getType)).copiedFrom(lhs)
-        val r = t.ValDef(FreshIdentifier("rhs"), transform(rhs.getType)).copiedFrom(rhs)
-        t.Let(l, transform(lhs),
-          t.Let(r, transform(rhs),
-            recons(l.toVariable, r.toVariable)).copiedFrom(expr)).copiedFrom(expr)
+        case s.Variable(id, tpe, flags) =>
+          Some(s.Variable(id, tpe, flags filterNot isImperativeFlag).copiedFrom(expr))
 
-      case s.Variable(id, tpe, flags) =>
-        t.Variable(id, transform(tpe), flags filterNot isImperativeFlag map transform).copiedFrom(expr)
+        case s.MutableMapWithDefault(from, to, default) =>
+          Some(s.FiniteMap(Seq(), s.Application(default, Seq()), from, to))
+        case s.MutableMapApply(map, index) => Some(s.MapApply(map, index))
+        case s.MutableMapUpdated(map, key, value) => Some(s.MapUpdated(map, key, value))
+        case s.MutableMapDuplicate(map) => Some(map)
 
-      case s.MutableMapWithDefault(from, to, default) =>
-        t.FiniteMap(Seq(), t.Application(transform(default), Seq()), transform(from), transform(to))
-      case s.MutableMapApply(map, index) => t.MapApply(transform(map), transform(index))
-      case s.MutableMapUpdated(map, key, value) => t.MapUpdated(transform(map), transform(key), transform(value))
-      case s.MutableMapDuplicate(map) => transform(map)
+        case ReconstructTuple(tuple) => Some(tuple)
 
-      case ReconstructTuple(tuple) => transform(tuple)
+        case _ => None
+      } } (expr))
 
-      case _ => super.transform(expr)
     }
 
     override def transform(vd: s.ValDef): t.ValDef = {
@@ -158,12 +154,11 @@ trait ImperativeCleanup
 }
 
 object ImperativeCleanup {
-  def apply(ts: Trees, tt: oo.Trees)(implicit ctx: inox.Context): ExtractionPipeline {
+  def apply(ts: Trees, tt: oo.Trees)(using inox.Context): ExtractionPipeline {
     val s: ts.type
     val t: tt.type
-  } = new ImperativeCleanup {
-    override val s: ts.type = ts
-    override val t: tt.type = tt
-    override val context = ctx
+  } = {
+    class Impl(override val s: ts.type, override val t: tt.type) extends ImperativeCleanup(s, t)
+    new Impl(ts, tt)
   }
 }

@@ -6,6 +6,7 @@ package verification
 import inox.Options
 import inox.solvers._
 
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 import scala.util.{ Success, Failure }
 import scala.concurrent.Future
 import scala.collection.mutable
@@ -22,16 +23,16 @@ trait VerificationChecker { self =>
   val context: inox.Context
   val semantics: program.Semantics
 
-  import context._
+  import context.{given, _}
   import program._
   import program.trees._
-  import program.symbols._
+  import program.symbols.{given, _}
 
   private lazy val failEarly = options.findOptionOrDefault(optFailEarly)
   private lazy val failInvalid = options.findOptionOrDefault(optFailInvalid)
   private lazy val checkModels = options.findOptionOrDefault(optCheckModels)
 
-  implicit val debugSection = DebugSectionVerification
+  given givenDebugSection: DebugSectionVerification.type = DebugSectionVerification
 
   type VC = verification.VC[program.trees.type]
   val VC = verification.VC
@@ -46,7 +47,7 @@ trait VerificationChecker { self =>
     type S <: inox.solvers.combinators.TimeoutSolver { val program: self.program.type }
   }
 
-  lazy val evaluator = semantics.getEvaluator(context)
+  lazy val evaluator = semantics.getEvaluator(using context)
 
   protected def createFactory(opts: Options): TimeoutSolverFactory
 
@@ -86,48 +87,56 @@ trait VerificationChecker { self =>
   private lazy val unknownResult: VCResult = VCResult(VCStatus.Unknown, None, None)
 
   def checkVCs(vcs: Seq[VC], stopWhen: VCResult => Boolean = defaultStop): Future[Map[VC, VCResult]] = {
-    if (!VerificationChecker.startedVerification) reporter.info("Starting verification...")
-    VerificationChecker.startedVerification = true
+    if (!VerificationChecker.startedVerification.getAndSet(true)) reporter.info("Starting verification...")
 
     @volatile var stop = false
 
-    VerificationChecker.total += vcs.length
-    reporter.onCompilerProgress(VerificationChecker.verified, VerificationChecker.total)
+    VerificationChecker.total.addAndGet(vcs.length)
+    reporter.onCompilerProgress(VerificationChecker.verified.get(), VerificationChecker.total.get())
 
     val initMap: Map[VC, VCResult] = vcs.map(vc => vc -> unknownResult).toMap
 
     import MainHelpers._
 
-    val results = Future.traverse(vcs) { vc =>
-      Future.successful {
-        if (stop) None else {
-          val simplifiedCondition = simplifyExpr(
-            simplifyLets(removeAssertions(vc.condition))
-          )(PurityOptions.assumeChecked)
+    def processVC(vc: VC): Option[(VC, VCResult)] = {
+      if (stop) None else {
+        val simplifiedCondition = simplifyExpr(
+          simplifyLets(removeAssertions(vc.condition))
+        )(using PurityOptions.assumeChecked)
 
-          val simplifiedVC = (vc.copy(condition = simplifiedCondition): VC).setPos(vc)
+        // For some reasons, the synthesized copy method lacks default parameters...
+        val simplifiedVC = (vc.copy()(condition = simplifiedCondition, fid = vc.fid, kind = vc.kind, satisfiability = vc.satisfiability): VC).setPos(vc)
 
-          val sf = getFactoryForVC(vc)
-          val res = checkVC(simplifiedVC, vc, sf)
+        val sf = getFactoryForVC(vc)
+        val res = checkVC(simplifiedVC, vc, sf)
 
-          val shouldStop = stopWhen(res)
-          if (res.isValid) VerificationChecker.verified += 1
-          reporter.onCompilerProgress(VerificationChecker.verified, VerificationChecker.total)
+        val shouldStop = stopWhen(res)
+        val verif =
+          if (res.isValid) VerificationChecker.verified.incrementAndGet()
+          else VerificationChecker.verified.get()
+        reporter.onCompilerProgress(verif, VerificationChecker.total.get())
 
-          interruptManager.synchronized { // Make sure that we only interrupt the manager once.
-            if (shouldStop && !stop && !interruptManager.isInterrupted) {
-              stop = true
-              interruptManager.interrupt()
-            }
+        interruptManager.synchronized { // Make sure that we only interrupt the manager once.
+          if (shouldStop && !stop && !interruptManager.isInterrupted) {
+            stop = true
+            interruptManager.interrupt()
           }
-
-          if (interruptManager.isInterrupted) {
-            interruptManager.reset()
-          }
-
-          Some(vc -> res)
         }
+
+        if (interruptManager.isInterrupted) {
+          interruptManager.reset()
+        }
+
+        Some(vc -> res)
       }
+    }
+
+    val results = Future.traverse(vcs) { vc =>
+      // Note that `successful(e)` is eager and gets immediately evaluated whereas Future(e) is a scheduled task.
+      // If parallelism is not explicitly enabled, we fallback to eager evaluation
+      // (even on a thread pool of a single thread, it seems that the VCs won't necessarily be sequentially processed).
+      if (nParallel.exists(_ > 1)) Future(processVC(vc))
+      else Future.successful(processVC(vc))
     }.map(_.flatten)
 
     results.map(initMap ++ _)
@@ -187,7 +196,7 @@ trait VerificationChecker { self =>
     }
 
     val newAdt = ADT(adt.id, adt.tps, newArgs)
-    val adtVar = Variable(FreshIdentifier("adt"), adt.getType(symbols), Seq())
+    val adtVar = Variable(FreshIdentifier("adt"), adt.getType(using symbols), Seq())
     val newInv = FunctionInvocation(invId, inv.tps, Seq(adtVar))
     val newModel = inox.Model(program)(model.vars + (adtVar.toVal -> newAdt), model.chooses)
     val newCondition = exprOps.replace(Map(inv -> newInv), vc.condition)
@@ -221,13 +230,13 @@ trait VerificationChecker { self =>
 
   protected def checkVC(vc: VC, origVC: VC, sf: SolverFactory { val program: self.program.type }): VCResult = {
     import SolverResponses._
-    val s = sf.getNewSolver
+    val s = sf.getNewSolver()
 
     try {
       val cond = vc.condition
 
       reporter.synchronized {
-        reporter.debug(s" - Now solving '${vc.kind}' VC for ${vc.fd.asString} @${vc.getPos}...")
+        reporter.debug(s" - Now solving '${vc.kind}' VC for ${vc.fid.asString} @${vc.getPos}...")
         debugVC(vc, origVC)
         reporter.debug("Solving with: " + s.name)
       }
@@ -244,7 +253,7 @@ trait VerificationChecker { self =>
 
       val vcres = tryRes match {
         case _ if interruptManager.isInterrupted =>
-          VCResult(VCStatus.Cancelled, Some(s), Some(time))
+          VCResult(VCStatus.Cancelled, Some(s.name), Some(time))
 
         case Success(res) => res match {
           case Unknown =>
@@ -254,34 +263,34 @@ trait VerificationChecker { self =>
                 case _ => VCStatus.Unknown
               }
               case _ => VCStatus.Unknown
-            }, Some(s), Some(time))
+            }, Some(s.name), Some(time))
 
           case Unsat if !vc.satisfiability =>
-            VCResult(VCStatus.Valid, s.getResultSolver, Some(time))
+            VCResult(VCStatus.Valid, s.getResultSolver.map(_.name), Some(time))
 
           case SatWithModel(model) if checkModels && vc.kind.isInstanceOf[VCKind.AdtInvariant] =>
             val VCKind.AdtInvariant(invId) = vc.kind
             val status = checkAdtInvariantModel(vc, invId, model)
-            VCResult(status, s.getResultSolver, Some(time))
+            VCResult(status, s.getResultSolver.map(_.name), Some(time))
 
-          case SatWithModel(model) if !vc.satisfiability => 
-            extraction.trace.Trace.f(program)(model)(vc.fd)
-            VCResult(VCStatus.Invalid(VCStatus.CounterExample(model)), s.getResultSolver, Some(time))
+          case SatWithModel(model) if !vc.satisfiability =>
+            extraction.trace.Trace.f(program)(model)(vc.fid)
+            VCResult(VCStatus.Invalid(VCStatus.CounterExample(model)), s.getResultSolver.map(_.name), Some(time))
 
           case Sat if vc.satisfiability =>
-            VCResult(VCStatus.Valid, s.getResultSolver, Some(time))
+            VCResult(VCStatus.Valid, s.getResultSolver.map(_.name), Some(time))
 
           case Unsat if vc.satisfiability =>
-            VCResult(VCStatus.Invalid(VCStatus.Unsatisfiable), s.getResultSolver, Some(time))
+            VCResult(VCStatus.Invalid(VCStatus.Unsatisfiable), s.getResultSolver.map(_.name), Some(time))
         }
 
         case Failure(u: inox.Unsupported) =>
           reporter.warning(u.getMessage)
-          VCResult(VCStatus.Unsupported, Some(s), Some(time))
+          VCResult(VCStatus.Unsupported, Some(s.name), Some(time))
 
         case Failure(e @ NotWellFormedException(d, info)) =>
           reporter.error(d.getPos, e.getMessage)
-          VCResult(VCStatus.Crashed, Some(s), Some(time))
+          VCResult(VCStatus.Crashed, Some(s.name), Some(time))
 
         case Failure(e) => reporter.internalError(e)
       }
@@ -290,7 +299,7 @@ trait VerificationChecker { self =>
       reporter.debug(vcResultMsg)
 
       reporter.synchronized {
-        val descr = s" - Result for '${vc.kind}' VC for ${vc.fd.asString} @${vc.getPos}:"
+        val descr = s" - Result for '${vc.kind}' VC for ${vc.fid.asString} @${vc.getPos}:"
 
         vcres.status match {
           case VCStatus.Valid =>
@@ -300,7 +309,7 @@ trait VerificationChecker { self =>
           case VCStatus.Invalid(reason) =>
             reporter.warning(descr)
             // avoid reprinting VC if --debug=verification is enabled
-            if (!reporter.isDebugEnabled(DebugSectionVerification))
+            if (!reporter.isDebugEnabled(using DebugSectionVerification))
               reporter.warning(prettify(vc.condition).asString)
             reporter.warning(vc.getPos, " => INVALID")
             reason match {
@@ -315,7 +324,7 @@ trait VerificationChecker { self =>
           case status =>
             reporter.warning(descr)
             // avoid reprinting VC if --debug=verification is enabled
-            if (!reporter.isDebugEnabled(DebugSectionVerification))
+            if (!reporter.isDebugEnabled(using DebugSectionVerification))
               reporter.warning(prettify(vc.condition).asString)
             reporter.warning(vc.getPos, " => " + status.name.toUpperCase)
         }
@@ -327,11 +336,11 @@ trait VerificationChecker { self =>
     }
   }
 
-  protected def debugVC(simplifiedVC: VC, origVC: VC)(implicit debugSection: inox.DebugSection): Unit = {
+  protected def debugVC(simplifiedVC: VC, origVC: VC)(using inox.DebugSection): Unit = {
     import stainless.utils.StringUtils.indent
 
-    if (reporter.isDebugEnabled(debugSection)) {
-      if (!reporter.isDebugEnabled(DebugSectionFullVC)) {
+    if (reporter.isDebugEnabled) {
+      if (!reporter.isDebugEnabled(using DebugSectionFullVC)) {
         reporter.debug(prettify(simplifiedVC.condition).asString)
       } else {
         reporter.whenDebug(DebugSectionFullVC) { debug =>
@@ -350,21 +359,20 @@ trait VerificationChecker { self =>
 
 object VerificationChecker {
   // number of verified VCs (incremented when a VC is verified)
-  var verified: Int = 0
+  val verified: AtomicInteger = new AtomicInteger(0)
   // total number of VCs (we add to that counter when entering `checkVCs`)
   // this is cumulative across different subprograms (for `SplitCallBack`)
-  var total: Int = 0
+  val total: AtomicInteger = new AtomicInteger(0)
 
   // flag to remember whether we have shown "Starting verification" message to the user
-  var startedVerification = false
+  val startedVerification: AtomicBoolean = new AtomicBoolean(false)
 
   // reset the counters before each watch cycle
   def reset(): Unit = {
-    verified = 0
-    total = 0
-    startedVerification = false
+    verified.set(0)
+    total.set(0)
+    startedVerification.set(false)
   }
-
 
   def verify(p: StainlessProgram, ctx: inox.Context)
             (vcs: Seq[VC[p.trees.type]]): Future[Map[VC[p.trees.type], VCResult[p.Model]]] = {

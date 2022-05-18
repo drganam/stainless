@@ -15,20 +15,29 @@ trait CheckFilter {
     functions map CheckFilter.fullNameToPath
   }
 
-  private def shouldBeChecked(fid: Identifier, flags: Seq[trees.Flag]): Boolean = pathsOpt match {
-    case None =>
-      val isLibrary = flags exists (_.name == "library")
-      val isUnchecked = flags contains DropVCs
-      !(isLibrary || isUnchecked)
-
+  private def isInOptions(fid: Identifier): Boolean = pathsOpt match {
+    case None => true
     case Some(paths) =>
       // Support wildcard `_` as specified in the documentation.
       // A leading wildcard is always assumes.
+      pathsOpt.isEmpty
       val path: Path = CheckFilter.fullNameToPath(CheckFilter.fixedFullName(fid))
       paths exists { p =>
         if (p endsWith Seq("_")) path containsSlice p.init
         else path endsWith p
       }
+  }
+
+  private def shouldBeChecked(fid: Identifier, flags: Seq[trees.Flag]): Boolean = {
+    val isUnchecked = flags.contains(DropVCs)
+    pathsOpt match {
+      case None =>
+        val isLibrary = flags exists (_.name == "library")
+        val isUnchecked = flags contains DropVCs
+        !(isLibrary || isUnchecked)
+
+      case Some(paths) => !isUnchecked && isInOptions(fid)
+    }
   }
 
   def filter(ids: Seq[Identifier], symbols: trees.Symbols, component: Component): Seq[Identifier] = {
@@ -63,8 +72,10 @@ trait CheckFilter {
   }
 
   /** Checks whether the given function/class should be verified at some point. */
-  def shouldBeChecked(fd: FunDef): Boolean =
-    shouldBeChecked(fd.id, fd.flags)
+  def shouldBeChecked(fd: FunDef): Boolean = shouldBeChecked(fd.id, fd.flags)
+
+  def isInOptions(fd: FunDef): Boolean = isInOptions(fd.id)
+
 }
 
 object CheckFilter {
@@ -81,16 +92,16 @@ object CheckFilter {
 
   // TODO this is probably done somewhere else in a cleaner fasion...
   def fixedFullName(id: Identifier): String = id.fullName
-    .replaceAllLiterally("$bar", "|")
-    .replaceAllLiterally("$up", "^")
-    .replaceAllLiterally("$eq", "=")
-    .replaceAllLiterally("$plus", "+")
-    .replaceAllLiterally("$minus", "-")
-    .replaceAllLiterally("$times", "*")
-    .replaceAllLiterally("$div", "/")
-    .replaceAllLiterally("$less", "<")
-    .replaceAllLiterally("$geater", ">")
-    .replaceAllLiterally("$colon", ":")
-    .replaceAllLiterally("$amp", "&")
-    .replaceAllLiterally("$tilde", "~")
+    .replace("$bar", "|")
+    .replace("$up", "^")
+    .replace("$eq", "=")
+    .replace("$plus", "+")
+    .replace("$minus", "-")
+    .replace("$times", "*")
+    .replace("$div", "/")
+    .replace("$less", "<")
+    .replace("$geater", ">")
+    .replace("$colon", ":")
+    .replace("$amp", "&")
+    .replace("$tilde", "~")
 }

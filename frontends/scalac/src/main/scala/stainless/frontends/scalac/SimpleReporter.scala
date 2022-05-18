@@ -19,11 +19,14 @@ class SimpleReporter(val settings: Settings, reporter: inox.Reporter) extends Fi
     INFO    -> 0,
   )
 
-  private def label(severity: Severity): String = severity match {
-    case ERROR   => "error"
-    case WARNING => "warning"
-    case INFO    => null
-    case _       => throw new Exception("Severity should be one of ERROR, WARNING, INFO")
+  private def label(severity: Severity): String = {
+    // the labels are not stable identifier, as such we cannot directly pattern patch on them, so we must explicitly compare them with ==
+    severity match {
+      case x if x == ERROR   => "error"
+      case x if x == WARNING => "warning"
+      case x if x == INFO    => null
+      case _                 => throw new Exception("Severity should be one of ERROR, WARNING, INFO")
+    }
   }
 
   private def clabel(severity: Severity): String = {
@@ -35,13 +38,14 @@ class SimpleReporter(val settings: Settings, reporter: inox.Reporter) extends Fi
     StringOps.countElementsAsString(count(severity), label(severity))
 
   /** Prints the message. */
-  def printMessage(msg: String, pos: inox.utils.Position, severity: Severity) {
+  def printMessage(msg: String, pos: inox.utils.Position, severity: Severity): Unit = {
+    // the labels are not stable identifier, as such we cannot directly pattern patch on them, so we must explicitly compare them with ==
     severity match {
-      case ERROR =>
+      case x if x == ERROR =>
         reporter.error(pos, msg)
-      case WARNING =>
+      case x if x == WARNING =>
         reporter.warning(pos, msg)
-      case INFO =>
+      case x if x == INFO =>
         reporter.info(pos, msg)
       case _ =>
         throw new Exception("Severity should be one of ERROR, WARNING, INFO")
@@ -49,7 +53,7 @@ class SimpleReporter(val settings: Settings, reporter: inox.Reporter) extends Fi
   }
 
   /** Prints the message with the given position indication. */
-  def printMessage(posIn: Position, msg: String, severity: Severity) {
+  def printMessage(posIn: Position, msg: String, severity: Severity): Unit = {
     val pos = if (posIn eq null) NoPosition
               else if (posIn.isDefined) posIn.finalPosition
               else posIn
@@ -64,11 +68,11 @@ class SimpleReporter(val settings: Settings, reporter: inox.Reporter) extends Fi
     }
   }
 
-  def print(pos: Position, msg: String, severity: Severity) {
+  def print(pos: Position, msg: String, severity: Severity): Unit = {
     printMessage(pos, clabel(severity) + msg, severity)
   }
 
-  def display(pos: Position, msg: String, severity: Severity) {
+  def display(pos: Position, msg: String, severity: Severity): Unit = {
     count(severity) += 1
     if (severity != ERROR || count(severity) <= ERROR_LIMIT)
       print(pos, msg, severity)

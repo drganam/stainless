@@ -8,8 +8,8 @@ trait GhostChecker { self: EffectsAnalyzer =>
   import s._
 
   protected def checkGhost(fd: FunDef)(analysis: EffectsAnalysis): Unit = {
-    import analysis._
-    import symbols._
+    import analysis.{given, _}
+    import symbols.{given, _}
 
     def isGhostEffect(effect: Effect): Boolean = {
       def rec(tpe: Type, path: Seq[Accessor]): Boolean = (tpe, path) match {
@@ -89,7 +89,7 @@ trait GhostChecker { self: EffectsAnalyzer =>
         () // Synthetic functions should always be fine with respect to ghost flow
       } else if (fun.flags contains Ghost) {
         effects(fun).find(!isGhostEffect(_)) match {
-          case Some(eff) => throw ImperativeEliminationException(fun, s"Ghost function cannot have effect on non-ghost state: ${eff.targetString}")
+          case Some(eff) => throw ImperativeEliminationException(fun, s"Ghost function ${fun.id.asString} cannot have effect on non-ghost state: ${eff.targetString}")
           case None => ()
         }
         new Checker(true).traverse(fun)
@@ -100,7 +100,8 @@ trait GhostChecker { self: EffectsAnalyzer =>
       }
     }
 
-    class Checker(inGhost: Boolean) extends SelfTreeTraverser {
+    class Checker(inGhost: Boolean) extends ConcreteOOSelfTreeTraverser {
+
       private[this] def isADT(e: Expr): Boolean = e.getType match {
         case _: ADTType => true
         case _ => false

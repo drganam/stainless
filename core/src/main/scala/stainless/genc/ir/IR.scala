@@ -4,6 +4,8 @@ package stainless
 package genc
 package ir
 
+import scala.collection.mutable.{ Set => MutableSet }
+
 /*
  * A relatively immutable Intermediary Representation for the Scala to C conversion.
  *
@@ -30,7 +32,7 @@ private[genc] sealed trait IR { ir =>
   sealed abstract class Tree {
     override def toString: String = prettyString(0)
 
-    def prettyString(indent: Int): String = printer(this)(printer.Context(indent))
+    def prettyString(indent: Int): String = printer(this)(using printer.Context(indent))
   }
 
 
@@ -45,6 +47,22 @@ private[genc] sealed trait IR { ir =>
     classes: Seq[ClassDef]
   ) {
     override def toString: String = printer(this)
+
+    def size(using inox.Context): Int = {
+      var result = 0
+      new Visitor[ir.type](ir) {
+        private val classCache = MutableSet[ClassDef]()
+        override def visit(prog: Prog): Unit = { result += 1; super.visit(prog) }
+        override def visit(fd: FunDef): Unit = { result += 1; super.visit(fd) }
+        override def visit(cd: ClassDef): Unit = { result += 1; super.visit(cd) }
+        override def visit(vd: ValDef): Unit = { result += 1; super.visit(vd) }
+        override def visit(fb: FunBody): Unit = { result += 1; super.visit(fb) }
+        override def visit(alloc: ArrayAlloc): Unit = { result += 1; super.visit(alloc) }
+        override def visit(e: Expr): Unit = { result += 1; super.visit(e) }
+        override def visit(typ: Type): Unit = { result += 1; super.visit(typ) }
+      }.apply(this)
+      result
+    }
   }
 
   // Define a function body as either a regular AST or a manually defined
@@ -52,7 +70,7 @@ private[genc] sealed trait IR { ir =>
   sealed abstract class FunBody
   case class FunDropped(isAccessor: Boolean) extends FunBody // for @cCode.drop; `isAccessor` is true for `val`'s to avoid parentheses
   case class FunBodyAST(body: Expr) extends FunBody
-  case class FunBodyManual(includes: Seq[String], body: String) extends FunBody // NOTE `body` is actually the whole function!
+  case class FunBodyManual(headerIncludes: Seq[String], cIncludes: Seq[String], body: String) extends FunBody // NOTE `body` is actually the whole function!
 
   case class FunDef(id: Id, returnType: Type, ctx: Seq[ValDef], params: Seq[ValDef], var body: FunBody, isExported: Boolean, isPure: Boolean) extends Def {
     // Ignore body in equality/hash code; actually, use only the identifier. This is to prevent infinite recursion...
@@ -66,7 +84,7 @@ private[genc] sealed trait IR { ir =>
     def toVal = FunVal(this)
   }
 
-  case class ClassDef(id: Id, parent: Option[ClassDef], fields: Seq[ValDef], isAbstract: Boolean, isExported: Boolean) extends Def {
+  case class ClassDef(id: Id, parent: Option[ClassDef], fields: Seq[(ValDef, Seq[DeclarationMode])], isAbstract: Boolean, isExported: Boolean, isPacked: Boolean) extends Def {
     require(
       // Parent must be abstract if any
       (parent forall { _.isAbstract }) &&
@@ -100,10 +118,10 @@ private[genc] sealed trait IR { ir =>
 
     def getHierarchyLeaves: Set[ClassDef] = getFullHierarchy filter { !_.isAbstract }
 
-    def isHierarchyMutable: Boolean = getHierarchyLeaves exists { c => c.fields exists { _.isMutable } }
+    def isHierarchyMutable: Boolean = getHierarchyLeaves exists { c => c.fields exists { _._1.isMutable } }
 
     // Get the type of a given field
-    def getFieldType(fieldId: Id): Type = fields collectFirst { case ValDef(id, typ, _) if id == fieldId => typ } match {
+    def getFieldType(fieldId: Id): Type = fields collectFirst { case (ValDef(id, typ, _), _) if id == fieldId => typ } match {
       case Some(typ) => typ
       case None => sys.error(s"no such field $fieldId in class $id")
     }
@@ -174,6 +192,8 @@ private[genc] sealed trait IR { ir =>
       case Binding(vd) => vd.getType
       case c: Callable => c.typ
       case Block(exprs) => exprs.last.getType
+      case MemSet(_, _, _) => NoType
+      case SizeOf(_) => PrimitiveType(UInt32Type)
       case Decl(_, _) => NoType
       case App(fun, _, _) => fun.typ.ret
       case Construct(cd, _) => ClassType(cd)
@@ -240,6 +260,9 @@ private[genc] sealed trait IR { ir =>
   case class Block(exprs: Seq[Expr]) extends Expr {
     require(exprs.nonEmpty, "GenC IR blocks must be non-empty")
   }
+
+  case class MemSet(pointer: Expr, value: Expr, size: Expr) extends Expr
+  case class SizeOf(tpe: Type) extends Expr
 
   // A variable declaration with optional initialisation
   case class Decl(vd: ValDef, optInit: Option[Expr]) extends Expr
@@ -349,7 +372,7 @@ private[genc] sealed trait IR { ir =>
       case FunType(_, _, _) => false
 
       // We do *NOT* answer this question for the whole class hierarchy!
-      case ClassType(clazz) => clazz.fields exists { _.getType.containsArray }
+      case ClassType(clazz) => clazz.fields exists { _._1.getType.containsArray }
 
       case ArrayType(_, _) => true
       case ReferenceType(t) => t.containsArray
@@ -416,7 +439,7 @@ private[genc] sealed trait IR { ir =>
   case class ReferenceType(t: Type) extends Type
 
   // For @cCode.typedef
-  case class TypeDefType(original: Id, alias: Id, include: Option[String], export: Boolean) extends Type
+  case class TypeDefType(original: Id, alias: Id, include: Option[String], exprt: Boolean) extends Type
 
   // For @cCode.drop
   // TODO Drop them completely, and reject input program if one dropped type is actually used!
@@ -461,10 +484,10 @@ private[genc] sealed trait IR { ir =>
 }
 
 object IRs {
-  final object SIR extends IR
-  final object CIR extends IR
-  final object RIR extends IR
-  final object NIR extends IR
-  final object LIR extends IR
+  object SIR extends IR
+  object CIR extends IR
+  object RIR extends IR
+  object NIR extends IR
+  object LIR extends IR
 }
 

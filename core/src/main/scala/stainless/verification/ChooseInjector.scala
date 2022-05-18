@@ -3,10 +3,12 @@
 package stainless
 package verification
 
-trait ChooseInjector extends inox.transformers.SymbolTransformer {
-  val trees: ast.Trees
-  val s: trees.type = trees
-  val t: trees.type = trees
+class ChooseInjector private(val trees: ast.Trees)
+                            (override val s: trees.type,
+                             override val t: trees.type)
+  extends inox.transformers.SymbolTransformer {
+
+  def this(trees: ast.Trees) = this(trees)(trees, trees)
 
   import trees._
   import exprOps._
@@ -70,7 +72,8 @@ object ChooseInjector {
   def apply(p: Program): inox.transformers.SymbolTransformer {
     val s: p.trees.type
     val t: p.trees.type
-  } = new {
-    val trees: p.trees.type = p.trees
-  } with ChooseInjector
+  } = {
+    class Impl(override val trees: p.trees.type) extends ChooseInjector(trees)
+    new Impl(p.trees)
+  }
 }

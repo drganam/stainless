@@ -10,15 +10,13 @@ import extraction.xlang.{trees => xt}
 import extraction.throwing.{trees => tt}
 import extraction._
 
-import stainless.utils.JsonConvertions._
+import stainless.utils.JsonConvertions.given
 
 import io.circe._
 import io.circe.syntax._
 import io.circe.generic.semiauto._
 
 import scala.concurrent.Future
-
-import scala.language.existentials
 
 import ExtraOps._
 import GenCReport._
@@ -30,48 +28,51 @@ object GenCComponent extends Component { self =>
   override type Report = GenCReport
   override type Analysis = GenCAnalysis
 
-  override val lowering = inox.transformers.SymbolTransformer(new transformers.TreeTransformer {
-    val s: extraction.trees.type = extraction.trees
-    val t: extraction.trees.type = extraction.trees
-  })
+  override val lowering = {
+    class LoweringImpl(override val s: extraction.trees.type, override val t: extraction.trees.type)
+      extends transformers.ConcreteTreeTransformer(s, t)
+    inox.transformers.SymbolTransformer(new LoweringImpl(extraction.trees, extraction.trees))
+  }
 
-  override def run(pipeline: extraction.StainlessPipeline)(implicit ctx: inox.Context) = {
+  override def run(pipeline: extraction.StainlessPipeline)(using inox.Context) = {
     new GenCRun(pipeline)
   }
 }
 
 object GenCRun {
   case class Result(fd: xt.FunDef, status: GenCReport.Status, time: Long)
+
+  def pipelineBegin(using inox.Context): ExtractionPipeline{val s: xt.type; val t: tt.type} =
+    xlang.extractor        andThen
+      innerclasses.extractor andThen
+      utils.DebugPipeline("Laws",            methods.Laws(methods.trees))            andThen
+      utils.DebugPipeline("SuperInvariants", methods.SuperInvariants(methods.trees)) andThen
+      utils.DebugPipeline("SuperCalls",      methods.SuperCalls(methods.trees))      andThen
+      // No Sealing with GenC
+      // utils.DebugPipeline("Sealing",         methods.Sealing(methods.trees))         andThen
+      utils.DebugPipeline("MethodLifting",   methods.MethodLifting(methods.trees))   andThen
+      utils.DebugPipeline("MergeInvariants", methods.MergeInvariants(methods.trees)) andThen
+      utils.DebugPipeline("FieldAccessors",  methods.FieldAccessors(methods.trees))  andThen
+      utils.DebugPipeline("ValueClasses",    methods.ValueClasses(methods.trees))    andThen
+      methods.lowering andThen
+      utils.DebugPipeline("LeonInlining", LeonInlining(tt, tt))
 }
 
-class GenCRun(override val pipeline: extraction.StainlessPipeline) // pipeline is ignored here, should be refactored
-             (override implicit val context: inox.Context) extends {
-  override val component = GenCComponent
-  override val trees: xt.type = xt
-} with ComponentRun {
+class GenCRun private(override val component: GenCComponent.type,
+                      override val trees: xt.type,
+                      override val pipeline: extraction.StainlessPipeline)
+                     (using override val context: inox.Context)
+  extends ComponentRun {
+
+  def this(pipeline: extraction.StainlessPipeline)(using inox.Context) =
+    this(GenCComponent, xt, pipeline)
 
   import xt._
 
-  // We only keep some parts of the standard verification pipeline for genc
-  val pipelineBegin: ExtractionPipeline{val s: xt.type; val t: tt.type} =
-    xlang.extractor        andThen
-    innerclasses.extractor andThen
-    utils.DebugPipeline("Laws",            methods.Laws(methods.trees))            andThen
-    utils.DebugPipeline("SuperInvariants", methods.SuperInvariants(methods.trees)) andThen
-    utils.DebugPipeline("SuperCalls",      methods.SuperCalls(methods.trees))      andThen
-    // No Sealing with GenC
-    // utils.DebugPipeline("Sealing",         methods.Sealing(methods.trees))         andThen
-    utils.DebugPipeline("MethodLifting",   methods.MethodLifting(methods.trees))   andThen
-    utils.DebugPipeline("MergeInvariants", methods.MergeInvariants(methods.trees)) andThen
-    utils.DebugPipeline("FieldAccessors",  methods.FieldAccessors(methods.trees))  andThen
-    utils.DebugPipeline("ValueClasses",    methods.ValueClasses(methods.trees))    andThen
-    methods.lowering andThen
-    utils.DebugPipeline("LeonInlining", LeonInlining(tt, tt))
-
   override def apply(ids: Seq[Identifier], symbols: Symbols): Future[GenCComponent.Analysis] = try {
-    val symbolsAfterPipeline: tt.Symbols = pipelineBegin.extract(symbols)
+    val symbolsAfterPipeline: tt.Symbols = GenCRun.pipelineBegin.extract(symbols)
 
-    GenerateC.run(symbolsAfterPipeline)
+    GenerateC.emit(symbolsAfterPipeline)
 
     val p = inox.Program(trees)(symbols)
 
@@ -81,7 +82,7 @@ class GenCRun(override val pipeline: extraction.StainlessPipeline) // pipeline i
       override val results = ids.flatMap { id =>
         val fd = symbols.getFunction(id)
         val pos = fd.getPos.toString
-        if (fd.flags.exists(_.name == "cCode.export"))
+        if (fd.flags.exists(_.name == "cCode.export") && !fd.isAccessor)
           Some(GenCRun.Result(fd, Compiled, 0))
         else
           None
@@ -103,8 +104,8 @@ object GenCReport {
   case object Compiled extends Status
   case object CompilationError extends Status
 
-  implicit val statusDecoder: Decoder[Status] = deriveDecoder
-  implicit val statusEncoder: Encoder[Status] = deriveEncoder
+  given statusDecoder: Decoder[Status] = deriveDecoder
+  given statusEncoder: Encoder[Status] = deriveEncoder
 
   case class Record(id: Identifier, pos: Position, status: Status, time: Long) extends AbstractReportHelper.Record {
     override val derivedFrom = id
@@ -120,8 +121,8 @@ object GenCReport {
     case CompilationError => "error during C compilation"
   }
 
-  implicit val recordDecoder: Decoder[Record] = deriveDecoder
-  implicit val recordEncoder: Encoder[Record] = deriveEncoder
+  given recordDecoder: Decoder[Record] = deriveDecoder
+  given recordEncoder: Encoder[Record] = deriveEncoder
 }
 
 case class GenCReport(results: Seq[Record], sources: Set[Identifier]) extends BuildableAbstractReport[Record, GenCReport] {
@@ -135,7 +136,7 @@ case class GenCReport(results: Seq[Record], sources: Set[Identifier]) extends Bu
   protected def build(results: Seq[Record], sources: Set[Identifier]): GenCReport =
     new GenCReport(results, sources)
 
-  implicit protected val encoder: io.circe.Encoder[Record] = recordEncoder
+  override protected val encoder: io.circe.Encoder[Record] = GenCReport.recordEncoder
 
   private lazy val totalTime = (results map { _.time }).sum
   private lazy val totalValid = results.size

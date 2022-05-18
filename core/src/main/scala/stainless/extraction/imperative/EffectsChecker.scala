@@ -16,8 +16,8 @@ trait EffectsChecker { self: EffectsAnalyzer =>
   import exprOps._
 
   protected def checkEffects(fd: FunDef)(analysis: EffectsAnalysis): CheckResult = {
-    import analysis._
-    import symbols.isMutableType
+    import analysis.{given, _}
+    import symbols.{isMutableType, given}
 
     def isMutableSynthetic(id: Identifier): Boolean = {
       val fd = symbols.getFunction(id)
@@ -47,7 +47,7 @@ trait EffectsChecker { self: EffectsAnalyzer =>
           !exprOps.withoutSpecs(fd.fullBody).forall(isExpressionFresh))
         throw ImperativeEliminationException(fd, "Illegal recursive functions returning non-fresh result")
 
-      object traverser extends SelfTreeTraverser {
+      object traverser extends ConcreteSelfTreeTraverser {
         override def traverse(tpe: Type): Unit = tpe match {
           case at @ ADTType(id, tps) =>
             (at.getSort.definition.tparams zip tps).foreach { case (tdef, instanceType) =>
@@ -66,6 +66,38 @@ trait EffectsChecker { self: EffectsAnalyzer =>
             }
 
             super.traverse(ct)
+
+          case st @ SetType(elemTp) =>
+            if (isMutableType(elemTp)) {
+              throw ImperativeEliminationException(tpe,
+                s"Cannot instantiate a set ${tpe.asString} with a mutable type ${elemTp.asString}")
+            }
+
+            super.traverse(st)
+
+          case bt @ BagType(elemTp) =>
+            if (isMutableType(elemTp)) {
+              throw ImperativeEliminationException(tpe,
+                s"Cannot instantiate a bag ${tpe.asString} with a mutable type ${elemTp.asString}")
+            }
+
+            super.traverse(bt)
+
+          case mt @ MapType(from, _) =>
+            if (isMutableType(from)) {
+              throw ImperativeEliminationException(tpe,
+                s"Cannot instantiate a map ${tpe.asString} with a mutable key type ${from.asString}")
+            }
+
+            super.traverse(mt)
+
+          case mt @ MutableMapType(from, _) =>
+            if (isMutableType(from)) {
+              throw ImperativeEliminationException(tpe,
+                s"Cannot instantiate a mutable map ${tpe.asString} with a mutable key type ${from.asString}")
+            }
+
+            super.traverse(mt)
 
           case _ => super.traverse(tpe)
         }
@@ -87,12 +119,18 @@ trait EffectsChecker { self: EffectsAnalyzer =>
             super.traverse(l)
 
           case l @ LetVar(vd, e, b) =>
-            if (!isExpressionFresh(e) && isMutableType(vd.tpe))
-              throw ImperativeEliminationException(e, "Illegal aliasing: " + e.asString)
+            if (isMutableType(vd.tpe))
+              throw ImperativeEliminationException(e, "Cannot bind expression of a mutable type to a `var`: " + e.asString)
 
             super.traverse(l)
 
           case au @ ArrayUpdate(a, i, e) =>
+            if (isMutableType(e.getType) && !isExpressionFresh(e))
+              throw ImperativeEliminationException(e, "Illegal aliasing: " + e.asString)
+
+            super.traverse(au)
+
+          case au @ ArrayUpdated(a, i, e) =>
             if (isMutableType(e.getType) && !isExpressionFresh(e))
               throw ImperativeEliminationException(e, "Illegal aliasing: " + e.asString)
 
@@ -162,6 +200,15 @@ trait EffectsChecker { self: EffectsAnalyzer =>
 
             super.traverse(dup)
 
+          case la @ LargeArray(_, default, _, _) =>
+            // The `default` expression is the one that is going to be repeated n times, so it must be referentially transparent.
+            if (!isReferentiallyTransparent(default)) {
+              throw ImperativeEliminationException(e,
+                s"Cannot use effectfull computations within Array.fill (${default.asString})")
+            }
+
+            super.traverse(la)
+
           case _ => super.traverse(e)
         }
       }
@@ -208,6 +255,17 @@ trait EffectsChecker { self: EffectsAnalyzer =>
         if (predEffects.nonEmpty)
           throw ImperativeEliminationException(pred, "Assertion has effects on: " + predEffects.head.receiver.asString)
 
+      case ArrayUpdated(arr, k, v) =>
+        val arrEffects = effects(arr)
+        val kEffects = effects(k)
+        val vEffects = effects(v)
+        if (arrEffects.nonEmpty)
+          throw ImperativeEliminationException(arr, "ArrayUpdated operand has effects on: " + arrEffects.head.receiver.asString)
+        if (kEffects.nonEmpty)
+          throw ImperativeEliminationException(k, "ArrayUpdated key has effects on: " + kEffects.head.receiver.asString)
+        if (vEffects.nonEmpty)
+          throw ImperativeEliminationException(v, "ArrayUpdated value has effects on: " + vEffects.head.receiver.asString)
+
       case Forall(_, pred) =>
         val predEffects = effects(pred)
         if (predEffects.nonEmpty)
@@ -243,6 +301,28 @@ trait EffectsChecker { self: EffectsAnalyzer =>
         if (eff.nonEmpty)
           throw ImperativeEliminationException(v, "Stainless does not support effects in lazy val's on: " + eff.head.receiver.asString)
 
+      case And(exprs) =>
+        for (expr <- exprs) {
+          val exprEffects = effects(expr)
+          if (exprEffects.nonEmpty)
+            throw ImperativeEliminationException(expr, "Operand of '&&' has effect on: " + exprEffects.head.receiver.asString)
+        }
+
+      case Or(exprs) =>
+        for (expr <- exprs) {
+          val exprEffects = effects(expr)
+          if (exprEffects.nonEmpty)
+            throw ImperativeEliminationException(expr, "Operand of '||' has effect on: " + exprEffects.head.receiver.asString)
+        }
+
+      case Implies(lhs, rhs) =>
+        val lEffects = effects(lhs)
+        val rEffects = effects(rhs)
+        if (lEffects.nonEmpty)
+          throw ImperativeEliminationException(lhs, "Left-hand-side of '==>' has effect on: " + lEffects.head.receiver.asString)
+        if (rEffects.nonEmpty)
+          throw ImperativeEliminationException(rhs, "Right-hand-side of '==>' has effect on: " + rEffects.head.receiver.asString)
+
       case _ => ()
     }(fd.fullBody)
 
@@ -269,7 +349,7 @@ trait EffectsChecker { self: EffectsAnalyzer =>
   }
 
   def checkSort(sort: ADTSort)(analysis: EffectsAnalysis): Unit = {
-    for (fd <- sort.invariant(analysis.symbols)) {
+    for (fd <- sort.invariant(using analysis.symbols)) {
       val invEffects = analysis.effects(fd)
       if (invEffects.nonEmpty)
         throw ImperativeEliminationException(fd, "Invariant has effects on: " + invEffects.head.asString)

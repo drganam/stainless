@@ -4,9 +4,10 @@ package stainless
 package extraction
 package inlining
 
-trait FunctionInlining extends CachingPhase with IdentitySorts { self =>
-  val s: Trees
-  val t: trace.Trees
+class FunctionInlining(override val s: Trees, override val t: trace.Trees)
+                      (using override val context: inox.Context)
+  extends CachingPhase
+     with IdentitySorts { self =>
   import s._
 
   // The function inlining transformation depends on all (transitive) callees
@@ -23,20 +24,20 @@ trait FunctionInlining extends CachingPhase with IdentitySorts { self =>
   override protected type TransformerContext = s.Symbols
   override protected def getContext(symbols: s.Symbols) = symbols
 
-  private[this] object identity extends transformers.TreeTransformer {
-    override val s: self.s.type = self.s
-    override val t: self.t.type = self.t
-  }
+  private[this] class FnInliningIdentityImpl(override val s: self.s.type, override val t: self.t.type)
+    extends transformers.ConcreteTreeTransformer(s, t)
+
+  private[this] val identity = new FnInliningIdentityImpl(self.s, self.t)
 
   override protected def registerFunctions(symbols: t.Symbols, functions: Seq[Option[t.FunDef]]): t.Symbols =
     symbols.withFunctions(functions.flatten)
 
   override protected def extractFunction(symbols: s.Symbols, fd: s.FunDef): Option[t.FunDef] = {
-    import symbols._
+    import symbols.{given, _}
 
-    class Inliner(inlinedOnce: Set[Identifier] = Set()) extends s.SelfTreeTransformer {
+    class Inliner(inlinedOnce: Set[Identifier] = Set()) extends s.ConcreteStainlessSelfTreeTransformer {
 
-      override def transform(expr: s.Expr): t.Expr = expr match {
+      override def transform(expr: Expr): Expr = expr match {
         case fi: FunctionInvocation =>
           inlineFunctionInvocations(fi.copy(args = fi.args map transform).copiedFrom(fi)).copiedFrom(fi)
 
@@ -61,7 +62,6 @@ trait FunctionInlining extends CachingPhase with IdentitySorts { self =>
         import exprOps._
         val (tfd, args) = (fi.tfd, fi.args)
 
-        val isOpaque = tfd.fd.flags contains Opaque
         val isSynthetic = tfd.fd.flags contains Synthetic
         val hasInlineFlag = tfd.fd.flags contains Inline
         val hasInlineOnceFlag = tfd.fd.flags contains InlineOnce
@@ -80,17 +80,17 @@ trait FunctionInlining extends CachingPhase with IdentitySorts { self =>
           // later on check that the class invariant is valid.
           val body = specced.bodyOpt match {
             case Some(body) if isSynthetic => body
-            case Some(body) if !isOpaque => annotated(body, DropVCs).setPos(fi)
-            case _ => NoTree(tfd.returnType).copiedFrom(tfd.fullBody)
+            case Some(body) => annotated(body, DropVCs).setPos(fi)
+            case None => context.reporter.fatalError("In FunctionInlining, all functions should have bodies thanks to ChooseEncoder running before.")
           }
 
           val pre = specced.specs.filter(spec => spec.kind == LetKind || spec.kind == PreconditionKind)
-          val maxPre = pre.count(_.kind == PreconditionKind)
+          val n = pre.count(_.kind == PreconditionKind)
           def addPreconditionAssertions(e: Expr): Expr = {
-            pre.foldRight((e, maxPre)) {
+            pre.foldRight((e, n)) {
               case (spec @ LetInSpec(vd, e0), (acc, i)) => (Let(vd, annotated(e0, DropVCs), acc).setPos(fi), i)
               case (spec @ Precondition(cond), (acc, i)) =>
-                val num = if (i == 1) "" else s" ($i)"
+                val num = if (n == 1) "" else s" ($i/$n)"
                 (
                   Assert(annotated(cond.setPos(fi), DropVCs), Some(s"Inlined precondition$num of " + tfd.id.asString), acc).setPos(fi),
                   i-1
@@ -178,12 +178,11 @@ trait FunctionInlining extends CachingPhase with IdentitySorts { self =>
 }
 
 object FunctionInlining {
-  def apply(ts: Trees, tt: trace.Trees)(implicit ctx: inox.Context): ExtractionPipeline {
+  def apply(ts: Trees, tt: trace.Trees)(using inox.Context): ExtractionPipeline {
     val s: ts.type
     val t: tt.type
-  } = new FunctionInlining {
-    override val s: ts.type = ts
-    override val t: tt.type = tt
-    override val context = ctx
+  } = {
+    class Impl(override val s: ts.type, override val t: tt.type) extends FunctionInlining(s, t)
+    new Impl(ts, tt)
   }
 }

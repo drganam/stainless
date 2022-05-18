@@ -1,7 +1,7 @@
 import stainless.lang._
 import stainless.collection._
 import stainless.lang.Option._
-import stainless.annotation._
+import stainless.annotation.{ghost => ghostAnnot, _}
 import stainless.lang.StaticChecks._
 
 object AllocatorMonoExample {
@@ -34,11 +34,11 @@ object AllocatorMonoExample {
   // << Lemmas
 
   case class BoxAllocator(
-    @ghost var bound: BigInt,
+    @ghostAnnot var bound: BigInt,
     var alloc: List[Box],
     var free: List[Box]
   ) extends AnyHeapRef {
-    @ghost
+    @ghostAnnot
     def valid: Boolean = {
       reads(Set(this))
       decreasingIds(alloc.map(objectId), bound) &&
@@ -53,7 +53,7 @@ object AllocatorMonoExample {
       require(valid)
 
       if (free.nonEmpty) {
-        @ghost val oldBound = bound
+        @ghostAnnot val oldBound = bound
         val oldAlloc = alloc
 
         val o = free.head
@@ -90,27 +90,35 @@ object AllocatorMonoExample {
     }
   }
 
-  // TODO: How do I read or modify fresh objects?
-  def sameLenFreshBoxList(ator: BoxAllocator, xs: List[Box]): Option[List[Box]] = {
-    reads(Set(ator))
-    modifies(Set(ator))
-    require(ator.valid && (xs.content subsetOf ator.alloc.content))
-    (xs match {
-      case Nil() => Some(Nil[Box]())
-      case Cons(x, xs_) =>
-        ator() match {
-          case None() => None()
-          case Some(y) =>
-            sameLenFreshBoxList(ator, xs_) match {
-              case None() => None()
-              case Some(ys) => Some(Cons(y, ys))
-            }
-        }
-    }) : Option[List[Box]]
-  } ensuring {
-    case None() => true
-    case Some(res) => res.size == xs.size && (res.content & old(ator.alloc.content)).isEmpty
-  }
+  // // TODO: How do I read or modify fresh objects?
+  // def sameLenFreshBoxList(ator: BoxAllocator, xs: List[Box]): Option[List[Box]] = {
+  //   reads(Set(ator))
+  //   modifies(Set(ator))
+  //   require(ator.valid && (xs.content subsetOf ator.alloc.content))
+  //   val oldContent = ator.alloc.content
+  //   (xs match {
+  //     case Nil() => Some(Nil[Box]())
+  //     case Cons(x, xs_) =>
+  //       ator() match {
+  //         case None() => None()
+  //         case Some(y) =>
+  //           sameLenFreshBoxList(ator, xs_) match {
+  //             case None() => None()
+  //             // case Some(ys) => Some(Cons(y, ys))
+  //             case Some(ys) =>
+  //               val res = Cons(y, ys)
+  //               assert(res.size == xs.size)
+  //               assert(!oldContent.contains(y))
+  //               assert((ys.content & oldContent).isEmpty)
+  //               // assert((res.content & oldContent).isEmpty)
+  //               Some(res)
+  //           }
+  //       }
+  //   }) : Option[List[Box]]
+  // } ensuring {
+  //   case None() => true
+  //   case Some(res) => res.size == xs.size && (res.content & old(ator.alloc.content)).isEmpty
+  // }
 
   // def clash(ator: BoxAllocator, c: Boolean): Unit = {
   //   reads(Set(ator))

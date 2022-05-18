@@ -9,17 +9,23 @@ import phases._
 
 object GenerateC {
 
-  def pipeline(implicit ctx: inox.Context) =
-    NamedLeonPhase("ComputeDependencies", ComputeDependenciesPhase(ctx)) andThen
-    NamedLeonPhase("ComputeFunCtxPhase", LeonPipeline.both(NoopPhase[Dependencies], ComputeFunCtxPhase(ctx))) andThen
-    NamedLeonPhase("Scala2IRPhase", Scala2IRPhase(ctx)) andThen
-    NamedLeonPhase("NormalisationPhase", NormalisationPhase(ctx)) andThen
-    NamedLeonPhase("LiftingPhase", LiftingPhase(ctx)) andThen
-    NamedLeonPhase("ReferencingPhase", ReferencingPhase(ctx)) andThen
-    NamedLeonPhase("StructInliningPhase", StructInliningPhase(ctx)) andThen
-    NamedLeonPhase("IR2CPhase", IR2CPhase(ctx)) andThen
-    CFileOutputPhase(ctx)
+  def pipeline(symbols: Symbols)(using inox.Context): LeonPipeline[Symbols, CAST.Prog] = {
+    // extract lengths before `GhostElimination` erases them
+    val arrayLengthsMap = ArraysLengthsExtraction.get(symbols)
 
-  def run(symbols: Symbols)(implicit ctx: inox.Context) = pipeline.run(symbols)
+    NamedLeonPhase("GhostElimination", new GhostEliminationPhase) andThen
+    NamedLeonPhase("TrimSymbols", new TrimSymbols) andThen
+    NamedLeonPhase("ComputeFunCtx", LeonPipeline.both(NoopPhase[Symbols], new ComputeFunCtxPhase)) andThen
+    NamedLeonPhase("Scala2IR", Scala2IRPhase(arrayLengthsMap)) andThen
+    NamedLeonPhase("Normalisation", new NormalisationPhase) andThen
+    NamedLeonPhase("Lifting", new LiftingPhase) andThen
+    NamedLeonPhase("Referencing", new ReferencingPhase) andThen
+    NamedLeonPhase("StructInlining", new StructInliningPhase) andThen
+    NamedLeonPhase("IR2C", new IR2CPhase)
+  }
+
+  def emit(symbols: Symbols)(using ctx: inox.Context): Unit = {
+    (pipeline(symbols) andThen new CFileOutputPhase).run(symbols)
+  }
 
 }

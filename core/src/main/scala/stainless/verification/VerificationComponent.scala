@@ -6,7 +6,6 @@ package verification
 import io.circe._
 
 import scala.concurrent.Future
-import scala.language.existentials
 
 import stainless.extraction._
 import stainless.extraction.utils.DebugSymbols
@@ -40,33 +39,36 @@ object VerificationComponent extends Component {
   override type Report = VerificationReport
   override type Analysis = VerificationAnalysis
 
-  override val lowering = inox.transformers.SymbolTransformer(new transformers.TreeTransformer {
-    val s: trees.type = trees
-    val t: trees.type = trees
-  })
+  override val lowering = {
+    class LoweringImpl(override val s: trees.type, override val t: trees.type)
+      extends transformers.ConcreteTreeTransformer(s, t)
+    inox.transformers.SymbolTransformer(new LoweringImpl(trees, trees))
+  }
 
-  override def run(pipeline: StainlessPipeline)(implicit ctx: inox.Context) = {
+  override def run(pipeline: StainlessPipeline)(using inox.Context): VerificationRun = {
     new VerificationRun(pipeline)
   }
 }
 
-class VerificationRun(override val pipeline: StainlessPipeline)
-                     (override implicit val context: inox.Context) extends {
-  override val component = VerificationComponent
-  override val trees: stainless.trees.type = stainless.trees
-} with ComponentRun { self =>
+class VerificationRun private(override val component: VerificationComponent.type,
+                              override val trees: stainless.trees.type,
+                              override val pipeline: StainlessPipeline)
+                             (using override val context: inox.Context) extends ComponentRun { self =>
+  def this(pipeline: StainlessPipeline)(using inox.Context) =
+    this(VerificationComponent, stainless.trees, pipeline)
 
   import component.{Report, Analysis}
+  import extraction.given
 
   override def parse(json: Json): Report = VerificationReport.parse(json)
 
-  override protected def createPipeline = {
+  override def createPipeline = {
     pipeline andThen
     extraction.utils.DebugPipeline("MeasureInference", MeasureInference(extraction.trees)) andThen
     extraction.utils.DebugPipeline("PartialEvaluation", PartialEvaluation(extraction.trees))
   }
 
-  implicit val debugSection = DebugSectionVerification
+  given givenDebugSection: DebugSectionVerification.type = DebugSectionVerification
 
   private[this] val debugAssertions = new DebugSymbols {
     val name = "AssertionInjector"
@@ -75,37 +77,20 @@ class VerificationRun(override val pipeline: StainlessPipeline)
     val t: self.trees.type = self.trees
   }
 
-  private[this] val debugChooses = new DebugSymbols {
-    val name = "ChooseInjector"
-    val context = self.context
-    val s: self.trees.type = self.trees
-    val t: self.trees.type = self.trees
-  }
-
-  private[stainless] def execute(functions: Seq[Identifier], symbols: trees.Symbols): Future[VerificationAnalysis] = {
+  private[stainless] def execute(functions0: Seq[Identifier], symbols: trees.Symbols): Future[VerificationAnalysis] = {
     import context._
 
+    val functions = functions0.filterNot(fid => symbols.getFunction(fid).flags.contains(trees.DropVCs))
     val p = inox.Program(trees)(symbols)
 
     if (context.options.findOptionOrDefault(optCoq)) {
       CoqVerificationChecker.verify(functions, p, context)
     } else {
-
       val assertions = AssertionInjector(p, context)
-      val chooses = ChooseInjector(p)
-      // We do not need to encode empty trees as chooses when generating the VCs,
-      // as we rely on having empty trees to filter out some VCs.
       val assertionEncoder = inox.transformers.ProgramEncoder(p)(assertions)
 
       if (debugAssertions.isEnabled) {
         debugAssertions.debugEncoder(assertionEncoder)
-      }
-
-      // We need the full encoder when verifying VCs otherwise we might end up evaluating empty trees.
-      val chooseEncoder = inox.transformers.ProgramEncoder(p)(chooses)
-
-      if (debugChooses.isEnabled) {
-        debugChooses.debugEncoder(chooseEncoder)
       }
 
       if (!functions.isEmpty) {
@@ -125,17 +110,15 @@ class VerificationRun(override val pipeline: StainlessPipeline)
         reporter.debug(s"Finished generating VCs")
       }
 
-      val fullEncoder = chooseEncoder
-
       val res =
         if (context.options.findOptionOrDefault(optAdmitVCs)) {
           Future(vcs.map(vc => vc -> VCResult(VCStatus.Admitted, None, None)).toMap)
         } else {
-          VerificationChecker.verify(fullEncoder.targetProgram, context)(vcs).map(_.mapValues {
+          VerificationChecker.verify(assertionEncoder.targetProgram, context)(vcs).map(_.view.mapValues {
             case VCResult(VCStatus.Invalid(VCStatus.CounterExample(model)), s, t) =>
-              VCResult(VCStatus.Invalid(VCStatus.CounterExample(model.encode(fullEncoder.reverse))), s, t)
+              VCResult(VCStatus.Invalid(VCStatus.CounterExample(model.encode(assertionEncoder.reverse))), s, t)
             case res => res.asInstanceOf[VCResult[p.Model]]
-          })
+          }.toMap)
         }
 
       res.map(r => new VerificationAnalysis {
@@ -144,7 +127,6 @@ class VerificationRun(override val pipeline: StainlessPipeline)
         override val sources = functions.toSet
         override val results = r
       })
-
     }
   }
 }

@@ -8,13 +8,37 @@ trait HeapASTExtractors {
   val s: Trees
   import s._
 
+  /** An extractor for the asRefs conversion of heap ref sets */
+  object AsHeapRefSet {
+    object WrapperId {
+      def unapply(id: Identifier): Boolean = id match {
+        case ast.SymbolIdentifier("stainless.lang.HeapRefSetDecorations") => true
+        case _ => false
+      }
+    }
+
+    object Id {
+      def unapply(id: Identifier): Boolean = id match {
+        case ast.SymbolIdentifier("stainless.lang.HeapRefSetDecorations.asRefs") => true
+        case _ => false
+      }
+    }
+
+    def unapply(expr: Expr)(using Symbols): Option[Expr] = expr match {
+      case FunctionInvocation(Id(), _, Seq(
+          FunctionInvocation(WrapperId(), Seq(_), Seq(objs)))) =>
+        Some(objs)
+      case _ => None
+    }
+  }
+
   /** An extractor for the Heap type in the stainless.lang package */
   object HeapType {
     // TODO(gsps): Cache this ClassDef
-    def classDefOpt(implicit s: Symbols): Option[ClassDef] =
+    def classDefOpt(using s: Symbols): Option[ClassDef] =
       s.lookup.get[ClassDef]("stainless.lang.Heap")
 
-    def unapply(tpe: Type)(implicit s: Symbols): Boolean = tpe match {
+    def unapply(tpe: Type)(using Symbols): Boolean = tpe match {
       case ct: ClassType => classDefOpt.map(_.id == ct.id).getOrElse(false)
       case _ => false
     }
@@ -29,7 +53,7 @@ trait HeapASTExtractors {
       }
     }
 
-    def unapply(expr: Expr)(implicit s: Symbols): Option[(Expr, Expr)] = expr match {
+    def unapply(expr: Expr)(using Symbols): Option[(Expr, Expr)] = expr match {
       case FunctionInvocation(Id(), _, Seq(e1, e2)) => Some((e1, e2))
       case _ => None
     }

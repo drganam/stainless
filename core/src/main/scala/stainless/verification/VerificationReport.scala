@@ -4,7 +4,7 @@ package stainless
 package verification
 
 import inox.utils.ASCIIHelpers.{ Cell, Row }
-import stainless.utils.JsonConvertions._
+import stainless.utils.JsonConvertions.given
 
 import io.circe._
 import io.circe.syntax._
@@ -36,7 +36,7 @@ object VerificationReport {
 
     def apply[Model <: StainlessProgram#Model](program: inox.Program)
                                               (status: VCStatus[program.Model])
-                                              (implicit opts: program.trees.PrinterOptions): Status = status match {
+                                              (using program.trees.PrinterOptions): Status = status match {
       case VCStatus.Invalid(VCStatus.CounterExample(model)) => {
         //val mod: program.Model = model
         currModel = Some(model)
@@ -49,8 +49,8 @@ object VerificationReport {
     }
   }
 
-  implicit val statusDecoder: Decoder[Status] = deriveDecoder
-  implicit val statusEncoder: Encoder[Status] = deriveEncoder
+  given statusDecoder: Decoder[Status] = deriveDecoder
+  given statusEncoder: Encoder[Status] = deriveEncoder
 
   case class Record(
     id: Identifier, pos: inox.utils.Position, time: Long,
@@ -58,8 +58,8 @@ object VerificationReport {
     derivedFrom: Identifier
   ) extends AbstractReportHelper.Record
 
-  implicit val recordDecoder: Decoder[Record] = deriveDecoder
-  implicit val recordEncoder: Encoder[Record] = deriveEncoder
+  given recordDecoder: Decoder[Record] = deriveDecoder
+  given recordEncoder: Encoder[Record] = deriveEncoder
 
   def parse(json: Json) = json.as[(Seq[Record], Set[Identifier])] match {
     case Right((records, sources)) => new VerificationReport(records, sources)
@@ -70,7 +70,7 @@ object VerificationReport {
 
 class VerificationReport(val results: Seq[VerificationReport.Record], val sources: Set[Identifier])
   extends BuildableAbstractReport[VerificationReport.Record, VerificationReport] {
-  import VerificationReport._
+  import VerificationReport.{given, _}
 
   override val encoder = recordEncoder
 
