@@ -21,7 +21,7 @@ trait OrderingRelation extends SolverProvider {
 
 trait SumOrdering extends OrderingRelation { self: StructuralSize =>
   import checker.program.trees._
-  import checker.program.symbols._
+  import checker.program.symbols.{given, _}
 
   val description = "comparing sum of argument sizes"
 
@@ -38,7 +38,7 @@ trait SumOrdering extends OrderingRelation { self: StructuralSize =>
 
 trait LexicographicOrdering extends OrderingRelation { self: StructuralSize =>
   import checker.program.trees._
-  import checker.program.symbols._
+  import checker.program.symbols.{given, _}
 
   val description = "comparing argument lists lexicographically"
 
@@ -59,7 +59,7 @@ trait LexicographicOrdering extends OrderingRelation { self: StructuralSize =>
 
 trait BVOrdering extends OrderingRelation { self: StructuralSize =>
   import checker.program.trees._
-  import checker.program.symbols._
+  import checker.program.symbols.{given, _}
 
   val description = "comparing bitvector arguments lexicographically"
 
@@ -68,7 +68,7 @@ trait BVOrdering extends OrderingRelation { self: StructuralSize =>
   /* Note: We swap the arguments to the [[lexicographicallySmaller]] call since
    * [[bvSize]] maps into negative values! (avoids -Integer.MIN_VALUE overflow) */
   def groupedBySize(as: Seq[Expr]): Map[Int, Seq[Expr]] =
-    as.collect { case IsTyped(e, BVType(_, i)) => i -> e }.groupBy(_._1).mapValues(_.map(_._2))
+    as.collect { case IsTyped(e, BVType(_, i)) => i -> e }.groupBy(_._1).view.mapValues(_.map(_._2)).toMap
 
   private def compare(args1: Seq[Expr], args2: Seq[Expr], strict: Boolean): Expr = {
     val bv1 = groupedBySize(args1)
@@ -104,7 +104,7 @@ trait BVOrdering extends OrderingRelation { self: StructuralSize =>
     val bv = groupedBySize(args)
     val maxLength = bv.keys.reduceLeft(_ max _)
 
-    val measures = bv.mapValues { s =>
+    val measures = bv.view.mapValues { s =>
       self.fullSize(tupleWrap(s))
     }.values
 

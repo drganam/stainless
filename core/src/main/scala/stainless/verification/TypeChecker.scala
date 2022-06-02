@@ -11,7 +11,7 @@ import TypeCheckerContext._
 
 import stainless.termination.optCheckMeasures
 
-import scala.collection._
+import scala.collection.{immutable, mutable}
 
 object DebugSectionTypeChecker extends inox.DebugSection("type-checker")
 object DebugSectionTypeCheckerVCs extends inox.DebugSection("type-checker-vcs")
@@ -52,18 +52,14 @@ object VCFilter {
   }
 }
 
-trait TypeChecker {
-  val program: StainlessProgram
-  val context: inox.Context
-  val vcFilter: VCFilter
-
-  import context._
+class TypeChecker(val program: StainlessProgram, val context: inox.Context, val vcFilter: VCFilter) {
+  import context.{given, _}
   import program._
   import program.trees._
-  import program.symbols._
-  import CallGraphOrderings._
+  import program.symbols.{given, _}
+  import CallGraphOrderings.{given, _}
 
-  implicit val debugSection = DebugSectionTypeChecker
+  given givenDebugSection: DebugSectionTypeChecker.type = DebugSectionTypeChecker
 
   val checkMeasures = options.findOptionOrDefault(optCheckMeasures)
 
@@ -345,7 +341,7 @@ trait TypeChecker {
     reporter.debug(s"\n${tc0.indent}Checking that: ${t.asString} (${t.getPos})")
     reporter.debug(s"${tc0.indent}is a type in context:")
     reporter.debug(tc0.asString(tc0.indent))
-    val tc = tc0.inc
+    val tc = tc0.inc()
     val res: TyperResult = t match {
       case UnitType() => TyperResult.valid
       case BooleanType() => TyperResult.valid
@@ -414,7 +410,7 @@ trait TypeChecker {
     * recursive type at index 0
     */
   def index(id: Identifier, t: Type, size: Expr): Type = {
-    new SelfTreeTransformer {
+    new ConcreteStainlessSelfTreeTransformer {
       override def transform(tpe: Type) = tpe match {
         // We replace occurrences of ADT's that are mutually recursive with `id` with their
         // indexed version
@@ -456,7 +452,7 @@ trait TypeChecker {
     reporter.debug(s"\n${tc0.indent}Inferring type of: ${e.asString} (${e.getPos})")
     reporter.debug(s"${tc0.indent}in context:")
     reporter.debug(tc0.asString(tc0.indent))
-    val tc = tc0.inc
+    val tc = tc0.inc()
     val (t, tr): (Type, TyperResult) = e match {
       case UnitLiteral() => (UnitType(), TyperResult.valid)
       case BooleanLiteral(_) => (BooleanType(), TyperResult.valid)
@@ -648,12 +644,7 @@ trait TypeChecker {
           )
         }
 
-      case m: MatchExpr =>
-        val (tpe, tr) = inferType(tc, matchToIfThenElse(e, true))
-        val me = orJoin(m.cases.map(matchCaseCondition[Path](m.scrutinee, _).toClause))
-        val mr = buildVC(tc.withVCKind(VCKind.ExhaustiveMatch).setPos(m), me)
-
-        (tpe, tr ++ mr)
+      case m: MatchExpr => inferType(tc, matchToIfThenElse(e, false))
 
       case IfExpr(b, e1, e2) =>
         val (tpe1, tr1) = inferType(tc.withTruth(b).setPos(e1), e1)
@@ -758,15 +749,16 @@ trait TypeChecker {
 
         val (tc2, freshener2) = tc.freshBindWithValues(calleeTfd.params, args)
         val specced = BodyWithSpecs(freshener2.transform(freshenLocals(calleeTfd.fullBody)))
+        val n = specced.specs.count(_.kind == PreconditionKind)
         val trPre = specced.letsAndSpecs(PreconditionKind).foldLeft(
-          (tc2, TyperResult.valid, 0)
+          (tc2, TyperResult.valid, 1)
         ) {
           case ((tcAcc, trAcc, i), LetInSpec(vd0, e0)) => (tcAcc.bindWithValue(vd0, e0), trAcc, i)
           case ((tcAcc, trAcc, i), Precondition(cond)) =>
-            val kind = if (i == 0)
+            val kind = if (n == 1)
               VCKind.Info(VCKind.Precondition, s"call $fiS")
             else
-              VCKind.Info(VCKind.Precondition, s"call $fiS (require ${i+1}")
+              VCKind.Info(VCKind.Precondition, s"call $fiS (require $i/$n)")
             (
               tcAcc.withTruth(cond),
               trAcc ++ buildVC(tcAcc.withVCKind(kind).setPos(e), cond),
@@ -945,19 +937,8 @@ trait TypeChecker {
       case Forall(vds, pred) =>
         (BooleanType(), checkType(tc.bind(vds).setPos(pred), pred, BooleanType()))
 
-      case c @ Choose(vd, pred) =>
-        val trPred = checkType(tc.bind(vd).setPos(pred), pred, BooleanType())
-
-        val trVC = if (!tc.termVariables.exists(isPathCondition) && exprOps.variablesOf(c).isEmpty) {
-          val tc1 = tc.withVCKind(VCKind.Info(VCKind.Choose, "check-sat")).withCheckSAT(true).setPos(c)
-          buildVC(tc1, pred)
-        } else {
-          val tc1 = tc.withVCKind(VCKind.Choose).withCheckSAT(false).setPos(c)
-          val condition = Not(Forall(Seq(vd), Not(pred)))
-          buildVC(tc1, condition)
-        }
-
-        (RefinementType(vd, pred), trPred ++ trVC)
+      case c: Choose =>
+        reporter.fatalError(c.getPos, s"The type-checker shouldn't encounter `choose`, as these are hidden under functions by the `ChooseEncoder` phase.")
 
       case _ =>
         reporter.fatalError(e.getPos, s"The type-checker doesn't support expressions: ${e.getClass}")
@@ -971,13 +952,13 @@ trait TypeChecker {
   def vcFromContext(l: Seq[Variable], e: Expr): Expr = l.map(v => v -> v.tpe) match {
     case Seq() => e
     case (x1, _) +: (_, LetEquality(x2: Variable, e2)) +: _ if x1.id == x2.id =>
-      let(x2.toVal, e2, vcFromContext(l.tail.tail, e))
+      Let(x2.toVal, e2, vcFromContext(l.tail.tail, e))
     case (_, LetEquality(e1: Variable, e2)) +: _ =>
-      let(e1.toVal, e2, vcFromContext(l.tail, e))
+      Let(e1.toVal, e2, vcFromContext(l.tail, e))
     case (_, Truth(t)) +: _ =>
-      implies(t, vcFromContext(l.tail, e))
+      Implies(t, vcFromContext(l.tail, e))
     case (x, RefinementType(vd, pred)) +: _ =>
-      implies(substVar(pred, vd.id, x), vcFromContext(l.tail, e))
+      Implies(substVar(pred, vd.id, x), vcFromContext(l.tail, e))
     case _ =>
       vcFromContext(l.tail, e)
   }
@@ -998,43 +979,44 @@ trait TypeChecker {
       return TyperResult.valid
     }
 
-    def filterUnchecked(e: Expr): Option[Expr] = e match {
-      case Let(vd, expr, body) => filterUnchecked(body).map(Let(vd, expr, _).setPos(e))
+    def splitAndFilterUnchecked(e: Expr): Seq[Expr] = e match {
+      case Let(vd, expr, body) => splitAndFilterUnchecked(body).map(Let(vd, expr, _).setPos(e))
       case And(exprs) =>
-        val filteredExprs = exprs.flatMap(filterUnchecked)
-        if (filteredExprs.isEmpty) None
-        else if (filteredExprs.size == 1) Some(filteredExprs.head)
-        else Some(And(filteredExprs).setPos(e))
-      case Annotated(_, flags) if flags.contains(DropConjunct) => None
-      case Annotated(body, flags) => filterUnchecked(body).map(Annotated(_, flags).setPos(e))
-      case _ => Some(e)
+        val filteredExprs = exprs.flatMap(splitAndFilterUnchecked)
+        if (filteredExprs.isEmpty) Seq()
+        else if (filteredExprs.size == 1) Seq(filteredExprs.head)
+        else Seq(And(filteredExprs).setPos(e))
+      case Annotated(_, flags) if flags.contains(DropConjunct) => Seq()
+      case SplitAnd(exprs) => exprs.flatMap(splitAndFilterUnchecked)
+      case Annotated(body, flags) => splitAndFilterUnchecked(body).map(Annotated(_, flags).setPos(e))
+      case _ => Seq(e)
     }
 
-    val filtered = filterUnchecked(e)
+    val exprs = splitAndFilterUnchecked(e)
 
-    if (filtered.isEmpty) {
+    if (exprs.isEmpty) {
       return TyperResult.valid
     }
 
-    val condition = vcFromContext(tc.termVariables, filtered.get)
+    val conditions = exprs.map(vcFromContext(tc.termVariables, _))
 
-    val vc: StainlessVC = VC(
+    val vcs: Seq[StainlessVC] = conditions.map(condition => StainlessVC(
       condition,
       tc.currentFid.get,
       tc.vcKind,
       tc.checkSAT,
-    ).setPos(tc)
+    ).setPos(tc)).filter(vc => vcFilter(vc))
 
-    if (!vcFilter(vc)) {
+    if (vcs.isEmpty) {
       return TyperResult.valid
     }
 
     reporter.debug(
-      s"Created VC in context:\n${tc.asString()}\nfor expression: ${e.asString}\n\n" +
-      s"VC:\n${condition.asString}\n\n\n"
-    )(DebugSectionTypeCheckerVCs)
+      s"Created VCs in context:\n${tc.asString()}\nfor expression: ${e.asString}\n\n" +
+      s"VCs:\n${conditions.map(_.asString).mkString("\n")}\n\n\n"
+    )(using DebugSectionTypeCheckerVCs)
 
-    TyperResult(Seq(vc), Seq(NodeTree(JVC(tc, filtered.get), Seq())))
+    TyperResult(vcs, exprs.map(expr => NodeTree(JVC(tc, expr): Judgment, Seq())))
   }
 
   /** The `checkType` function checks that an expression `e` has type `tpe` by
@@ -1047,7 +1029,7 @@ trait TypeChecker {
     reporter.debug(s"${tc0.indent}in context")
     reporter.debug(tc0.asString(tc0.indent))
 
-    val tc = tc0.inc
+    val tc = tc0.inc()
     val res = (e, tpe) match {
 
       // High-priority rules for `Top`.
@@ -1106,12 +1088,7 @@ trait TypeChecker {
         buildVC(tc.withVCKind(kind).setPos(cond), cond) ++
         checkType(tc.withTruth(cond), body, tpe)
 
-      case (m: MatchExpr, _) =>
-        val tr = checkType(tc, matchToIfThenElse(e, true), tpe)
-        val me = orJoin(m.cases.map(matchCaseCondition[Path](m.scrutinee, _).toClause))
-        val mr = buildVC(tc.withVCKind(VCKind.ExhaustiveMatch).setPos(m), me)
-
-        tr ++ mr
+      case (m: MatchExpr, _) => checkType(tc, matchToIfThenElse(e, false), tpe)
 
       case (IfExpr(b, e1, e2), _) =>
         checkType(tc.setPos(b).withVCKind(VCKind.CheckType), b, BooleanType()) ++
@@ -1150,7 +1127,7 @@ trait TypeChecker {
     reporter.debug(s"${tc0.indent}is a subtype of: ${tp2.asString}")
     reporter.debug(s"${tc0.indent}in context:")
     reporter.debug(tc0.asString(tc0.indent))
-    val tc = tc0.inc
+    val tc = tc0.inc()
     val res = if (tp1 == tp2) TyperResult.valid
     else (tp1, tp2) match {
       case (_, Top()) => TyperResult.valid
@@ -1244,7 +1221,7 @@ trait TypeChecker {
     reporter.debug(s"${tc0.indent}in context:")
     reporter.debug(tc0.asString(tc0.indent))
 
-    val tc = tc0.inc
+    val tc = tc0.inc()
     val tr = if (t1 == t2) TyperResult.valid else {
       isSubtype(tc, t1, t2) ++ isSubtype(tc, t2, t1)
     }
@@ -1387,7 +1364,7 @@ trait TypeChecker {
       if (exprOps.BodyWithSpecs(fd.fullBody).bodyOpt.isDefined) {
         val nm = needsMeasure(fd)
         if (nm && measureType.isEmpty) {
-          Seq(VC(BooleanLiteral(false), id, VCKind.MeasureMissing, false).setPos(fd))
+          Seq(StainlessVC(BooleanLiteral(false), id, VCKind.MeasureMissing, false).setPos(fd))
         } else {
           if (nm) {
             checkedFunctions.find { case (id2, (measureType2, _)) =>
@@ -1421,7 +1398,7 @@ trait TypeChecker {
     }).flatten
     vcs.sortBy { vc =>
       (
-        getFunction(vc.fd),
+        getFunction(vc.fid),
         vc.kind.underlying match {
           case VCKind.Law          => 0
           case VCKind.Precondition => 1
@@ -1481,10 +1458,7 @@ trait TypeChecker {
 
 object TypeChecker {
   def apply(p: StainlessProgram, ctx: inox.Context): TypeChecker { val program: p.type } = {
-    new {
-      val program: p.type = p
-      val context = ctx
-      val vcFilter = VCFilter.fromOptions(ctx.options)
-    } with TypeChecker
+    class Impl(override val program: p.type) extends TypeChecker(p, ctx, VCFilter.fromOptions(ctx.options))
+    new Impl(p)
   }
 }

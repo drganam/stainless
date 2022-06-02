@@ -6,12 +6,16 @@ package frontend
 import extraction._
 import xlang.{ trees => xt }
 
-import stainless.utils.LibraryFilter
+import stainless.utils.CheckFilter
 
-trait UserFiltering extends inox.transformers.SymbolTransformer {
-  val context: inox.Context
-  val s: xt.type = xt
-  val t: xt.type = xt
+class UserFiltering private(override val s: xt.type,
+                            override val t: xt.type,
+                            override val trees: xt.type)
+                           (using val context: inox.Context)
+  extends inox.transformers.SymbolTransformer with CheckFilter {
+
+  def this()(using inox.Context) = this(xt, xt, xt)
+
   import trees._
   import exprOps._
 
@@ -20,7 +24,7 @@ trait UserFiltering extends inox.transformers.SymbolTransformer {
 
     val userIds =
       symbols.classes.values.filterNot(cd => cd.flags.exists(notUserFlag)).map(_.id) ++
-      symbols.functions.values.filterNot(fd => fd.flags.exists(notUserFlag)).map(_.id) ++
+      symbols.functions.values.filterNot(fd => fd.flags.exists(notUserFlag)).filter(isInOptions).map(_.id) ++
       symbols.typeDefs.values.filterNot(td => td.flags.exists(notUserFlag)).map(_.id)
 
     val userDependencies = (userIds.flatMap(symbols.dependencies) ++ userIds).toSeq
@@ -38,10 +42,4 @@ trait UserFiltering extends inox.transformers.SymbolTransformer {
                 .withTypeDefs(symbols.typeDefs.values.filter(keepDefinition).toSeq)
   }
 
-}
-
-object UserFiltering {
-  def apply()(implicit ctx: inox.Context) = new {
-    override val context = ctx
-  } with UserFiltering
 }

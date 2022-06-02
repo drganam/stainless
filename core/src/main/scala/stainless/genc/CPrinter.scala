@@ -16,12 +16,24 @@ class CPrinter(
   gencIncludes: Seq[String],
   val sb: StringBuffer = new StringBuffer,
 ) {
-  def print(tree: Tree) = pp(tree)(PrinterContext(indent = 0, printer = this, previous = None, current = tree))
+  def print(tree: Tree) = pp(tree)(using PrinterContext(indent = 0, printer = this, previous = None, current = tree))
 
   private def purity(isPure: Boolean): String = if (isPure) "STAINLESS_FUNC_PURE " else ""
 
-  private[genc] def pp(tree: Tree)(implicit pctx: PrinterContext): Unit = tree match {
-    case Prog(includes, decls, typeDefs0, enums0, types, functions0) =>
+  // Function definitions local to stainless.c (i.e., not exported) may be annotated as static, as they
+  // are not supposed to be accessed outside of the compilation unit.
+  private def static(isExported: Boolean): String = if (!isExported) "static " else ""
+
+  private def wrap(t: Tree, modes: Seq[DeclarationMode]): WrapperTree = {
+    modes.foldLeft(TTree(t) : WrapperTree) {
+      case (acc, Static) => StaticStorage(acc)
+      case (acc, Volatile) => VolatileStorage(acc)
+      case (acc, _) => acc
+    }
+  }
+
+  private[genc] def pp(tree: Tree)(using pctx: PrinterContext): Unit = tree match {
+    case Prog(headerIncludes, cIncludes, decls, typeDefs0, enums0, types, functions0) =>
       // We need to convert Set to Seq in order to use nary.
       val typeDefs = typeDefs0.toSeq
       val enums = enums0.toSeq.sortBy(_.id.name)
@@ -45,37 +57,45 @@ class CPrinter(
             |#include "${hFileName}"
             |
             |${nary(
-              typeDefs.filter(!headerDependencies.contains(_)) map TypeDefDecl,
+              buildIncludes(cIncludes),
+              opening = separator("includes"),
+              closing = "\n\n",
+              sep = "\n")
+            }
+            |${nary(
+              decls.filter(decl => decl._2.contains(Define) && !decl._2.contains(Export)).map { case (decl, _) =>
+                DefineMacro(TTree(decl))
+              },
+              opening = separator("macros"),
+              closing = "\n\n",
+              sep = "\n")
+             }
+            |${nary(
+              typeDefs.filter(!headerDependencies.contains(_)) map TypeDefDecl.apply,
               opening = separator("type aliases"),
               closing = "\n\n",
               sep = "\n")
              }
             |${nary(
-              enums.filter(!headerDependencies.contains(_)) map EnumDef,
+              enums.filter(!headerDependencies.contains(_)) map EnumDef.apply,
               closing = "\n\n",
               opening = separator("enums"),
               sep = "\n\n")
              }
             |${nary(
-              types.filter(!headerDependencies.contains(_)) map DataTypeDecl,
+              types.filter(!headerDependencies.contains(_)) map DataTypeDecl.apply,
               opening = separator("data type definitions"),
               closing = "\n\n",
               sep = "\n\n")
              }
             |${nary(
-              decls.filter(!_._2.contains(External)).map { case (decl, modes) =>
-                modes.foldLeft(TTree(decl) : WrapperTree) {
-                  case (acc, Static) => StaticStorage(acc)
-                  case (acc, Volatile) => VolatileStorage(acc)
-                  case (acc, _) => acc
-                }
-              },
+              decls.filter(decl => !decl._2.contains(External) && !decl._2.contains(Define)).map { case (decl, modes) => wrap(decl, modes) },
               opening = separator("global variables"),
               closing = ";\n\n",
               sep = ";\n")
              }
             |${nary(
-              functions.filter(!_.isExported) map FunDecl,
+              functions.filter(!_.isExported) map FunDecl.apply,
               opening = separator("function declarations"),
               closing = "\n\n",
               sep = "\n")
@@ -112,31 +132,47 @@ class CPrinter(
             |#endif
             |
             |${nary(
-              buildIncludes(includes),
+              decls.filter(decl => decl._2.contains(Define) && decl._2.contains(Export)).map { case (decl, _) =>
+                DefineMacro(TTree(decl))
+              },
+              opening = separator("macros"),
+              closing = "\n\n",
+              sep = "\n")
+             }
+            |${nary(
+              buildIncludes(headerIncludes),
               opening = separator("includes"),
               closing = "\n\n",
               sep = "\n")
             }
             |${nary(
-              typeDefs.filter(headerDependencies.contains) map TypeDefDecl,
+              typeDefs.filter(headerDependencies.contains) map TypeDefDecl.apply,
               opening = separator("type aliases"),
               closing = "\n\n",
               sep = "\n")
              }
             |${nary(
-              enums.filter(headerDependencies.contains) map EnumDef,
+              enums.filter(headerDependencies.contains) map EnumDef.apply,
               closing = "\n\n",
               opening = separator("enums"),
               sep = "\n\n")
              }
             |${nary(
-              types.filter(headerDependencies.contains) map DataTypeDecl,
+              types.filter(headerDependencies.contains) map DataTypeDecl.apply,
               opening = separator("data type definitions"),
               closing = "\n\n",
               sep = "\n\n")
              }
             |${nary(
-              functions.filter(_.isExported) map FunDecl,
+              decls.filter(decl => decl._2.contains(Export) && !decl._2.contains(Define)).map { case (decl, modes) =>
+                ExternDecl(wrap(decl.copy(optValue = None), modes)): WrapperTree
+              },
+              opening = separator("global variables"),
+              closing = ";\n\n",
+              sep = ";\n")
+             }
+            |${nary(
+              functions.filter(_.isExported) map FunDecl.apply,
               opening = separator("function declarations"),
               sep = "\n")
              }
@@ -147,7 +183,7 @@ class CPrinter(
 
     // Manually defined function
     case Fun(id, _, _, Right(function), _, _) =>
-      val fun = function.replaceAllLiterally("__FUNCTION__", id.name)
+      val fun = function.replace("__FUNCTION__", id.name)
       c"$fun"
 
     case fun @ Fun(_, _, _, Left(body), _, isPure) =>
@@ -183,9 +219,13 @@ class CPrinter(
     // The issue is that c"$ret (*)($params)" would be wrong in most contexts.
     // Instead, one has to add a variable name right after the `*`.
 
+
+    case MemSet(pointer, value, size) => c"memset($pointer, $value, $size)"
+    case SizeOf(tpe) => c"sizeof($tpe)"
+
     case Pointer(base) => c"$base*"
 
-    case Struct(id, _, _) => c"$id"
+    case Struct(id, _, _, _) => c"$id"
 
     case Union(id, _, _) => c"$id"
 
@@ -228,7 +268,7 @@ class CPrinter(
 
     case StructInit(struct, values) =>
       val args = struct.fields zip values
-      c"(${struct.id}) { ${nary(args map { case (Var(id, _), arg) => FieldInit(id, arg) }, sep = ", ")} }"
+      c"(${struct.id}) { ${nary(args map { case ((Var(id, _), _), arg) => FieldInit(id, arg) }, sep = ", ")} }"
 
     case UnionInit(union, fieldId, value) =>
       c"(${union.id}) { ${FieldInit(fieldId, value)} }"
@@ -291,21 +331,27 @@ class CPrinter(
     case _ => throw new Exception(s"GenC cannot print tree (of class ${tree.getClass})")
   }
 
-  private[genc] def pp(wt: WrapperTree)(implicit pctx: PrinterContext): Unit = wt match {
+  private[genc] def pp(wt: WrapperTree)(using PrinterContext): Unit = wt match {
     case TTree(t) => pp(t)
 
     case StaticStorage(decl) => c"static $decl"
+    case ExternDecl(decl) => c"extern $decl"
     case VolatileStorage(decl) => c"volatile $decl"
+    case DefineMacro(TTree(Decl(id, _, Some(value)))) => c"#define $id $value"
 
     case TypeId(FunType(ret, params), id) => c"$ret (*$id)($params)"
     case TypeId(FixedArrayType(base, length), id) => c"$base $id[$length]"
     case TypeId(typ, id) => c"$typ $id"
 
-    case FunSign(Fun(id, FunType(retret, retparamTypes), params, _, _, isPure)) =>
-      c"${purity(isPure)}$retret (*$id(${FunSignParams(params)}))(${FunSignParams(retparamTypes)})"
+    case FunSign(Fun(id, _, _, Right(s), isExported, isPure)) =>
+      val header = s.takeWhile(_ != ')').replace("__FUNCTION__", id.name)
+      c"${static(isExported)}${purity(isPure)}$header)"
 
-    case FunSign(Fun(id, returnType, params, _, _, isPure)) =>
-      c"${purity(isPure)}$returnType $id(${FunSignParams(params)})"
+    case FunSign(Fun(id, FunType(retret, retparamTypes), params, _, isExported, isPure)) =>
+      c"${static(isExported)}${purity(isPure)}$retret (*$id(${FunSignParams(params)}))(${FunSignParams(retparamTypes)})"
+
+    case FunSign(Fun(id, returnType, params, _, isExported, isPure)) =>
+      c"${static(isExported)}${purity(isPure)}$returnType $id(${FunSignParams(params)})"
 
     case FunSignParams(Seq()) => c"void"
     case FunSignParams(params) => c"${nary(params)}"
@@ -319,21 +365,31 @@ class CPrinter(
           |  ${nary(literals, sep = ",\n")}
           |} $id;"""
 
-    case DataTypeDecl(t: DataType) =>
-      val kind = t match {
-        case _: Struct => "struct"
-        case _: Union => "union"
-      }
-      c"""|typedef $kind {
-          |  ${nary(t.fields, sep = ";\n", closing = ";")}
-          |} ${t.id};"""
+    case DataTypeDecl(u: Union) =>
+      c"""|typedef union {
+          |  ${nary(u.fields.map { case (decl, modes) => wrap(decl, modes) }, sep = ";\n", closing = ";")}
+          |} ${u.id};"""
+
+    case DataTypeDecl(s: Struct) if s.isPacked =>
+      c"""|#pragma pack(1)
+          |typedef struct {
+          |  ${nary(s.fields.map { case (decl, modes) => wrap(decl, modes) }, sep = ";\n", closing = ";")}
+          |} ${s.id};
+          |#pragma pack()"""
+
+    case DataTypeDecl(s: Struct) =>
+      c"""|typedef struct {
+          |  ${nary(s.fields.map { case (decl, modes) => wrap(decl, modes) }, sep = ";\n", closing = ";")}
+          |} ${s.id};"""
 
     case FieldInit(id, value) => c".$id = $value"
+
+    case _ => throw new Exception(s"GenC cannot print wrapped tree $wt (of class ${wt.getClass})")
   }
 
 
   /** Hardcoded list of required include files from C standard library **/
-  private lazy val includes_ = Set("assert.h", "stdbool.h", "stdint.h", "stddef.h") map Include
+  private lazy val includes_ = Set("assert.h", "stdbool.h", "stdint.h", "stddef.h", "string.h") map Include.apply
 
   private def buildIncludes(includes: Set[Include]): Seq[String] =
     (includes_ ++ includes).toSeq.sortBy(_.file).map(i => s"#include <${i.file}>") ++
@@ -342,6 +398,8 @@ class CPrinter(
   /** Wrappers to distinguish how the data should be printed **/
   private[genc] sealed abstract class WrapperTree
   private case class TTree(t: Tree) extends WrapperTree
+  private case class ExternDecl(wt: WrapperTree) extends WrapperTree
+  private case class DefineMacro(wt: WrapperTree) extends WrapperTree
   private case class StaticStorage(wt: WrapperTree) extends WrapperTree
   private case class VolatileStorage(wt: WrapperTree) extends WrapperTree
   private case class TypeId(typ: Type, id: Id) extends WrapperTree
@@ -358,7 +416,7 @@ class CPrinter(
 
 
   /** Special helpers for pretty parentheses **/
-  private def optP(body: => Any)(implicit pctx: PrinterContext) = {
+  private def optP(body: => Any)(using pctx: PrinterContext) = {
     if (requiresParentheses(pctx.current, pctx.previous)) {
       sb.append("(")
       body
@@ -371,7 +429,8 @@ class CPrinter(
   private def requiresParentheses(current: Tree, previous: Option[Tree]): Boolean = (current, previous) match {
     case (_, None) => false
     case (_, Some(_: Decl | _: Call | _: ArrayAccess | _: If | _: IfElse | _: While | _: Return | _: Assign)) => false
-    case (Operator(precedence1), Some(Operator(precedence2))) if precedence1 < precedence2 => false
+    // Add parentheses even when not necessary to avoid warnings in C
+    // case (Operator(precedence1), Some(Operator(precedence2))) if precedence1 < precedence2 => false
     case (_, _) => true
   }
 

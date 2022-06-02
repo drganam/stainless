@@ -21,19 +21,19 @@ trait EffectElaboration
   // Function rewriting depends on the effects analysis which relies on all dependencies
   // of the function, so we use a dependency cache here.
   override protected final val funCache = new ExtractionCache[s.FunDef, FunctionResult](
-    (fd, context) => getDependencyKey(fd.id)(context.symbols)
+    (fd, context) => getDependencyKey(fd.id)(using context.symbols)
   )
 
   // Function types are rewritten by the transformer depending on the result of the
   // effects analysis, so we again use a dependency cache here.
   override protected final val sortCache = new ExtractionCache[s.ADTSort, SortResult](
-    (sort, context) => getDependencyKey(sort.id)(context.symbols)
+    (sort, context) => getDependencyKey(sort.id)(using context.symbols)
   )
 
   // Function types are rewritten by the transformer depending on the result of the
   // effects analysis, so we again use a dependency cache here.
   override protected final val classCache = new ExtractionCache[s.ClassDef, ClassResult](
-    (cd, context) => ClassKey(cd) + OptionSort.key(context.symbols)
+    (cd, context) => ClassKey(cd) + OptionSort.key(using context.symbols)
   )
 
   override protected type FunctionResult = Seq[t.FunDef]
@@ -53,36 +53,31 @@ trait EffectElaboration
   override protected def getContext(symbols: Symbols) = new TransformerContext(symbols)
 
   override protected def extractSymbols(tctx: TransformerContext, symbols: s.Symbols): t.Symbols = {
-    def shouldDropFun(fd: FunDef)(implicit symbols: s.Symbols): Boolean =
-      fd.id match {
-        case RefEq.Id() => true
-        case ObjectIdentity.Id() => true
-        case HeapGet.Id() => true
-        case HeapUnchanged.Id() => true
-        case HeapEval.Id() => true
-        case _ => false
-      }
+    val isOldImperative = !context.options.findOptionOrDefault(optFullImperative)
 
-    def shouldDropClass(cd: ClassDef)(implicit symbols: s.Symbols): Boolean =
-      cd.typed.toType match {
-        case AnyHeapRefType() => true
-        case HeapType() => true
-        case _ => false
-      }
+    val anyHeapRefCdOpt = AnyHeapRefType.classDefOpt(using symbols)
+    val heapCdOpt = HeapType.classDefOpt(using symbols)
 
-    // We filter out the definitions related to AnyHeapRef since they are only needed for inferring
-    // which types live on the heap.
+    def shouldDrop(defn: Definition): Boolean =
+      (
+        anyHeapRefCdOpt.isDefined && symbols.dependsOn(defn.id, anyHeapRefCdOpt.get.id) ||
+        heapCdOpt.isDefined && symbols.dependsOn(defn.id, heapCdOpt.get.id)
+      ) && (isOldImperative || defn.flags.contains(Library))
+
+    // We filter out the definitions related to AnyHeapRef and Heap.
     val newSymbols = NoSymbols
-      .withFunctions(symbols.functions.values.filterNot(fd => shouldDropFun(fd)(symbols)).toSeq)
-      .withClasses(symbols.classes.values.filterNot(cd => shouldDropClass(cd)(symbols)).toSeq)
+      .withFunctions(symbols.functions.values.filterNot(shouldDrop).toSeq)
+      .withClasses(symbols.classes.values.filterNot(shouldDrop).toSeq)
       .withSorts(symbols.sorts.values.toSeq)
       .withTypeDefs(symbols.typeDefs.values.toSeq)
 
+    // If we're not using the new imperative phase, we're done.
+    if (isOldImperative)
+      return newSymbols
+
     super.extractSymbols(tctx, newSymbols)
-      .withSorts(Seq(heapRefSort) ++ OptionSort.sorts(newSymbols))
-      .withFunctions(Seq(dummyHeap) ++ OptionSort.functions(newSymbols))
-      // .withSorts(Seq(heapRefSort, heapSort) ++ OptionSort.sorts(newSymbols))
-      // .withFunctions(heapFunctions ++ OptionSort.functions(newSymbols))
+      .withSorts(Seq(heapRefSort) ++ OptionSort.sorts(using newSymbols))
+      .withFunctions(Seq(dummyHeap) ++ OptionSort.functions(using newSymbols))
   }
 
   override protected def extractFunction(tctx: TransformerContext, fd: FunDef): FunctionResult =
@@ -96,59 +91,16 @@ trait EffectElaboration
 }
 
 object EffectElaboration {
-  def apply(trees: Trees)(implicit ctx: inox.Context): ExtractionPipeline {
+  def apply(trees: Trees)(using inox.Context): ExtractionPipeline {
     val s: trees.type
     val t: trees.type
-  } = new EffectElaboration {
-    override val s: trees.type = trees
-    override val t: trees.type = trees
-    override val context = ctx
+  } = {
+    class Impl(override val s: trees.type, override val t: trees.type)(using override val context: inox.Context) extends EffectElaboration
+    new Impl(trees, trees)
   }
 }
 
 /** The actual Ref transformation **/
-
-/*
-trait SyntheticHeapFunctions { self =>
-  val s: Trees
-  val t: s.trees
-
-  import t._
-  import dsl._
-
-  protected lazy val heapReadId: Identifier = ast.SymbolIdentifier("stainless.lang.HeapRef.read")
-  protected lazy val heapModifyId: Identifier = ast.SymbolIdentifier("stainless.lang.HeapRef.modify")
-
-  protected def heapFunctions: Seq[FunDef] = {
-    val readFd = mkFunDef(heapReadId, Unchecked, Synthetic, Inline)() { _ =>
-      (Seq("heap" :: HeapMapType, "x" :: HeapRefType), AnyType(), {
-        case Seq(heap, x) =>
-          Require(
-            heap.select(heapReadableId).contains(x),
-            MapApply(heap.select(heapMapId), x)
-          )
-      })
-    }
-    val modifyFd = mkFunDef(heapModifyId, Unchecked, Synthetic, Inline)() { _ =>
-      (Seq("heap" :: HeapMapType, "x" :: HeapRefType, "v" :: AnyType()), UnitType(), {
-        case Seq(heap, x) =>
-          Require(
-            heap.select(heapModifiableId).contains(x),
-            heapWithMap(heap, MapUpdated(heap.select(heapMapId), x, v))
-          )
-      })
-    }
-    Seq(readFd, modifyFd)
-  }
-
-  protected def heapWithMap(oldHeap: Expr, newMap: Expr): Expr =
-    C(heapCons)(
-      newMap,
-      oldHeap.select(heapReadableId),
-      oldHeap.select(heapModifiableId)
-    )
-}
-*/
 
 trait RefTransform
   extends oo.CachingPhase
@@ -174,7 +126,8 @@ trait RefTransform
   protected type TransformerContext <: RefTransformContext
 
   trait RefTransformContext { context: TransformerContext =>
-    implicit val symbols: s.Symbols
+    val symbols: s.Symbols
+    import symbols.given
 
     lazy val HeapRefSetType: Type = SetType(HeapRefType)
     lazy val EmptyHeapRefSet: Expr = FiniteSet(Seq.empty, HeapRefType)
@@ -240,9 +193,10 @@ trait RefTransform
 
     // Reduce all mutation to assignments of a local heap variable
     // TODO: Handle mutable types other than classes
-    abstract class RefTransformer extends oo.DefinitionTransformer {
-      val s: self.s.type = self.s
-      val t: self.s.type = self.s
+    abstract class RefTransformer(override val s: self.s.type, override val t: self.s.type)
+      extends oo.DefinitionTransformer {
+
+      def this() = this(self.s, self.s)
 
       override def transform(tpe: Type, env: Env): Type = tpe match {
         case HeapType() =>
@@ -402,6 +356,9 @@ trait RefTransform
           // TODO(gsps): Add ability to refer back to old state snapshots for any ghost code
           e
 
+        case AsHeapRefSet(objs) =>
+          transform(objs, env)
+
         case RefEq(e1, e2) =>
           // Reference equality is transformed into value equality on references
           Equals(transform(e1, env), transform(e2, env)).copiedFrom(e)
@@ -411,7 +368,11 @@ trait RefTransform
           ADTSelector(transform(recv, env), fieldId).copiedFrom(e)
 
         case HeapGet() =>
-          env.expectHeapVd(e.getPos, "heap snapshot").toVariable
+          val heap = env.expectHeapVd(e.getPos, "heap snapshot").toVariable
+          val readsDom = env.expectReadsV(e.getPos, "heap snapshot")
+          readsDom
+            .map(readsDom => MapMerge(readsDom, heap, E(dummyHeap.id)()).copiedFrom(e))
+            .getOrElse(heap)
 
         case HeapUnchanged(objs, heap1, heap2) =>
           smartLet("heapBase" :: HeapRefType, transform(heap1, env)) { heapBase =>
@@ -443,18 +404,27 @@ trait RefTransform
               val readsDom = env.expectReadsV(e.getPos, "call heap-reading function")
               lazy val modifiesDom = env.expectModifiesV(e.getPos, "call heap-modifying function")
 
-              // FIXME: Properly encode the *any reads* and *any writes* cases (when *Dom is None)
-              val extraArgs = Seq(heapVd.toVariable, readsDom.getOrElse(EmptyHeapRefSet)) ++
-                (if (writes) Some(modifiesDom.getOrElse(EmptyHeapRefSet)) else None)
-              val call = FunctionInvocation(shimId(id), targs1, extraArgs ++ vargs1).copiedFrom(e)
+              val call =
+                if (readsDom.isEmpty && modifiesDom.isEmpty) {
+                  // NOTE: Workaround for the case where both readsDom and modifiesDom is None,
+                  //   i.e. all reads and modifications are permitted.
+                  FunctionInvocation(id, targs1, Seq(heapVd.toVariable) ++ vargs1).copiedFrom(e)
+                } else {
+                  // FIXME: Encode the *any reads* and *any writes* cases (when *Dom is None).
+                  //   Currently we have no way of signalling this case to the shim.
+                  //   We could move from `Set[AnyHeapRef]` to `Option[Set[AnyHeapRef]]`.
+                  val extraArgs = Seq(heapVd.toVariable, readsDom.getOrElse(EmptyHeapRefSet)) ++
+                    (if (writes) Some(modifiesDom.getOrElse(EmptyHeapRefSet)) else None)
+                  FunctionInvocation(shimId(id), targs1, extraArgs ++ vargs1).copiedFrom(e)
+                }
 
               if (writes) {
                 // Update the local heap variable and project out the the function result
                 val resTpe = T(typeOnlyRefTransformer.transform(fi.tfd.returnType), HeapMapType)
                 let("res" :: resTpe, call) { res =>
                   Block(
-                    Seq(Assignment(heapVd.toVariable, res._2).copiedFrom(e)),
-                    res._1
+                    Seq(Assignment(heapVd.toVariable, res._ts2).copiedFrom(e)),
+                    res._ts1
                   ).copiedFrom(e)
                 }
               } else {
@@ -556,8 +526,8 @@ trait RefTransform
             val valueVd: ValDef = "resV" :: resVd1.tpe
             val heapVd1: ValDef = "heap1" :: HeapMapType
             val resVd2 = resVd1.copy(tpe = T(resVd1.tpe, HeapMapType))
-            val post2 = Let(valueVd, resVd2.toVariable._1,
-              Let(heapVd1, resVd2.toVariable._2,
+            val post2 = Let(valueVd, resVd2.toVariable._ts1,
+              Let(heapVd1, resVd2.toVariable._ts2,
                 transformPost(post, resVd1, valueVd, heapVdOpt0, Some(heapVd1))))
             (resVd2, post2)
           } else {
@@ -657,10 +627,10 @@ trait RefTransform
             val result = if (writes) {
               Assume(
                 unchecked(Equals(
-                  res._2,
+                  res._ts2,
                   MapMerge(
                     modifiesVdOpt.get.toVariable,
-                    res._2,
+                    res._ts2,
                     heapVdOpt0.get.toVariable
                   ).copiedFrom(fd)
                 ).copiedFrom(fd)),
@@ -671,7 +641,28 @@ trait RefTransform
             }
             val fiProjected = fi.copy(args = heapArg +: fi.args.tail).copiedFrom(fi)
             Assume(
-              unchecked(Equals(res, fiProjected).copiedFrom(fd)),
+              unchecked(
+                if (writes) {
+                  // resR := f(reads.mapMerge(heap, dummyHeap), x)
+                  let("resR" :: newReturnType, fiProjected) { resR =>
+                    And(
+                      // res._ts1 == resR._ts1
+                      Equals(res._ts1, resR._ts1).copiedFrom(fd),
+                      // Heap.unchanged(modifies, res._ts2, resR._ts2)
+                      Equals(
+                        res._ts2,
+                        MapMerge(
+                          modifiesVdOpt.get.toVariable,
+                          resR._ts2,
+                          res._ts2
+                        ).copiedFrom(fd)
+                      ).copiedFrom(fd)
+                    ).copiedFrom(fd)
+                  }
+                } else {
+                  Equals(res, fiProjected).copiedFrom(fd)
+                }
+              ),
               result
             ).copiedFrom(fd)
           }
@@ -720,7 +711,8 @@ trait RefTransform
           newShimParams,
           newReturnType,
           freshenLocals(fullBody),
-          (newFlags ++ Seq(Synthetic, DropVCs, InlineOnce)).distinct
+          (newFlags.filter(flag => flag != Inline && flag != Opaque && flag != Extern) ++
+            Seq(Synthetic, DropVCs, InlineOnce)).distinct
         ).copiedFrom(fd))
       }
 

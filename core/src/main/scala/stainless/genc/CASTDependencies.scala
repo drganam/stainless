@@ -5,11 +5,14 @@ package genc
 
 import CAST._
 
-class CASTTraverser(implicit ctx: inox.Context) {
+class CASTTraverser(using ctx: inox.Context) {
 
   def deconstruct(t: Tree): Seq[Tree] = t match {
-    case Prog(includes, decls, typeDefs, enums, types, functions) =>
-      includes.toSeq ++ decls.map(_._1) ++ typeDefs.toSeq ++ enums.toSeq ++ types ++ functions.toSeq
+    case Prog(headerIncludes, cIncludes, decls, typeDefs, enums, types, functions) =>
+      headerIncludes.toSeq ++ cIncludes.toSeq ++ decls.map(_._1) ++ typeDefs.toSeq ++ enums.toSeq ++ types ++ functions.toSeq
+
+    case Assert(e) =>
+      Seq(e)
 
     case TypeDef(orig, alias, _) =>
       Seq(orig, alias)
@@ -23,8 +26,8 @@ class CASTTraverser(implicit ctx: inox.Context) {
     case FixedArrayType(base, _) =>
       Seq(base)
 
-    case Struct(id, fields, _) =>
-      id +: fields
+    case Struct(id, fields, _, _) =>
+      id +: fields.map(_._1)
 
     case Fun(id, returnType, params, Left(block), _, _) =>
       id +: returnType +: params :+ block
@@ -39,7 +42,7 @@ class CASTTraverser(implicit ctx: inox.Context) {
       Seq()
 
     case Union(id, fields, _) =>
-      id +: fields
+      id +: fields.map(_._1)
 
     case Enum(id, literals) =>
       id +: literals
@@ -125,6 +128,9 @@ class CASTTraverser(implicit ctx: inox.Context) {
     case Cast(expr, typ) =>
       Seq(expr, typ)
 
+    case Include(file) =>
+      Seq()
+
     case _ =>
       ctx.reporter.fatalError(s"Cannot deconstruct CAST tree of type ${t.getClass}")
   }
@@ -138,7 +144,7 @@ class CASTTraverser(implicit ctx: inox.Context) {
 
 object CASTDependencies {
 
-  def headerDependencies(prog: Prog)(implicit ctx: inox.Context): Set[Type] = {
+  def headerDependencies(prog: Prog)(using inox.Context): Set[Type] = {
     var res = scala.collection.mutable.Set[Type]()
 
     object typeCollector extends CASTTraverser {

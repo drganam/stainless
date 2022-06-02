@@ -30,6 +30,11 @@ package object lang {
     def ==>(that: => Boolean): Boolean = {
       if (underlying) that else true
     }
+
+    // Use this "and" operator instead of `&&` when you want verification conditions to be split
+    def &&&(that: => Boolean): Boolean = {
+      if (underlying) that else false
+    }
   }
 
   @library
@@ -158,6 +163,14 @@ package object lang {
   @library
   def specialize[T](call: T): T = call
 
+  @library
+  def inline[T](call: T): T = call
+
+  // typically used when `call` invokes an `opaque` function
+  // this adds an equality between the call, and the inlined call
+  @library
+  def unfold[T](call: T): Unit = ()
+
   @ignore @library
   implicit class ArrayUpdating[T](a: Array[T]) {
     def updated(index: Int, value: T): Array[T] = {
@@ -182,6 +195,12 @@ package object lang {
   trait AnyHeapRef {
     @refEq
     def refEq(that: AnyHeapRef): Boolean = true
+  }
+
+  @library
+  implicit class HeapRefSetDecorations[T <: AnyHeapRef](val objs: Set[T]) {
+    @extern @library
+    def asRefs: Set[AnyHeapRef] = ???
   }
 
   @ignore

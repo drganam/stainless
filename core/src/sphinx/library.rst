@@ -5,7 +5,10 @@ Stainless Library
 
 Stainless defines its own library with some core data types and
 operations on them, which work with the fragment supported
-by Stainless. One of the reasons for a separate library is to
+by Stainless, available in ``frontends/library/stainless``, which
+we encourage the reader to consult as it is always up to date.
+
+One of the reasons for a separate library is to
 ensure that these operations can be correctly mapped to
 mathematical functions and relations inside of SMT solvers,
 largely defined by the SMT-LIB standard (see
@@ -77,6 +80,12 @@ which instruct Stainless to handle some functions or objects in a specialized wa
 | ``@extern``       | Only extract the contracts of a function, replacing            |
 |                   | its body by a ``choose`` expression.                           |
 +-------------------+----------------------------------------------------------------+
+| ``@opaque``       | Used to hide a function ``f``'s body when doing verification   |
+|                   | of functions (``f`` itself, or others) invoking ``f``. Does    |
+|                   | not hide pre and postconditions.                               |
++-------------------+----------------------------------------------------------------+
+| ``@dropVCs``      | Do not generate verification conditions for this function.     |
++-------------------+----------------------------------------------------------------+
 | ``@pure``         | Specify that this function is pure, which will then            |
 |                   | be checked. If the function is also annotated with             |
 |                   | ``@extern``, it will not be checked, but assumed pure.         |
@@ -102,6 +111,19 @@ which instruct Stainless to handle some functions or objects in a specialized wa
 | ``@partialEval``  | Partially evaluate calls to this function.                     |
 |                   | Note: ``stainless.lang.partialEval`` can also be used to       |
 |                   | partially evaluate an expression.                              |
++-------------------+----------------------------------------------------------------+
+
+Stainless also has some special keywords defined in ``stainless.lang`` that can be used around
+function calls. `Here <https://github.com/epfl-lara/stainless/blob/master/frontends/benchmarks/verification/valid/MicroTests/VisibleOpaque.scala>`_ is an example for ``unfold``.
+
++-------------------+----------------------------------------------------------------+
+| Annotation        | Meaning                                                        |
++===================+================================================================+
+| ``inline``        | Call-site inlining                                             |
++-------------------+----------------------------------------------------------------+
+| ``unfold``        | Inject an equality assumption between a function call and its  |
+|                   | unfolded version. Can be useful to locally override an         |
+|                   | ``@opaque`` annotation.                                        |
 +-------------------+----------------------------------------------------------------+
 
 List[T]

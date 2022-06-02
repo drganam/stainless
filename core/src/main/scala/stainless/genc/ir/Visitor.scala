@@ -15,7 +15,7 @@ import collection.mutable.{ Set => MutableSet }
  *      be visited several times with the same env.
  * EXCEPT for functions. See Transformer for reason.
  */
-abstract class Visitor[S <: IR](final val ir: S) {
+abstract class Visitor[S <: IR](val ir: S) {
   import ir._
 
   // Entry point for the visit
@@ -58,7 +58,7 @@ abstract class Visitor[S <: IR](final val ir: S) {
 
   private def rec(cd: ClassDef): Unit = {
     def impl(cd: ClassDef): Unit = {
-      cd.fields foreach rec
+      cd.fields.foreach { case (vd, modes) => rec(vd) }
       visit(cd)
     }
 
@@ -93,6 +93,7 @@ abstract class Visitor[S <: IR](final val ir: S) {
       case Binding(vd) => rec(vd)
       case FunVal(fd) => rec(fd)
       case FunRef(e) => rec(e)
+      case Assert(e) => rec(e)
       case Block(exprs) => exprs foreach rec
       case Decl(vd, None) => rec(vd)
       case Decl(vd, Some(value)) => rec(vd); rec(value)

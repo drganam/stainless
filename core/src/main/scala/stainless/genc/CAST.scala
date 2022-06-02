@@ -32,6 +32,14 @@ object CAST { // C Abstract Syntax Tree
       new CPrinter("stainless.h", true, Set(), Seq(), sb).print(this)
       sb.toString
     }
+
+    def size(using inox.Context): Int = {
+      var result = 0
+      new CASTTraverser {
+        override def traverse(t: Tree): Unit = { result += 1; super.traverse(t) }
+      }.traverse(this)
+      result
+    }
   }
 
   /* ----------------------------------------------------- Definitions  ----- */
@@ -42,7 +50,8 @@ object CAST { // C Abstract Syntax Tree
   }
 
   case class Prog(
-    includes: Set[Include],
+    headerIncludes: Set[Include],
+    cIncludes: Set[Include],
     decls: Seq[(Decl, Seq[DeclarationMode])],
     typeDefs: Set[TypeDef],
     enums: Set[Enum],
@@ -75,7 +84,7 @@ object CAST { // C Abstract Syntax Tree
 
   abstract class DataType extends Type {
     val id: Id
-    val fields: Seq[Var]
+    val fields: Seq[(Var, Seq[DeclarationMode])]
     val isExported: Boolean
   }
 
@@ -85,11 +94,11 @@ object CAST { // C Abstract Syntax Tree
 
   case class FunType(ret: Type, params: Seq[Type]) extends Type
 
-  case class Struct(id: Id, fields: Seq[Var], isExported: Boolean) extends DataType {
+  case class Struct(id: Id, fields: Seq[(Var, Seq[DeclarationMode])], isExported: Boolean, isPacked: Boolean) extends DataType {
     require(fields.nonEmpty, s"Fields of struct $id should be non empty")
   }
 
-  case class Union(id: Id, fields: Seq[Var], isExported: Boolean) extends DataType {
+  case class Union(id: Id, fields: Seq[(Var, Seq[DeclarationMode])], isExported: Boolean) extends DataType {
     require(fields.nonEmpty, s"Fields of union $id should be non empty")
   }
 
@@ -108,6 +117,9 @@ object CAST { // C Abstract Syntax Tree
   case class Lit(lit: Literal) extends Expr
 
   case class EnumLiteral(id: Id) extends Expr
+
+  case class MemSet(pointer: Expr, value: Expr, size: Expr) extends Expr
+  case class SizeOf(tpe: Type) extends Expr
 
   case class Decl(id: Id, typ: Type, optValue: Option[Expr]) extends Expr {
     require(optValue.forall(_.isValue), s"Initialisation $id = ${optValue.get} should be done with a value")
@@ -142,7 +154,7 @@ object CAST { // C Abstract Syntax Tree
 
   // Initialise one of the fields of the union
   case class UnionInit(union: Union, fieldId: Id, value: Expr) extends Expr {
-    require(union.fields exists { _.id == fieldId },
+    require(union.fields exists { case (vd, modes) => vd.id == fieldId },
       s"Field $fieldId must exist in union $union"
     )
     require(value.isValue,
@@ -251,15 +263,15 @@ object CAST { // C Abstract Syntax Tree
 
 
   /* ---------------------------------------------- Sanitisation Helper ----- */
-  private implicit class ExprValidation(e: Expr) {
-    def isValue = e match {
+  extension (e: Expr) {
+    private def isValue = e match {
       case _: Binding | _: Lit | _: EnumLiteral | _: StructInit | _: ArrayStatic |
            _: UnionInit | _: Call | _: FieldAccess | _: ArrayAccess |
            _: Ref | _: Deref | _: BinOp | _: UnOp | _: Cast => true
       case _ => false
     }
 
-    def isReference = e match {
+    private def isReference = e match {
       case _: Ref => true
       case _ => false
     }

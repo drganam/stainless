@@ -6,49 +6,48 @@ package trace
 
 import stainless.utils.CheckFilter
 
-trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { self =>
-  val s: Trees
-  val t: termination.Trees
+class Trace(override val s: Trees, override val t: termination.Trees)
+           (using override val context: inox.Context)
+  extends CachingPhase
+     with IdentityFunctions
+     with IdentitySorts { self =>
   import s._
 
   override protected type TransformerContext = s.Symbols
   override protected def getContext(symbols: s.Symbols) = symbols
 
-  private[this] object identity extends transformers.TreeTransformer {
-    override val s: self.s.type = self.s
-    override val t: self.t.type = self.t
-  }
+  private[this] class Identity(override val s: self.s.type, override val t: self.t.type) extends transformers.ConcreteTreeTransformer(s, t)
+  private[this] val identity = new Identity(self.s, self.t)
 
   private def evaluate(syms: s.Symbols, expr: Expr) = {
-    type ProgramType = inox.Program{val trees: Trace.this.s.type; val symbols: syms.type}
+    type ProgramType = inox.Program{val trees: self.s.type; val symbols: syms.type}
     val prog: ProgramType = inox.Program(self.s)(syms)
-
-    val evaluator = new {
-    val context = self.context
-    val program: prog.type = prog
-    val semantics = new inox.Semantics {
+    val sem = new inox.Semantics {
       val trees: self.s.type = self.s
       val symbols: syms.type = syms
       val program: prog.type = prog
       def createEvaluator(ctx: inox.Context) = ???
       def createSolver(ctx: inox.Context) = ???
     }
-  } with evaluators.RecursiveEvaluator
-    with inox.evaluators.HasDefaultGlobalContext
-    with inox.evaluators.HasDefaultRecContext
+    class EvalImpl(override val program: prog.type, override val context: inox.Context)
+                  (using override val semantics: sem.type)
+      extends evaluators.RecursiveEvaluator(program, context)
+      with inox.evaluators.HasDefaultGlobalContext
+      with inox.evaluators.HasDefaultRecContext
 
+    val evaluator = new EvalImpl(prog, self.context)(using sem)
     evaluator.eval(expr)
   }
 
   override protected def extractSymbols(context: TransformerContext, symbols: s.Symbols): t.Symbols = {
-    import symbols._
+    import symbols.{given, _}
     import exprOps._
 
     def checkArgsNorm(model: Identifier, norm: Identifier) = {
       val m = symbols.functions(model)
       val n = symbols.functions(norm)
 
-      //TODO 
+      //TODO
       n.params.size >= 1 && n.params.init.size == m.params.size && n.tparams.size == m.tparams.size &&
       n.params.init.zip(m.params).forall(arg => arg._1.tpe == arg._2.tpe)
     }
@@ -113,36 +112,35 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
           val mod = pair.prog.symbols.functions(Trace.state(fun.id).directModel.get)
           val ref = if (pair.fromFunction) fun else mod
 
-
           val bval = {
-            type ProgramType = inox.Program{val trees: pair.prog.trees.type; val symbols: pair.prog.symbols.type}
+            type ProgramType = Program{val trees: pair.prog.trees.type; val symbols: pair.prog.symbols.type}
             val prog: ProgramType = pair.prog.asInstanceOf[ProgramType]
             val syms: prog.symbols.type = prog.symbols
 
-            val evaluator = new {
-              val context = self.context
-              val program: prog.type = prog
-              val semantics = new inox.Semantics {
+            val sem = new inox.Semantics {
               val trees: prog.trees.type = prog.trees
               val symbols: syms.type = prog.symbols
               val program: prog.type = prog
               def createEvaluator(ctx: inox.Context) = ???
               def createSolver(ctx: inox.Context) = ???
             }
-            } with inox.evaluators.RecursiveEvaluator
+            class EvalImpl(override val program: prog.type, override val context: inox.Context)
+                          (using override val semantics: sem.type)
+              extends evaluators.RecursiveEvaluator(program, context)
               with inox.evaluators.HasDefaultGlobalContext
               with inox.evaluators.HasDefaultRecContext
+            val evaluator = new EvalImpl(prog, self.context)(using sem)
 
             val expr = syms.functions(f.id).fullBody
             val counterex = pair.counterexample
 
-            //.get breaks if parameter names are not the same 
+            //.get breaks if parameter names are not the same
             //fix: store the info wheter the counterexample comes from the model or the function
             try {
-              val invocation = evaluator.program.trees.FunctionInvocation(f.id, Seq(), ref.params.map(vd => 
+              val invocation = evaluator.program.trees.FunctionInvocation(f.id, Seq(), ref.params.map(vd =>
                 pair.counterexample.collectFirst({ case (k, v) if(k.id.name == vd.id.name) => v }).get))
 
-              val invocationM = evaluator.program.trees.FunctionInvocation(m.id, Seq(), ref.params.map(vd => 
+              val invocationM = evaluator.program.trees.FunctionInvocation(m.id, Seq(), ref.params.map(vd =>
                 pair.counterexample.collectFirst({ case (k, v) if(k.id.name == vd.id.name) => v }).get))
 
               (evaluator.eval(invocation), evaluator.eval(invocationM)) match {
@@ -163,7 +161,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
             }
 
           }
-          bval 
+          bval
         })
 
         def passesAllTests = Trace.getMkTest match { //todo just check for annotation here
@@ -201,10 +199,10 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
                 }
 
               }
-              bval 
+              bval
             })
 
-          } 
+          }
           case None => {
             true
           }
@@ -218,9 +216,9 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
       def getFunCalls(fd: FunDef): List[FunDef] = {
         var funs: List[Identifier] = List()
         s.exprOps.preTraversal {
-          case fi @ s.FunctionInvocation(tfd, tps, args) if tfd != fd.id //symbols.isRecursive(tfd) 
+          case fi @ s.FunctionInvocation(tfd, tps, args) if tfd != fd.id //symbols.isRecursive(tfd)
             => funs = tfd::funs
-          case _ => 
+          case _ =>
         }(fd.fullBody)
         // TODO
         //(funs.distinct.map(symbols.functions(_)) ++ funs.distinct.flatMap(fd => getFunCalls(symbols.functions(fd)))).distinct
@@ -249,16 +247,16 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
         val validpairs = pairs.filter(elem => elem._2 != None)
 
         validpairs.map(elem => elem._2 match {
-          case Some(f) => 
+          case Some(f) =>
             (equivalenceCheck(elem._1, f, true), elem._1, f)
         })
-         
+
         /*
         for (
           m <- f1Calls; //remove lib
           f <- f2Calls; //remove lib
           if (m != f && checkArgs(m, f)) // TODO  && same ret type, names ..
-        ) yield (equivalenceCheck(m, f, true), m, f) 
+        ) yield (equivalenceCheck(m, f, true), m, f)
         */
       }
 
@@ -266,13 +264,13 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
         val freshId = FreshIdentifier(CheckFilter.fixedFullName(fd1.id) + "$" + CheckFilter.fixedFullName(fd2.id))
         val eqLemma = exprOps.freshenSignature(fd1).copy(id = freshId)
 
-        val sublemmas = if (sublemmaGeneration) makeSublemmas(fd1, fd2) else List() 
+        val sublemmas = if (sublemmaGeneration) makeSublemmas(fd1, fd2) else List()
 
 
         //body of fd2, with calls to subfunctions replaced
         val replacement: List[FunDef] = sublemmas match {
           case Nil => List()
-          case _ => 
+          case _ =>
             val sm = sublemmas.map(_._2).map(_.id)
             val sf = sublemmas.map(_._3).map(_.id)
             List(inductPattern(symbols, fd2, fd2, "replacement", (sf zip sm).toMap).setPos(fd2.getPos).copy(flags = Seq(s.Derived(Some(fd2.id)))))
@@ -282,13 +280,13 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
         val newParamTps = eqLemma.tparams.map{tparam => tparam.tp}
         val newParamVars = eqLemma.params.map{param => param.toVariable}
 
-        val fdSpecs = if(Trace.funFirst) fd2 else fd1 
+        val fdSpecs = if(Trace.funFirst) fd2 else fd1
 
         val subst = (fdSpecs.params.map(_.id) zip newParamVars).toMap
         val tsubst = (fdSpecs.tparams zip newParamTps).map { case (tparam, targ) => tparam.tp.id -> targ }.toMap
         val specializer = new Specializer(eqLemma, eqLemma.id, tsubst, subst, Map())
 
-        val specs = BodyWithSpecs(fdSpecs.fullBody).specs.filter(s => s.kind == LetKind || s.kind == PreconditionKind) 
+        val specs = BodyWithSpecs(fdSpecs.fullBody).specs.filter(s => s.kind == LetKind || s.kind == PreconditionKind)
         val pre = specs.map(spec => spec match {
           case Precondition(cond) => Precondition(specializer.transform(cond))
           case LetInSpec(vd, expr) => LetInSpec(vd, specializer.transform(expr))
@@ -302,7 +300,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
         val (normFun1, normFun2) = Trace.getNorm match {
           case Some(n) if (checkArgsNorm(fun1.id, n)) => (
-            s.FunctionInvocation(n, newParamTps, newParamVars :+ fun1), 
+            s.FunctionInvocation(n, newParamTps, newParamVars :+ fun1),
             s.FunctionInvocation(n, newParamTps, newParamVars :+ fun2))
           case _ => (fun1, fun2)
         }
@@ -310,11 +308,11 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
         val res = s.ValDef.fresh("res", s.UnitType())
 
         val cond = Trace.getProveMe match {
-          case None => s.Equals(normFun1, normFun2) 
+          case None => s.Equals(normFun1, normFun2)
           case Some(p) => s.FunctionInvocation(p, List(), List(normFun1, normFun2))
         }
 
-        val post = Postcondition(Lambda(Seq(res), cond)) 
+        val post = Postcondition(Lambda(Seq(res), cond))
 
         val body = s.UnitLiteral()
         val withPre = exprOps.reconstructSpecs(pre, Some(body), s.UnitType())
@@ -340,7 +338,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
           if (m.params.size == f.params.size && evalCheck(f, m)) {
           //if (m.params.size == f.params.size) {
             val res: List[s.FunDef] = Trace.eqCheckState match {
-              case Trace.EqCheckState.ModelFirst => 
+              case Trace.EqCheckState.ModelFirst =>
                 equivalenceCheck(m, f, false)
               case Trace.EqCheckState.FunFirst =>
                 equivalenceCheck(f, m, false)
@@ -355,8 +353,8 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
                 Trace.setTrace(t.id)
                 println(t)
                 Trace.sublemmas = sublemmas.map(_.id)
-              case _ => 
-            }                
+              case _ =>
+            }
             res
           }
           else {
@@ -378,7 +376,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
       fd.flags.filter(elem => elem.name == "traceInduct").head match {
         case s.Annotation("traceInduct", fun) => {
           BodyWithSpecs(fd.fullBody).getSpec(PostconditionKind) match {
-            case Some(Postcondition(post)) => 
+            case Some(Postcondition(post)) =>
               s.exprOps.preTraversal {
                 case _ if funInv.isDefined => // do nothing
                 case fi @ s.FunctionInvocation(tfd, tps, args) if symbols.isRecursive(tfd) && (fun.contains(StringLiteral(tfd.name)) || fun.contains(StringLiteral("")))
@@ -387,9 +385,9 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
                       val argCheck = args.forall(paramVars.contains) && args.toSet.size == args.size
                       if (argCheck) funInv = Some(fi)
                     }
-                case _ => 
+                case _ =>
               }(post)
-            case _ => 
+            case _ =>
           }
         }
       }
@@ -416,7 +414,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
           Trace.getTrace match {
             case Some(t) if(t == lemma.id) => Trace.setProof(helper.id)
-            case _ => 
+            case _ =>
           }
 
           if (Trace.sublemmas.contains(lemma.id)) Trace.sublemmas = helper.id :: Trace.sublemmas
@@ -434,7 +432,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
     } else List())
 
     val extractedSymbols = super.extractSymbols(context, symbols)
-    
+
     val extracted = t.NoSymbols
       .withSorts(extractedSymbols.sorts.values.toSeq)
       .withFunctions((generatedFunctions.map(fun => identity.transform(fun)) ++ extractedSymbols.functions.values).filterNot(fd => fd.flags.exists(elem => elem.name == "traceInduct")).toSeq)
@@ -447,10 +445,10 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
   // 'suffix': only used for naming
   // 'replacement': function calls that are supposed to be replaced according to given mapping
   def inductPattern(symbols: s.Symbols, model: FunDef, lemma: FunDef, suffix: String, replacement: Map[Identifier, Identifier]) = {
-    import symbols._
+    import symbols.{given, _}
     import exprOps._
 
-    val indPattern = exprOps.freshenSignature(model).copy(id = FreshIdentifier(lemma.id+ "$" + suffix))
+    val indPattern = exprOps.freshenSignature(model).copy(id = FreshIdentifier(s"${lemma.id}$$$suffix"))
     val newParamTps = indPattern.tparams.map{tparam => tparam.tp}
     val newParamVars = indPattern.params.map{param => param.toVariable}
 
@@ -460,8 +458,8 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
     val tsubst = tpairs.map { case (tparam, targ) => tparam.tp.id -> targ } .toMap
     val subst = (model.params.map(_.id) zip fi.args).toMap
     val specializer = new Specializer(model, indPattern.id, tsubst, subst, replacement)
-    
-    val fullBodySpecialized = specializer.transform(exprOps.withoutSpecs(model.fullBody).get) 
+
+    val fullBodySpecialized = specializer.transform(exprOps.withoutSpecs(model.fullBody).get)
 
     val specsSubst = (lemma.params.map(_.id) zip newParamVars).toMap ++ (model.params.map(_.id) zip newParamVars).toMap
     val specsTsubst = ((lemma.tparams zip fi.tps) ++ (model.tparams zip fi.tps)).map { case (tparam, targ) => tparam.tp.id -> targ }.toMap
@@ -481,12 +479,12 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
 
     val speccedLemma = BodyWithSpecs(lemma.fullBody).addPost
     val speccedOrig = BodyWithSpecs(model.fullBody).addPost
-    val postLemma = speccedLemma.getSpec(PostconditionKind).map(post => 
+    val postLemma = speccedLemma.getSpec(PostconditionKind).map(post =>
       specsSpecializer.transform(post.expr))
     val postOrig = speccedOrig.getSpec(PostconditionKind).map(post => specsSpecializer.transform(post.expr))
-    
+
     (postLemma, postOrig) match {
-      case (Some(Lambda(Seq(res1), cond1)), Some(Lambda(Seq(res2), cond2))) => 
+      case (Some(Lambda(Seq(res1), cond1)), Some(Lambda(Seq(res2), cond2))) =>
         val res = ValDef.fresh("res", indPattern.returnType)
         val freshCond1 = exprOps.replaceFromSymbols(Map(res1 -> res.toVariable), cond1)
         val freshCond2 = exprOps.replaceFromSymbols(Map(res2 -> res.toVariable), cond2)
@@ -508,9 +506,9 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
       tsubst: Map[Identifier, Type],
       vsubst: Map[Identifier, Expr],
       replacement: Map[Identifier, Identifier] // replace function calls
-    ) extends s.SelfTreeTransformer {
+    ) extends s.ConcreteSelfTreeTransformer { slf =>
 
-      override def transform(expr: s.Expr): t.Expr = expr match {
+      override def transform(expr: slf.s.Expr): slf.t.Expr = expr match {
         case v: Variable =>
           vsubst.getOrElse(v.id, super.transform(v))
 
@@ -525,7 +523,7 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
         case _ => super.transform(expr)
       }
 
-      override def transform(tpe: s.Type): t.Type = tpe match {
+      override def transform(tpe: slf.s.Type): slf.t.Type = tpe match {
         case tp: TypeParameter =>
           tsubst.getOrElse(tp.id, super.transform(tp))
 
@@ -543,10 +541,10 @@ trait Trace extends CachingPhase with IdentityFunctions with IdentitySorts { sel
     functions map CheckFilter.fullNameToPath
   }
 
-  private lazy val pathsOptNorm: Option[Seq[Path]] = 
+  private lazy val pathsOptNorm: Option[Seq[Path]] =
     Some(Seq(context.options.findOptionOrDefault(optNorm)).map(CheckFilter.fullNameToPath))
 
-  private lazy val pathsOptProveMe: Option[Seq[Path]] = 
+  private lazy val pathsOptProveMe: Option[Seq[Path]] =
     Some(Seq(context.options.findOptionOrDefault(optProveMe)).map(CheckFilter.fullNameToPath))
 
   private def shouldBeChecked(fid: Identifier): Boolean = shouldBeChecked(pathsOpt, fid)
@@ -617,7 +615,7 @@ object Trace {
     case EqCheckState.ModelFirstWithSublemmas => EqCheckState.FunFirstWithSublemmas
     case EqCheckState.FunFirstWithSublemmas => EqCheckState.InitState  //skip if there are no sublemmas ?
   }
-  
+
   def resetEqCheckState = eqCheckState = EqCheckState.InitState
   def isFinalEqCheckState = eqCheckState == EqCheckState.FunFirstWithSublemmas
 
@@ -626,13 +624,12 @@ object Trace {
 
   var cnt = 0
 
-  def apply(ts: Trees, tt: termination.Trees)(implicit ctx: inox.Context): ExtractionPipeline {
+  def apply(ts: Trees, tt: termination.Trees)(using inox.Context): ExtractionPipeline {
     val s: ts.type
     val t: tt.type
-  } = new Trace {
-    override val s: ts.type = ts
-    override val t: tt.type = tt
-    override val context = ctx
+  } = {
+    class Impl(override val s: ts.type, override val t: tt.type) extends Trace(s, t)
+    new Impl(ts, tt)
   }
 
   def setModels(m: List[Identifier]) = {
@@ -675,10 +672,10 @@ object Trace {
   def setProveMe(p: Option[Identifier]) = proveMe = p
   def setMkTest(t: Identifier) = mkTest = Some(t)
 
-  
+
   // iterate model for the current function
   private def nextModel = tmpModels match {
-    case x::xs => { 
+    case x::xs => {
       tmpModels = xs
       model = Some(x)
     }
@@ -713,7 +710,7 @@ object Trace {
 
   private def isDone = function == None
 
-  trait Counterexample { 
+  trait Counterexample {
     val prog: inox.Program
     val counterexample: Map[prog.trees.ValDef, prog.trees.Expr]
     val existing: Boolean
@@ -777,7 +774,7 @@ object Trace {
           //if (!withSublemmas || sublemmasAreValid) reportError(pair) // only if not in the sublemma state or if they are valid
           if (!withSublemmas) reportError(pair) // only if not in the sublemma state or if they are valid
           else reportUnknown
-        } 
+        }
         else if (report.hasUnknown(function) || report.hasUnknown(proof) || report.hasUnknown(trace)) reportUnknown
         else if (sublemmasAreValid) reportValid
         //else if (sublemmasHaveErrors) reportError(pair) // TODO check
@@ -788,7 +785,7 @@ object Trace {
         counter = counter - 1
       case _ => reportWrong
     }
-    
+
     if(isDone && unknowns.size < cnt) {
       println("pulling out the unknowns:")
       println(unknowns)
@@ -836,7 +833,7 @@ object Trace {
     state(function.get).counterexample = counterexample
     nextFunction
   }
-  
+
   // if there is a new state go there, otherwise report as unknown
   private def reportUnknown = {
     allModels = allModels.updated(model.get, allModels(model.get) - 1)
@@ -893,17 +890,17 @@ object Trace {
 
   private def noLongerUnknown(f: Identifier) = unknowns = unknowns.filterNot(elem => elem == f)
 
-  def optionsError(implicit ctx: inox.Context): Boolean = 
-    !ctx.options.findOptionOrDefault(frontend.optBatchedProgram) && 
+  def optionsError(using ctx: inox.Context): Boolean =
+    !ctx.options.findOptionOrDefault(frontend.optBatchedProgram) &&
     (!ctx.options.findOptionOrDefault(optModels).isEmpty || !ctx.options.findOptionOrDefault(optCompareFuns).isEmpty)
 
-  def printEverything(implicit ctx: inox.Context) = {
+  def printEverything(using ctx: inox.Context) = {
     import ctx.{ reporter, timers }
     println("rank list")
     println(allModels)
     println(allModels.toList.sortBy(m => -m._2).map(_._1).take(5).map(CheckFilter.fixedFullName))
     if(!clusters.isEmpty || !errors.isEmpty || !unknowns.isEmpty || !wrong.isEmpty) {
-      reporter.info(s"Printing equivalence checking results:")  
+      reporter.info(s"Printing equivalence checking results:")
       allModels.keys.foreach(model => if (!clusters(model).isEmpty) {
         val l = clusters(model).map(CheckFilter.fixedFullName).mkString(", ")
         val m = CheckFilter.fixedFullName(model)
@@ -917,7 +914,7 @@ object Trace {
       val wrongs = wrong.map(CheckFilter.fixedFullName).mkString(", ")
       reporter.info(s"List of wrong functions: $wrongs")
 
-      reporter.info(s"Printing the final state:")  
+      reporter.info(s"Printing the final state:")
       allFunctions.foreach(f => {
         val l = path(f).map(CheckFilter.fixedFullName).mkString(", ")
         val m = CheckFilter.fixedFullName(f)
@@ -930,10 +927,10 @@ object Trace {
           case Some(mm) => mm :: path(mm)
           case None => List()
         }
-        
+
       }
 
-      
+
       allFunctions.foreach(f => {
         val c = state(f).counterexample match {
           case None => None
@@ -942,7 +939,7 @@ object Trace {
         val m = CheckFilter.fixedFullName(f)
         reporter.info(s"Counterexample for the function $m: $c")
       })
-      
+
     }
 
   }

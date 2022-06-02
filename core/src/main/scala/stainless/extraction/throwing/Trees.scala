@@ -10,7 +10,7 @@ import stainless.transformers.TreeTraverser
 
 trait Trees extends imperative.Trees { self =>
 
-  protected def getExceptionType(implicit s: Symbols): Option[Type] =
+  protected def getExceptionType(using s: Symbols): Option[Type] =
     s.lookup.get[ClassDef]("stainless.lang.Exception").map(cd => ClassType(cd.id, Seq()))
 
   /** Throwing clause of an [[ast.Expressions.Expr]]. Corresponds to the Stainless keyword *throwing*
@@ -21,7 +21,7 @@ trait Trees extends imperative.Trees { self =>
     *             is `stainless.lang.Exception` and defines the exceptional cases of this function.
     */
   sealed case class Throwing(body: Expr, pred: Lambda) extends Expr with CachingTyped {
-    override protected def computeType(implicit s: Symbols): Type = (pred.getType, getExceptionType) match {
+    override protected def computeType(using Symbols): Type = (pred.getType, getExceptionType) match {
       case (FunctionType(Seq(expType), BooleanType()), Some(tpe)) => checkParamType(tpe, expType, body.getType)
       case _ => Untyped
     }
@@ -32,7 +32,7 @@ trait Trees extends imperative.Trees { self =>
     * @param ex The exception to be thrown.
     */
   sealed case class Throw(ex: Expr) extends Expr with CachingTyped {
-    override protected def computeType(implicit s: Symbols): Type = getExceptionType match {
+    override protected def computeType(using Symbols): Type = getExceptionType match {
       case Some(tpe) => checkParamType(ex.getType, tpe, NothingType())
       case _ => Untyped
     }
@@ -40,7 +40,7 @@ trait Trees extends imperative.Trees { self =>
 
   /** Try-catch-finally block. Corresponds to Scala's *try { ... } catch { ... } finally { ... }* */
   sealed case class Try(body: Expr, cases: Seq[MatchCase], finallizer: Option[Expr]) extends Expr with CachingTyped {
-    override protected def computeType(implicit s: Symbols): Type = getExceptionType match {
+    override protected def computeType(using s: Symbols): Type = getExceptionType match {
       case Some(tpe) if (
         cases.forall { case MatchCase(pat, guard, rhs) =>
           s.patternIsTyped(tpe, pat) &&
@@ -52,15 +52,15 @@ trait Trees extends imperative.Trees { self =>
     }
   }
 
-  override val exprOps: ExprOps { val trees: Trees.this.type } = new {
-    protected val trees: Trees.this.type = Trees.this
-  } with ExprOps
+  override val exprOps: ExprOps { val trees: self.type } = {
+    class ExprOpsImpl(override val trees: self.type) extends ExprOps(trees)
+    new ExprOpsImpl(self)
+  }
 
   override def getDeconstructor(that: inox.ast.Trees): inox.ast.TreeDeconstructor { val s: self.type; val t: that.type } = that match {
-    case tree: Trees => new TreeDeconstructor {
-      protected val s: self.type = self
-      protected val t: tree.type = tree
-    }.asInstanceOf[TreeDeconstructor { val s: self.type; val t: that.type }]
+    case tree: (Trees & that.type) => // The `& that.type` trick allows to convince scala that `tree` and `that` are actually equal...
+      class DeconstructorImpl(override val s: self.type, override val t: tree.type & that.type) extends ConcreteTreeDeconstructor(s, t)
+      new DeconstructorImpl(self, tree)
 
     case _ => super.getDeconstructor(that)
   }
@@ -70,7 +70,7 @@ trait Printer extends imperative.Printer {
   protected val trees: Trees
   import trees._
 
-  override def ppBody(tree: Tree)(implicit ctx: PrinterContext): Unit = tree match {
+  override def ppBody(tree: Tree)(using PrinterContext): Unit = tree match {
     case Throwing(Ensuring(body, post), pred) =>
       p"""|{
           |  $body
@@ -116,8 +116,7 @@ trait Printer extends imperative.Printer {
   }
 }
 
-trait ExprOps extends imperative.ExprOps { self =>
-  protected val trees: Trees
+class ExprOps(override val trees: Trees) extends imperative.ExprOps(trees) { self =>
   import trees._
 
   object ExceptionsKind extends SpecKind("exceptions") { type Spec = Exceptions }
@@ -125,20 +124,34 @@ trait ExprOps extends imperative.ExprOps { self =>
   case class Exceptions(expr: Lambda) extends Specification(ExceptionsKind) {
     def transform(tr: Transformer { val s: trees.type; val t: stainless.ast.Trees })(env: tr.Env): tr.t.exprOps.Specification = tr.t match {
       case tt: throwing.Trees =>
-        tt.exprOps.Exceptions(tr.transform(expr, env).asInstanceOf[tt.Lambda]).setPos(this).asInstanceOf[tr.t.exprOps.Specification]
-      case _ =>
-        throw new java.lang.IllegalArgumentException("Can't transform exceptions into non-throwing trees")
-    }
-    def transform(tr: TreeTransformer { val s: trees.type; val t: stainless.ast.Trees }): tr.t.exprOps.Specification = tr.t match {
-      case tt: throwing.Trees =>
-        tt.exprOps.Exceptions(tr.transform(expr).asInstanceOf[tt.Lambda]).setPos(this).asInstanceOf[tr.t.exprOps.Specification]
+        // The goal is to work-around the following expression that causes scalac 2.13 to fail codegen
+        // for the cast of tr.transform(expr, env) into tt.Lambda (probably due to `tt` being bound by a pattern match):
+        //
+        //      tt.exprOps.Exceptions(tr.transform(expr, env).asInstanceOf[tt.Lambda])
+        //          .setPos(this).asInstanceOf[tr.t.exprOps.Specification]
+        //
+        val tLambda: tt.Lambda = tr.transform(expr, env) match {
+          // doing case lam: tt.Lambda triggers a compile-time error, but not if we mix it with tr.t.Lambda...
+          case lam: tr.t.Lambda with tt.Lambda => lam
+        }
+        tt.exprOps.Exceptions(tLambda).setPos(this).asInstanceOf[tr.t.exprOps.Specification]
       case _ =>
         throw new java.lang.IllegalArgumentException("Can't transform exceptions into non-throwing trees")
     }
 
-    def traverse(tr: TreeTraverser { val trees: self.trees.type }): Unit = {
-      tr.traverse(expr)
+    def transform(tr: TreeTransformer { val s: trees.type; val t: stainless.ast.Trees }): tr.t.exprOps.Specification = tr.t match {
+      case tt: throwing.Trees =>
+        // Same story here
+        val tLambda: tt.Lambda = tr.transform(expr) match {
+          case lam: tr.t.Lambda with tt.Lambda => lam
+        }
+        tt.exprOps.Exceptions(tLambda).setPos(this).asInstanceOf[tr.t.exprOps.Specification]
+      case _ =>
+        throw new java.lang.IllegalArgumentException("Can't transform exceptions into non-throwing trees")
     }
+
+    def traverse(tr: TreeTraverser { val trees: self.trees.type }): Unit =
+      tr.traverse(expr)
 
     def isTrivial: Boolean = false
   }
@@ -177,3 +190,5 @@ trait TreeDeconstructor extends imperative.TreeDeconstructor {
     case _ => super.deconstruct(e)
   }
 }
+
+class ConcreteTreeDeconstructor(override val s: Trees, override val t: Trees) extends TreeDeconstructor

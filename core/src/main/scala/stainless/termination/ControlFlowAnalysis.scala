@@ -11,15 +11,11 @@ import inox._
 /** A context-insensitive, field-sensitive control-flow analysis that computes
   * the closures that are passed to call backs of given function.
   */
-trait CICFA {
-
-  val program: Program { val trees: Trees }
-  val context: inox.Context
-
-  import context._
+class CICFA(val program: Program { val trees: Trees }, val context: inox.Context) {
+  import context.{given, _}
   import program._
   import program.trees._
-  import program.symbols._
+  import program.symbols.{given, _}
   import program.trees.exprOps._
 
   sealed abstract class Function {
@@ -85,7 +81,7 @@ trait CICFA {
     }
 
     override def toString = {
-      store.map { case (k, v) => k + "-->" + v }.mkString("\n")
+      store.map { case (k, v) => s"$k-->$v" }.mkString("\n")
     }
   }
 
@@ -192,7 +188,7 @@ trait CICFA {
     worklist += fd
 
     // the order of traversal is very important here, so using a custom traversal
-    private def rec(e: Expr, in: AbsEnv)(implicit current: Function): (Set[AbsValue], AbsEnv) = e match {
+    private def rec(e: Expr, in: AbsEnv)(using current: Function): (Set[AbsValue], AbsEnv) = e match {
       case Let(vd, v, body) =>
         val (res, escenv) = rec(v, in)
         val (bres, bescenv) = rec(body, AbsEnv(in.store + (vd.toVariable -> res)) join escenv)
@@ -212,7 +208,7 @@ trait CICFA {
             appliedLambdas += lam
 
             // create a new store with mapping for arguments and escaping variables
-            val argstore = in.store.filterKeys(escapingVars) ++
+            val argstore = in.store.view.filterKeys(escapingVars).toMap ++
               (lam.params.map(_.toVariable) zip absargs) ++
               escenv.store ++
               argescenv.store
@@ -246,12 +242,12 @@ trait CICFA {
         val capvars = variablesOf(lam)
         escapingVars ++= capvars // make all captured variables as escaping
         val currSummary = getTabulation(lam)
-        val capenv = AbsEnv(in.store.filterKeys(capvars))
+        val capenv = AbsEnv(in.store.view.filterKeys(capvars).toMap)
         if (!currSummary.in.greaterEquals(capenv)) {
           val join = currSummary.in.join(capenv)
           tabulation.update(lam, Summary(join, currSummary.out, currSummary.ret))
         }
-        (Set(Closure(lam)), AbsEnv(in.store.filterKeys(capvars)))
+        (Set(Closure(lam)), AbsEnv(in.store.view.filterKeys(capvars).toMap))
 
       case fi @ FunctionInvocation(_, _, args) =>
         val fd = fi.tfd.fd
@@ -263,7 +259,7 @@ trait CICFA {
         val absargs = absres.map(_._1)
         val argesc = flatten(absres.map(_._2))
         val newenv = in ++ argesc
-        val argstore = newenv.store.filterKeys(escapingVars) ++
+        val argstore = newenv.store.view.filterKeys(escapingVars).toMap ++
           (fd.params.map(_.toVariable) zip absargs)
         val argenv = AbsEnv(argstore)
 
@@ -400,7 +396,7 @@ trait CICFA {
 
       val oldSummary = getTabulation(fun)
 
-      val (newret, newesc) = rec(fun.body, oldSummary.in)(fun)
+      val (newret, newesc) = rec(fun.body, oldSummary.in)(using fun)
 
       // if the return value of the function is found to be different from the return value in the tabulation:
       // (a) update the entry in the tabulation to a the new value
@@ -445,7 +441,7 @@ trait CICFA {
       }
     }
 
-    private val allEscaping: Set[Lambda] = externallyEscapingLambdas.toSet.flatMap { l: Lambda =>
+    private val allEscaping: Set[Lambda] = externallyEscapingLambdas.toSet.flatMap { (l: Lambda) =>
       var llams = Set(l)
       var callees = Set[Identifier]()
 

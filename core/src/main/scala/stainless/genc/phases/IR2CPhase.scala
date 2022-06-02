@@ -15,11 +15,11 @@ import SIR._
 
 import collection.mutable.{ Map => MutableMap, Set => MutableSet }
 
-trait IR2CPhase extends LeonPipeline[SIR.Prog, CAST.Prog] {
+class IR2CPhase(using override val context: inox.Context) extends LeonPipeline[SIR.Prog, CAST.Prog](context) {
   val name = "CASTer"
   val description = "Translate the IR tree into the final C AST"
 
-  def run(ir: SIR.Prog): CAST.Prog = new IR2CImpl(context)(ir)
+  def run(ir: SIR.Prog): CAST.Prog = new IR2CImpl()(using context)(ir)
 }
 
 // This implementation is basically a Transformer that produce something which isn't an IR tree.
@@ -27,7 +27,7 @@ trait IR2CPhase extends LeonPipeline[SIR.Prog, CAST.Prog] {
 //
 // Function conversion is pretty straighforward at this point of the pipeline. Expression conversion
 // require little care. But class conversion is harder; see detailed procedure below.
-private class IR2CImpl(val ctx: inox.Context) {
+private class IR2CImpl()(using ctx: inox.Context) {
   def apply(ir: Prog): C.Prog = rec(ir)
 
   // We use a cache to keep track of the C function, struct, ...
@@ -36,22 +36,27 @@ private class IR2CImpl(val ctx: inox.Context) {
   private val unionCache = MutableMap[ClassDef, C.Union]() // For top hierarchy classes only!
   private val enumCache = MutableMap[ClassDef, C.Enum]() // For top hierarchy classes only!
   private val arrayCache = MutableMap[ArrayType, C.Struct]()
-  private val includes = MutableSet[C.Include]()
+  private val headerIncludes = MutableSet[C.Include]()
+  private val cIncludes = MutableSet[C.Include]()
   private val typdefs = MutableSet[C.TypeDef]()
 
   private var dataTypes = Seq[C.DataType]() // For struct & union, keeps track of definition order!
 
-  private def register(dt: C.DataType) {
+  private def register(dt: C.DataType): Unit = {
     require(!(dataTypes contains dt))
 
     dataTypes = dataTypes :+ dt
   }
 
-  private def register(i: C.Include) {
-    includes += i
+  private def registerHeaderInclude(i: C.Include): Unit = {
+    headerIncludes += i
   }
 
-  private def register(td: C.TypeDef) {
+  private def registerCInclude(i: C.Include): Unit = {
+    cIncludes += i
+  }
+
+  private def register(td: C.TypeDef): Unit = {
     typdefs += td
   }
 
@@ -79,7 +84,7 @@ private class IR2CImpl(val ctx: inox.Context) {
     val functions = funCache.values.toSet
 
     // Remove "mutability" on includes & typeDefs
-    C.Prog(includes.toSet, decls, typdefs.toSet, enums, dataTypes, functions)
+    C.Prog(headerIncludes.toSet, cIncludes.toSet, decls, typdefs.toSet, enums, dataTypes, functions)
   }
 
   private def rec(fd: FunDef): Unit = funCache.getOrElseUpdate(fd, {
@@ -95,8 +100,9 @@ private class IR2CImpl(val ctx: inox.Context) {
     case FunBodyAST(body) =>
       Left(C.buildBlock(rec(body)))
 
-    case FunBodyManual(includes, body) =>
-      includes foreach { i => register(C.Include(i)) }
+    case FunBodyManual(headerIncludes, cIncludes, body) =>
+      headerIncludes foreach { i => registerHeaderInclude(C.Include(i)) }
+      cIncludes foreach { i => registerCInclude(C.Include(i)) }
       Right(body)
 
     case FunDropped(_) => Right("")
@@ -122,9 +128,9 @@ private class IR2CImpl(val ctx: inox.Context) {
     case array @ ArrayType(base, Some(length)) => C.FixedArrayType(rec(base), length)
     case ReferenceType(t) => C.Pointer(rec(t))
 
-    case TypeDefType(original, alias, include, export) =>
-      include foreach { i => register(C.Include(i)) }
-      val td = C.TypeDef(rec(original), rec(alias), export)
+    case TypeDefType(original, alias, include, exprt) =>
+      include foreach { i => registerHeaderInclude(C.Include(i)) }
+      val td = C.TypeDef(rec(original), rec(alias), exprt)
       register(td)
       td
 
@@ -139,6 +145,9 @@ private class IR2CImpl(val ctx: inox.Context) {
     case Binding(vd) => C.Binding(rec(vd.id))
 
     case Assert(e) => C.Assert(rec(e))
+
+    case MemSet(pointer, value, size) => C.MemSet(rec(pointer), rec(value), rec(size))
+    case SizeOf(tpe) => C.SizeOf(rec(tpe))
 
     case FunRef(e) => rec(e)
     case FunVal(fd) =>
@@ -236,9 +245,9 @@ private class IR2CImpl(val ctx: inox.Context) {
     // no `data` field for fixed arrays accesses
     case ArrayAccess(FieldAccess(obj, fieldId), index)
       if  obj.getType.isInstanceOf[ClassType] &&
-          obj.getType.asInstanceOf[ClassType].clazz.fields.exists(vd =>
+          obj.getType.asInstanceOf[ClassType].clazz.fields.exists { case (vd, modes) =>
             vd.id == fieldId && vd.typ.isFixedArray
-          ) =>
+          } =>
 
       C.ArrayAccess(C.FieldAccess(rec(obj), rec(fieldId)), rec(index))
 
@@ -246,13 +255,13 @@ private class IR2CImpl(val ctx: inox.Context) {
     // must be wrapped in an array wrapper struct (see FixedArray.scala example)
     case FieldAccess(obj, fieldId)
       if  obj.getType.isInstanceOf[ClassType] &&
-          obj.getType.asInstanceOf[ClassType].clazz.fields.exists(vd =>
+          obj.getType.asInstanceOf[ClassType].clazz.fields.exists { case (vd, modes) =>
             vd.id == fieldId && vd.typ.isFixedArray
-          ) =>
+          } =>
 
-      val vd = obj.getType.asInstanceOf[ClassType].clazz.fields.find(vd =>
+      val (vd, modes) = obj.getType.asInstanceOf[ClassType].clazz.fields.find { case (vd, modes) =>
         vd.id == fieldId && vd.typ.isFixedArray
-      ).get
+      }.get
       val arrayType = vd.typ.asInstanceOf[ArrayType]
       val length = arrayType.length.get
       val array = array2Struct(arrayType.copy(length = None))
@@ -293,12 +302,7 @@ private class IR2CImpl(val ctx: inox.Context) {
     /* NOTE For == and != on objects, we create a dedicated equal function.
      *      See comment in CmpFactory.
      */
-    case BinOp(op @ (Equals | NotEquals), lhs, rhs) if !(lhs.getType.isLogical || lhs.getType.isIntegral) =>
-      // if (lhs.getType != rhs.getType)
-        // ctx.reporter.warning("Comparing ${lhs} (type ${lhs.getType}) and ${rhs} (type ${rhs.getType}) which have different types")
-      assert(lhs.getType == rhs.getType,
-        s"Operands $lhs and $rhs of equality operator must have the same type (here, ${lhs.getType} and ${rhs.getType})"
-      )
+    case BinOp(op @ (Equals | NotEquals), lhs, rhs) if !lhs.getType.isLogical && !lhs.getType.isIntegral && !lhs.getType.isInstanceOf[TypeDefType] =>
       val cmp = CmpFactory(lhs.getType)
       val equals = App(cmp, Seq(), Seq(lhs, rhs))
       val test = if (op == Equals) equals else UnOp(Not, equals)
@@ -420,7 +424,7 @@ private class IR2CImpl(val ctx: inox.Context) {
 
   private val markedAsEmpty = MutableSet[ClassDef]()
 
-  private def markAsEmpty(cd: ClassDef) {
+  private def markAsEmpty(cd: ClassDef): Unit = {
     markedAsEmpty += cd
   }
 
@@ -489,7 +493,7 @@ private class IR2CImpl(val ctx: inox.Context) {
 
     // List all (concrete) leaves of the class hierarchy as fields of the union.
     val leaves = cd.getHierarchyLeaves
-    val fields = leaves.toSeq map { c => C.Var(getUnionFieldFor(c), getStructFor(c)) }
+    val fields = leaves.toSeq map { c => (C.Var(getUnionFieldFor(c), getStructFor(c)), Seq.empty) }
     val id = rec("union_" + cd.id)
 
     val union = C.Union(id, fields, cd.isExported)
@@ -524,20 +528,27 @@ private class IR2CImpl(val ctx: inox.Context) {
     val unionType = getUnionFor(top)
     val union = C.Var(TaggedUnion.value, unionType)
 
-    C.Struct(rec(top.id), tag :: union :: Nil, top.isExported)
+    C.Struct(rec(top.id),
+      (tag, Seq.empty) ::
+      (union, Seq.empty) ::
+      Nil,
+      top.isExported,
+      top.isPacked
+    )
   }
 
   private def buildStructForCaseClass(cd: ClassDef): C.Struct = {
     // Here the mapping is straightforward: map the class fields,
     // possibly creating a dummy one to avoid empty classes.
-    val fields = if (cd.fields.isEmpty) {
+    val fields: Seq[(C.Var, Seq[DeclarationMode])] = if (cd.fields.isEmpty) {
       ctx.reporter.warning(s"Empty structures are not allowed according to the C99 standard. " +
               s"I'm adding a dummy byte to ${cd.id} structure for compatibility purposes.")
       markAsEmpty(cd)
-      Seq(C.Var(C.Id("extra"), C.Primitive(Int8Type)))
-    } else cd.fields.map(rec(_))
+      Seq((C.Var(C.Id("extra"), C.Primitive(Int8Type)), Seq.empty[DeclarationMode]))
+    }
+    else cd.fields.map { case (vd, modes) => (rec(vd), modes) }
 
-    C.Struct(rec(cd.id), fields, cd.isExported)
+    C.Struct(rec(cd.id), fields, cd.isExported, cd.isPacked)
   }
 
   private object TaggedUnion {
@@ -552,7 +563,11 @@ private class IR2CImpl(val ctx: inox.Context) {
     val data = C.Var(Array.data, C.Pointer(base))
     val id = C.Id(repId(arrayType))
 
-    val array = C.Struct(id, data :: length :: Nil, false)
+    val array = C.Struct(id,
+      (data, Seq.empty) ::
+      (length, Seq.empty) ::
+      Nil, false, false
+    )
 
     // This needs to get registered as a datatype as well
     register(array)
@@ -621,7 +636,8 @@ private class IR2CImpl(val ctx: inox.Context) {
     }
 
     private def buildStringCmpBody() = FunBodyManual(
-      includes = Seq("string.h"),
+      headerIncludes = Seq("string.h"),
+      cIncludes = Seq(),
       body =
         """|bool __FUNCTION__(char* lhs, char* rhs) {
            |  return strcmp(lhs, rhs) == 0;
@@ -653,7 +669,7 @@ private class IR2CImpl(val ctx: inox.Context) {
       case Nil => default
       case expr :: Nil => expr
       case first :: second :: Nil => BinOp(op, first, second)
-      case head :: tail => BinOp(op, head, foldAnd(tail))
+      case head :: tail => BinOp(op, head, fold(op, default)(tail))
     }
 
     private def foldAnd = fold(And, Lit(BoolLit(true))) _
@@ -663,7 +679,7 @@ private class IR2CImpl(val ctx: inox.Context) {
       assert(lhs.getType == rhs.getType && ClassType(cd) == lhs.getType && cd.getDirectChildren.isEmpty)
 
       // Checks that all fields are equals
-      val subs = cd.fields map { case ValDef(field, typ, _) =>
+      val subs = cd.fields map { case (ValDef(field, typ, _), modes) =>
         assert(!typ.isReference)
         val accessL = FieldAccess(lhs, field)
         val accessR = FieldAccess(rhs, field)
@@ -674,10 +690,4 @@ private class IR2CImpl(val ctx: inox.Context) {
     }
   }
 
-}
-
-object IR2CPhase {
-  def apply(implicit ctx: inox.Context): LeonPipeline[SIR.Prog, CAST.Prog] = new {
-    val context = ctx
-  } with IR2CPhase
 }

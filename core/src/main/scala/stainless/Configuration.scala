@@ -33,7 +33,7 @@ object optConfigFile extends OptionDef[OptionOrDefault[File]] {
 
 object Configuration {
 
-  import scala.collection.JavaConverters._
+  import scala.jdk.CollectionConverters._
 
   val ConfigName: String = "stainless.conf"
 
@@ -43,12 +43,12 @@ object Configuration {
   }
 
   def findConfigFile(): Option[File] = {
-    RecursiveFileFinder.find(isConfigFile(_))
+    RecursiveFileFinder.find(isConfigFile)
   }
 
   val empty: Seq[OptionValue[_]] = Seq.empty
 
-  def get(options: Options, keys: Seq[inox.OptionDef[_]])(implicit reporter: Reporter): Seq[OptionValue[_]] = {
+  def get(options: Options, keys: Seq[inox.OptionDef[_]])(using Reporter): Seq[OptionValue[_]] = {
     import OptionOrDefault._
     options.findOptionOrDefault(optConfigFile) match {
       case Some(file) => parse(file, keys)
@@ -57,13 +57,13 @@ object Configuration {
     }
   }
 
-  def parseDefault(options: Seq[OptionDef[_]])(implicit reporter: Reporter): Seq[OptionValue[_]] = {
+  def parseDefault(options: Seq[OptionDef[_]])(using Reporter): Seq[OptionValue[_]] = {
     findConfigFile() map { file =>
       parse(file, options)
     } getOrElse Seq.empty
   }
 
-  def parse(file: File, options: Seq[OptionDef[_]])(implicit reporter: Reporter): Seq[OptionValue[_]] = try {
+  def parse(file: File, options: Seq[OptionDef[_]])(using reporter: Reporter): Seq[OptionValue[_]] = try {
     if (!file.exists()) {
       reporter.fatalError(s"Configuration file does not exists: ${file.getAbsolutePath}")
     }
@@ -72,11 +72,11 @@ object Configuration {
     }
 
     val conf = ConfigFactory.parseFile(file)
-    val entries = asScalaSet(conf.entrySet).map { entry =>
+    val entries = conf.entrySet.asScala.map { entry =>
       entry.getKey -> convert(entry.getKey, entry.getValue)
     }.toMap
 
-    val optDefMap = options.view.groupBy(_.name).mapValues(_.head)
+    val optDefMap = options.view.groupBy(_.name).view.mapValues(_.head).toMap
 
     val optValues = entries map { case (name, str) =>
       optDefMap.get(name) map { optDef =>
@@ -93,7 +93,7 @@ object Configuration {
       Seq.empty
   }
 
-  private def convert(name: String, config: ConfigValue)(implicit reporter: Reporter): String = {
+  private def convert(name: String, config: ConfigValue)(using reporter: Reporter): String = {
     val unwrapped = config.unwrapped
 
     config.valueType match {
@@ -101,7 +101,7 @@ object Configuration {
       case ConfigValueType.NUMBER => unwrapped.toString
       case ConfigValueType.STRING => unwrapped.toString
       case ConfigValueType.LIST =>
-        val values = asScalaIterator(unwrapped.asInstanceOf[java.util.List[Any]].iterator).toList
+        val values = unwrapped.asInstanceOf[java.util.List[Any]].iterator.asScala.toList
         values.map(_.toString).mkString(",")
       case _ =>
         reporter.fatalError(s"Unsupported option type for option '$name': $config")
@@ -110,7 +110,7 @@ object Configuration {
 }
 
 object RecursiveFileFinder {
-  import scala.collection.JavaConverters._
+  import scala.jdk.CollectionConverters._
 
   def currentDirectory(): File = {
     FileSystems.getDefault().getPath(".").normalize.toAbsolutePath().toFile

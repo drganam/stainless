@@ -3,7 +3,6 @@
 package stainless
 
 import stainless.extraction.xlang.{trees => xt}
-import scala.language.existentials
 
 package object frontend {
 
@@ -17,10 +16,7 @@ package object frontend {
 
   object DebugSectionStack extends inox.DebugSection("stack")
 
-  /**
-   * The persistent caches are stored in the same directory, denoted by this option.
-   */
-  object optPersistentCache extends inox.FlagOptionDef("cache", false)
+  object DebugSectionCallGraph extends inox.DebugSection("call-graph")
 
   /** Do not use registry to create minimal partial programs,
     * do a dependency analysis after collecting the whole program
@@ -37,14 +33,16 @@ package object frontend {
    * is required to [[stop]] or [[join]] the returned compiler to free resources.
    */
   def build(ctx: inox.Context, compilerArgs: Seq[String], factory: FrontendFactory): Frontend = {
-    factory(ctx, compilerArgs, getCallBack(ctx))
+    factory(ctx, compilerArgs, getCallBack(using ctx))
   }
 
   /** All components handled by the frontend.  */
   val allComponents: Seq[Component] = Seq(
     verification.VerificationComponent,
     evaluators.EvaluatorComponent,
-    genc.GenCComponent
+    genc.GenCComponent,
+    testgen.ScalaTestGenComponent,
+    testgen.GenCTestGenComponent,
   )
 
   /**
@@ -66,26 +64,29 @@ package object frontend {
   }
 
   /** Get one callback for all active components. */
-  def getCallBack(implicit ctx: inox.Context): CallBack = {
+  def getCallBack(using ctx: inox.Context): CallBack = {
     val activeComponents = getActiveComponents(ctx)
     if (batchSymbols(activeComponents))
       new BatchedCallBack(activeComponents)
-    else
+    else {
+      if (ctx.reporter.isDebugEnabled(using DebugSectionCallGraph)) {
+        ctx.reporter.fatalError("--debug=callgraph may only be used with --batched")
+      }
       new SplitCallBack(activeComponents)
+    }
   }
 
-  private def batchSymbols(activeComponents: Seq[Component])(implicit ctx: inox.Context): Boolean = {
+  private def batchSymbols(activeComponents: Seq[Component])(using ctx: inox.Context): Boolean = {
     ctx.options.findOptionOrDefault(optBatchedProgram) ||
-    activeComponents.contains(genc.GenCComponent) ||
-    !ctx.options.findOptionOrDefault(optKeep).isEmpty
+    activeComponents.exists(Set(genc.GenCComponent, testgen.ScalaTestGenComponent, testgen.GenCTestGenComponent).contains) ||
+    ctx.options.findOptionOrDefault(optKeep).nonEmpty
   }
 
 
   // removes the `StrictBV` flag used in `CodeExtraction`
-  val strictBVCleaner = extraction.oo.SymbolTransformer(new transformers.TreeTransformer {
-    val s: xt.type = xt
-    val t: xt.type = xt
+  val strictBVCleaner = extraction.oo.SymbolTransformer(new BVCleanerImpl(xt, xt))
 
+  class BVCleanerImpl(override val s: xt.type, override val t: xt.type) extends transformers.ConcreteTreeTransformer(s, t) {
     override def transform(tpe: xt.Type): xt.Type = tpe match {
       case xt.AnnotatedType(tp, flags) if flags.exists(_ != xt.StrictBV) =>
         xt.AnnotatedType(transform(tp), flags.filter(_ != xt.StrictBV))
@@ -94,6 +95,6 @@ package object frontend {
       case _ =>
         super.transform(tpe)
     }
-  })
+  }
 }
 
