@@ -84,7 +84,6 @@ class VerificationReport(val results: Seq[VerificationReport.Record], val source
       val level = levelOf(status)
       val solver = solverName getOrElse ""
       val extra = Seq(kind, status.name, solver)
-      
       RecordRow(id, pos, level, extra, time)
   }
 

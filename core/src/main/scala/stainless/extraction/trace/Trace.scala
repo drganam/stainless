@@ -699,7 +699,7 @@ object Trace {
       })
   }
 
-  def f(pr: inox.Program)(counterex: pr.Model)(fun: Identifier): Unit = {
+  def reportCounterexample(pr: inox.Program)(counterex: pr.Model)(fun: Identifier): Unit = {
     def shouldVerify(fun: Identifier) = {
       !function.isEmpty && function.get == fun ||
       !proof.isEmpty && proof.get == fun ||
