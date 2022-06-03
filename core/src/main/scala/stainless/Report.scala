@@ -4,13 +4,11 @@ package stainless
 
 import inox.utils.Position
 import inox.utils.ASCIIHelpers._
-import inox.solvers.Solver
 
 import io.circe._
 import io.circe.syntax._
 
 import stainless.utils.JsonConvertions.given
-import stainless.verification._
 
 case class ReportStats(total: Int, time: Long, valid: Int, validFromCache: Int, invalid: Int, unknown: Int) {
   def +(more: ReportStats) = ReportStats(

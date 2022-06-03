@@ -26,9 +26,6 @@ object VerificationReport {
   }
 
   object Status {
-    //var prog: Option[inox.Program] = None
-    var currModel: Option[inox.Model] = None
-
     case object Valid extends Status("valid")
     case object ValidFromCache extends Status("valid from cache")
     case class Inconclusive(reason: String) extends Status(reason)
@@ -38,8 +35,6 @@ object VerificationReport {
                                               (status: VCStatus[program.Model])
                                               (using program.trees.PrinterOptions): Status = status match {
       case VCStatus.Invalid(VCStatus.CounterExample(model)) => {
-        //val mod: program.Model = model
-        currModel = Some(model)
         Invalid("counter-example: " + model.asString)
       }
       case VCStatus.Invalid(VCStatus.Unsatisfiable) => Invalid("unsatisfiable")
@@ -91,8 +86,6 @@ class VerificationReport(val results: Seq[VerificationReport.Record], val source
       val level = levelOf(status)
       val solver = solverName getOrElse ""
       val extra = Seq(kind, status.name, solver)
-      val model = Status.currModel
-
       RecordRow(id, pos, level, extra, time)
   }
 
