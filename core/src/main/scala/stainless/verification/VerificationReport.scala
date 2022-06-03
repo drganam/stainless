@@ -93,7 +93,7 @@ class VerificationReport(val results: Seq[VerificationReport.Record], val source
       val extra = Seq(kind, status.name, solver)
       val model = Status.currModel
 
-      RecordRow(id, pos, level, extra, time, model)
+      RecordRow(id, pos, level, extra, time)
   }
 
   private def levelOf(status: Status) = {

@@ -130,7 +130,7 @@ case class GenCReport(results: Seq[Record], sources: Set[Identifier]) extends Bu
   override val name = GenCComponent.name
 
   override def annotatedRows: Seq[RecordRow] = results.map {
-    case Record(id, pos, status, time) => RecordRow(id, pos, levelOf(status), Seq(descriptionOf(status)), time, None)
+    case Record(id, pos, status, time) => RecordRow(id, pos, levelOf(status), Seq(descriptionOf(status)), time)
   }
 
   protected def build(results: Seq[Record], sources: Set[Identifier]): GenCReport =

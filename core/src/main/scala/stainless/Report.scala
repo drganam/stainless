@@ -35,8 +35,7 @@ case class RecordRow(
   pos: Position,
   level: Level.Type,
   extra: Seq[String],
-  time: Long,
-  counterexample: Option[inox.Model]
+  time: Long
 )
 
 /**
@@ -79,7 +78,7 @@ trait AbstractReport[SelfType <: AbstractReport[SelfType]] { self: SelfType =>
   private def processRows(full: Boolean)(using ctx: inox.Context): Seq[Row] = {
     val printUniqueName = ctx.options.findOptionOrDefault(inox.ast.optPrintUniqueIds)
     for {
-      RecordRow(id, pos, level, extra, time, model) <- annotatedRows.sortBy(r => r.id -> r.pos)
+      RecordRow(id, pos, level, extra, time) <- annotatedRows.sortBy(r => r.id -> r.pos)
       if full || level != Level.Normal
       name = if (printUniqueName) id.uniqueName else id.name
       contents = Position.smartPos(pos) +: (name +: (extra :+ f"${time / 1000d}%3.1f"))
@@ -102,7 +101,7 @@ trait AbstractReport[SelfType <: AbstractReport[SelfType]] { self: SelfType =>
   def hasError(identifier: Option[Identifier])(using inox.Context): Boolean = identifier match {
     case None => false
     case Some(i) => annotatedRows.exists(elem => elem match {
-      case RecordRow(id, pos, level, extra, time, model) => {
+      case RecordRow(id, pos, level, extra, time) => {
         (level == Level.Error && id == i)
       }
     })
@@ -111,7 +110,7 @@ trait AbstractReport[SelfType <: AbstractReport[SelfType]] { self: SelfType =>
   def hasUnknown(identifier: Option[Identifier])(using inox.Context): Boolean = identifier match {
     case None => false
     case Some(i) => annotatedRows.exists(elem => elem match {
-      case RecordRow(id, pos, level, extra, time, model) => level == Level.Warning && id == i
+      case RecordRow(id, pos, level, extra, time) => level == Level.Warning && id == i
     })
   }
 
