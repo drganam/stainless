@@ -34,9 +34,7 @@ object VerificationReport {
     def apply[Model <: StainlessProgram#Model](program: inox.Program)
                                               (status: VCStatus[program.Model])
                                               (using program.trees.PrinterOptions): Status = status match {
-      case VCStatus.Invalid(VCStatus.CounterExample(model)) => {
-        Invalid("counter-example: " + model.asString)
-      }
+      case VCStatus.Invalid(VCStatus.CounterExample(model)) => Invalid("counter-example: " + model.asString)
       case VCStatus.Invalid(VCStatus.Unsatisfiable) => Invalid("unsatisfiable")
       case VCStatus.Valid => Valid
       case VCStatus.ValidFromCache => ValidFromCache
@@ -86,6 +84,7 @@ class VerificationReport(val results: Seq[VerificationReport.Record], val source
       val level = levelOf(status)
       val solver = solverName getOrElse ""
       val extra = Seq(kind, status.name, solver)
+      
       RecordRow(id, pos, level, extra, time)
   }
 
