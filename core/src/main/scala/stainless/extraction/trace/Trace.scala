@@ -226,18 +226,10 @@ class Trace(override val s: Trees, override val t: termination.Trees)
 
         val validpairs = pairs.filter(elem => elem._2 != None)
 
-        validpairs.map(elem => elem._2 match {
-          case Some(f) =>
-            (equivalenceCheck(elem._1, f, true), elem._1, f)
+        validpairs.map(elem => (elem._1, elem._2) match {
+          case (m, Some(f)) =>
+            (equivalenceCheck(m, f, true), m, f)
         })
-
-        /*
-        for (
-          m <- f1Calls; //remove lib
-          f <- f2Calls; //remove lib
-          if (m != f && checkArgs(m, f)) // TODO  && same ret type, names ..
-        ) yield (equivalenceCheck(m, f, true), m, f)
-        */
       }
 
       def equivalenceCheck(fd1: s.FunDef, fd2: s.FunDef, sublemmaGeneration: Boolean): List[s.FunDef] = {
@@ -245,7 +237,6 @@ class Trace(override val s: Trees, override val t: termination.Trees)
         val eqLemma = exprOps.freshenSignature(fd1).copy(id = freshId)
 
         val sublemmas = if (sublemmaGeneration) makeSublemmas(fd1, fd2) else List()
-
 
         //body of fd2, with calls to subfunctions replaced
         val replacement: List[FunDef] = sublemmas match {
@@ -286,11 +277,8 @@ class Trace(override val s: Trees, override val t: termination.Trees)
         }
 
         val res = s.ValDef.fresh("res", s.UnitType())
-
         val cond = s.Equals(normFun1, normFun2)
-
         val post = Postcondition(Lambda(Seq(res), cond))
-
         val body = s.UnitLiteral()
         val withPre = exprOps.reconstructSpecs(pre, Some(body), s.UnitType())
 
@@ -328,7 +316,6 @@ class Trace(override val s: Trees, override val t: termination.Trees)
             res match {
               case t::sublemmas =>
                 Trace.setTrace(t.id)
-                println(t)
                 Trace.sublemmas = sublemmas.map(_.id)
               case _ =>
             }
@@ -371,14 +358,12 @@ class Trace(override val s: Trees, override val t: termination.Trees)
 
       funInv match {
         case Some(finv) => {
-
           // make a helper lemma:
           val helper = inductPattern(symbols, symbols.functions(finv.id), fd, "indProof", Map()).setPos(fd.getPos)
 
-          val returnType = typeOps.instantiateType(helper.returnType, (helper.typeArgs zip fd.typeArgs).toMap)
-
           // transform the main lemma
           val proof = FunctionInvocation(helper.id, finv.tps, fd.params.map(_.toVariable))
+          val returnType = typeOps.instantiateType(helper.returnType, (helper.typeArgs zip fd.typeArgs).toMap)
 
           val body = Let(s.ValDef.fresh("ind$proof", returnType), proof, exprOps.withoutSpecs(fd.fullBody).get)
           val withPre = exprOps.reconstructSpecs(BodyWithSpecs(fd.fullBody).specs, Some(body), fd.returnType)
@@ -387,7 +372,6 @@ class Trace(override val s: Trees, override val t: termination.Trees)
             fullBody = BodyWithSpecs(withPre).reconstructed,
             flags = (s.Derived(Some(fd.id)) +: s.Derived(Some(finv.id)) +: (fd.flags.filterNot(f => f.name == "traceInduct"))).distinct
           ).copiedFrom(fd).setPos(fd.getPos)
-
 
           Trace.getTrace match {
             case Some(t) if(t == lemma.id) => Trace.setProof(helper.id)
@@ -561,14 +545,6 @@ object Trace {
 
   var sublemmaGeneration: Boolean = false
 
-  object Status extends Enumeration {
-    type Status = Value
-    val Unchecked, Valid, Unknown, Errorneus, Wrong = Value
-  }
-
-  import Status._
-
-  //TODO prevModels is not updated?
   case class State(var directModel: Option[Identifier], var counterexample: Option[Counterexample], var prevModels: List[Identifier])
 
   var state: Map[Identifier, State] = Map()
@@ -658,17 +634,13 @@ object Trace {
       tmpFunctions match {
         //TODO skip if x is model
       case x::xs => {
-        //val modsize = allModels.filterNot(state(x).prevModels.contains).size
-        //val n = if (modsize < 50) modsize else if(modsize < 100) 70 else 3
-        //tmpModels = allModels.filterNot(state(x).prevModels.contains).take(n)
-
-        val n = 5 //TODO change
+        val n = 3 //TODO change
         tmpModels = allModels.toList.sortBy(m => -m._2).map(_._1).filterNot(state(x).prevModels.contains).take(n)
 
         //case without priorities
         //tmpModels = allModels.toList.map(_._1).filterNot(state(x).prevModels.contains).take(n)
 
-        if(tmpModels.isEmpty) tmpModels = allModels.keys.take(1).toList //todo fix to skip this function
+        if(tmpModels.isEmpty) tmpModels = allModels.keys.take(1).toList //todo skip this function
         nextModel
         tmpFunctions = xs
         function = Some(x)
@@ -687,7 +659,7 @@ object Trace {
     val fromEval: Boolean
   }
 
-  var pair: Option[Counterexample] = None
+  var tmpCounterexample: Option[Counterexample] = None
 
   def toCounterexample(pr: inox.Program)(counterex: Map[pr.trees.ValDef, pr.trees.Expr]): Option[Counterexample] = {
     Some(new Counterexample {
@@ -707,7 +679,7 @@ object Trace {
     }
 
     if (shouldVerify(fun))
-      pair = Some(new Counterexample {
+      tmpCounterexample = Some(new Counterexample {
           val prog: pr.type = pr
           val counterexample = counterex.vars
           val existing = false
@@ -740,13 +712,13 @@ object Trace {
     (function, trace) match {
       case (Some(f), Some(t)) => {
         if (report.hasError(function) || report.hasError(proof) || report.hasError(trace)) {
-          //if (!withSublemmas || sublemmasAreValid) reportError(pair) // only if not in the sublemma state or if they are valid
-          if (!withSublemmas) reportError(pair) // only if not in the sublemma state or if they are valid
+          //if (!withSublemmas || sublemmasAreValid) reportError(tmpCounterexample) // only if not in the sublemma state or if they are valid
+          if (!withSublemmas) reportError(tmpCounterexample) // only if not in the sublemma state or if they are valid
           else reportUnknown
         }
         else if (report.hasUnknown(function) || report.hasUnknown(proof) || report.hasUnknown(trace)) reportUnknown
         else if (sublemmasAreValid) reportValid
-        //else if (sublemmasHaveErrors) reportError(pair) // TODO check
+        //else if (sublemmasHaveErrors) reportError(tmpCounterexample) // TODO check
         else reportUnknown
       }
       case (Some(f), _) if(state(f).counterexample != None) =>
@@ -756,10 +728,6 @@ object Trace {
     }
 
     if(isDone && unknowns.size < cnt) {
-      println("pulling out the unknowns:")
-      println(unknowns)
-      println("count:")
-      println(counter)
       cnt = unknowns.size
       tmpModels = allModels.keys.toList // TODO only the new ones
       tmpFunctions = unknowns.reverse
@@ -797,7 +765,6 @@ object Trace {
     resetEqCheckState
     errors = function.get::errors // store the counter-example
     noLongerUnknown(function.get)
-    //state(function.get).status = Errorneus
     state(function.get).directModel = model
     state(function.get).counterexample = counterexample
     nextFunction
@@ -811,7 +778,6 @@ object Trace {
       nextModel
       if (model == None) {
         unknowns = function.get::unknowns
-        //state(function.get).status = Unknown
         nextFunction
       }
     }
@@ -826,17 +792,12 @@ object Trace {
     resetEqCheckState
 
     if (!allModels.keys.toList.contains(function.get)) {
-      //state(function.get).status = Valid
       state(function.get).directModel = model
-      //allModels = (allModels :+ function.get).sortBy(m => -state.values.flatMap(_.path).count(_ == m))
 
       val inc = if (allModels(model.get) > 0) 20 else 100
       allModels = allModels.updated(model.get, allModels(model.get) + inc)
       allModels = (allModels + (function.get -> 0))//.sortBy(m => -m._2)
 
-
-      //allModels = (allModels :+ function.get).sortBy(m => -state.values.flatMap(_.path).count(_ == m))  //sortBy(m => state(m).path.size)
-      //allModels = (allModels :+ function.get)
       clusters = clusters + (function.get -> List())
     }
 
@@ -850,7 +811,6 @@ object Trace {
     resetEqCheckState
     if (function != None) {
       wrong = function.get::wrong
-      //state(function.get).status = Wrong
       noLongerUnknown(function.get)
     }
     resetTrace
@@ -898,7 +858,6 @@ object Trace {
         }
 
       }
-
 
       allFunctions.foreach(f => {
         val c = state(f).counterexample match {
