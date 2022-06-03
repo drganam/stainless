@@ -31,7 +31,6 @@ trait MainHelpers extends inox.MainHelpers { self =>
     optCompareFuns -> Description(General, "Only consider functions f1,f2,... for equivalence checking"),
     optModels -> Description(General, "Consider functions f1, f2, ... as model functions for equivalence checking"),
     optNorm -> Description(General, "Use function f as normalization function for equivalence checking"),
-    optProveMe -> Description(General, "Use function f as equivalence checking statement"),
     extraction.utils.optDebugObjects -> Description(General, "Only print debug output for functions/adts named o1,o2,..."),
     extraction.utils.optDebugPhases -> Description(General, {
       // f interpolator does not process escape sequence, we workaround that with the following trick.

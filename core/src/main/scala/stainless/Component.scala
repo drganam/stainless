@@ -51,13 +51,6 @@ object optNorm extends inox.OptionDef[String] {
   val usageRhs = "f"
 }
 
-object optProveMe extends inox.OptionDef[String] {
-  val name = "proveMe"
-  val default = ""
-  val parser = inox.OptionParsers.stringParser
-  val usageRhs = "f"
-}
-
 trait ComponentRun { self =>
   val component: Component
   val trees: ast.Trees

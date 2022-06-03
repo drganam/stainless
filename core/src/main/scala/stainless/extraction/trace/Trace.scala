@@ -52,14 +52,6 @@ class Trace(override val s: Trees, override val t: termination.Trees)
       n.params.init.zip(m.params).forall(arg => arg._1.tpe == arg._2.tpe)
     }
 
-    def checkArgsProveMe(model: Identifier, proveMe: Identifier) = {
-      val m = symbols.functions(model)
-      val p = symbols.functions(proveMe)
-
-      p.params.size == 2 && p.params.forall(arg => arg.tpe == m.returnType)
-    }
-
-
     if (Trace.getModels.isEmpty) {
       val models = symbols.functions.values.toList.filter(elem => !elem.flags.exists(_.name == "library") &&
         isModel(elem.id)).map(elem => elem.id)
@@ -80,18 +72,6 @@ class Trace(override val s: Trees, override val t: termination.Trees)
       (Trace.getModel, normOpt) match {
         case (Some(model), Some(norm)) if checkArgsNorm(model, norm) =>
           Trace.setNorm(normOpt)
-        case _ =>
-      }
-    }
-
-    if (Trace.getProveMe.isEmpty) {
-      val proveMeOpt = symbols.functions.values.toList.find(elem => isProveMe(elem.id)).map(elem => elem.id)
-      println(proveMeOpt)
-
-      (Trace.getModel, proveMeOpt) match {
-        case (Some(model), Some(p)) if checkArgsProveMe(model, p) =>
-          println(proveMeOpt)
-          Trace.setProveMe(proveMeOpt)
         case _ =>
       }
     }
@@ -307,10 +287,7 @@ class Trace(override val s: Trees, override val t: termination.Trees)
 
         val res = s.ValDef.fresh("res", s.UnitType())
 
-        val cond = Trace.getProveMe match {
-          case None => s.Equals(normFun1, normFun2)
-          case Some(p) => s.FunctionInvocation(p, List(), List(normFun1, normFun2))
-        }
+        val cond = s.Equals(normFun1, normFun2)
 
         val post = Postcondition(Lambda(Seq(res), cond))
 
@@ -544,13 +521,9 @@ class Trace(override val s: Trees, override val t: termination.Trees)
   private lazy val pathsOptNorm: Option[Seq[Path]] =
     Some(Seq(context.options.findOptionOrDefault(optNorm)).map(CheckFilter.fullNameToPath))
 
-  private lazy val pathsOptProveMe: Option[Seq[Path]] =
-    Some(Seq(context.options.findOptionOrDefault(optProveMe)).map(CheckFilter.fullNameToPath))
-
   private def shouldBeChecked(fid: Identifier): Boolean = shouldBeChecked(pathsOpt, fid)
   private def isModel(fid: Identifier): Boolean = shouldBeChecked(pathsOptModels, fid)
   private def isNorm(fid: Identifier): Boolean = shouldBeChecked(pathsOptNorm, fid)
-  private def isProveMe(fid: Identifier): Boolean = shouldBeChecked(pathsOptProveMe, fid)
 
   private def shouldBeChecked(paths: Option[Seq[Path]], fid: Identifier): Boolean = paths match {
     case None => false
@@ -581,7 +554,6 @@ object Trace {
   var model: Option[Identifier] = None
   var function: Option[Identifier] = None
   var norm: Option[Identifier] = None
-  var proveMe: Option[Identifier] = None
   var trace: Option[Identifier] = None
   var proof: Option[Identifier] = None
   var sublemmas: List[Identifier] = List()
@@ -651,7 +623,6 @@ object Trace {
   def getModel = model        // model for the current iteration
   def getFunction = function  // function to check in the current iteration
   def getNorm = norm
-  def getProveMe = proveMe
   def getMkTest = mkTest
   def getTrace = trace
 
@@ -669,9 +640,7 @@ object Trace {
 
   def setProof(p: Identifier) = proof = Some(p)
   def setNorm(n: Option[Identifier]) = norm = n
-  def setProveMe(p: Option[Identifier]) = proveMe = p
   def setMkTest(t: Identifier) = mkTest = Some(t)
-
 
   // iterate model for the current function
   private def nextModel = tmpModels match {
