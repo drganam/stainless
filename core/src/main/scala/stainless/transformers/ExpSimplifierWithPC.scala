@@ -67,7 +67,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     case FnInvoc(id: Identifier, tps: Seq[Type])
 
     case Or
-    case And
+//    case And // TODO: Nope
     case Not
 
     case Equals
@@ -76,7 +76,6 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     case LessEquals
     case GreaterEquals
 
-//    case ArithOp(kind: ArithKind)
     case UMinus
     case Plus
     case Minus
@@ -121,31 +120,8 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     // TODO: En gros, quand on sait pas, on incrémente un counter (label "unique" (pour exactement la meme expr, on obtient le meme label), pas de risque de faire n'importe quoi)
     case Unknown(id: Int)
   }
-/*
-  enum ArithKind(commutative: Boolean) {
-    case UMinus extends ArithKind(false)
-    case Plus extends ArithKind(true)
-    case Minus extends ArithKind(false)
-    case Times extends ArithKind(true)
-    case Division extends ArithKind(false)
-    case Remainder extends ArithKind(false)
-    case Modulo extends ArithKind(false)
 
-    case BVNot extends ArithKind(false)
-    case BVAnd extends ArithKind(true)
-    case BVOr extends ArithKind(true)
-    case BVXor extends ArithKind(true)
-    case BVShiftLeft extends ArithKind(false)
-    case BVAShiftRight extends ArithKind(false)
-    case BVLShiftRight extends ArithKind(false)
 
-    case BVNarrowingCast(newType: BVType) extends ArithKind(false)
-    case BVWideningCast(newType: BVType) extends ArithKind(false)
-
-    case BVUnsignedToSigned extends ArithKind(false)
-    case BVSignedToUnsigned extends ArithKind(false)
-  }
-*/
   opaque type Code = Int
 
   case class Signature(label: Label, children: Seq[Code])
@@ -156,6 +132,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     private val codes = mutable.Map.empty[Expr, Code]
     private val sig2code = mutable.Map.empty[Signature, Code]
     private val code2sig = mutable.Map.empty[Code, Signature]
+    private val sizeCache = mutable.Map.empty[Expr, Int]
 
     // TODO: Voir si avoir un Map[Expr, Signature] est utile
 
@@ -186,7 +163,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     })
 
     def checkForContradiction(disj: Seq[Code]): Boolean = {
-      // TODO: Relativement different par rapport à l'impl.
+      // TODO: Relativement different par rapport à l'orig
       val disjSet = disj.toSet
       val (pos, neg) = disjSet.foldLeft((Set.empty[Code], Set.empty[Code])) {
         case ((posAcc, negAcc), c) =>
@@ -209,40 +186,91 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
       }
     }
 
-    // TODO: Sorted codes???
-    // TODO: Sorted codes???
-    // TODO: Sorted codes???
-    // TODO: Sorted codes???
-    // TODO: Sorted codes???
-
     // TODO: Cela suppose que c'est une disjunction, mais c'est p-e pas le cas??? Ca peut etre une expr d'un autre type!!! (cf withBindings)
     def pDisj(e: Expr): Seq[Code] = {
+//      computeSignature(e) match {
+//        case Signature(Label.Not, Seq(c)) => pNeg(c)
+//        case Signature(_, children) => children
+//      }
+      // TODO: Ok?
+      computeSignature(e).children
+    }
 
-      ???
-
-      /*
-      codes.get(e).map(code2sig) match {
-        case Some(Signature(_, children)) => return children
+    // TODO: Signature de Not(child)
+    def pNeg(child: Expr): Signature = {
+      codes.get(child) match {
+        case Some(c) => return pNegNormal(c)
         case None => ()
       }
 
-      val sig = e match {
-        case Equals(e1, e2) =>
-//          // TODO: Excepté pour c1 == c2, bcp de cas se ressemblent?
-//          val c1 = codeOf(e1)
-//          val c2 = codeOf(e2)
-//          if (c1 == c2) trueSig
-//          else Signature(Label.Equals, Seq(c1, c2))
-          ???
+      // TODO: Où devrait-on mettre le caching? C'est appelé par computeSignature donc ça devrait faire l'affaire non?
 
-        // TODO: Le reste...
-        case Not(e) =>
-          ???
-
+      child match {
+        case Not(e) => computeSignature(e) // TODO: Orig fait pDisj, mais pDisj et un computeSignature pour nous (du moins, pour le moment)
+        case or @ Or(_) =>
+          val ors0 = unOr(or)
+          // Note: ors cannot be empty (by Or `require`)
+          val ors1 = ors0.sortBy(sizeOf)
+          // TODO: Ici, on fait un filter..distinct.sorted, ce que l'orig ne fait pas vraiment?
+          val r = ors1.tail.flatMap(pDisj)
+            .filter(_ != falseCode)
+            .distinct.sorted
+          if (r.isEmpty) pNeg(ors1.head) // TODO: Caching?
+          else {
+            // TODO: Ok?
+            val s = (pDisj(ors1.head) ++ r)
+              .filter(_ != falseCode)
+              .distinct.sorted
+            if (s.contains(trueCode) || checkForContradiction(s)) falseCode
+            else if (s.size == 1) pNegNormal(s.head) // TODO: Ok?
+            else {
+              val orCode = updateCodesSig(Signature(Label.Or, s))
+              Signature(Label.Not, orCode)
+            }
+          }
         case _ =>
+          // TODO: Ok?
+          computeSignature(child) match {
+            case Signature(Label.Lit(BooleanLiteral(b)), Seq()) =>
+              Signature(Label.Lit(BooleanLiteral(!b)), Seq.empty)
+            case sig =>
+              // TODO: Ok?
+              Signature(Label.Not, Seq(sig2code(sig)))
+          }
+      }
+
+      /*
+      // TODO: Apparemment, ce n'est pas le truc à faire avec computeSignature?
+      //  L'orig check d'abord si normal form deja compute. Si oui, fait un pNegNormal
+      computeSignature(child) match {
+        case Signature(Label.Lit(BooleanLiteral(b)), Seq()) =>
+          Signature(Label.Lit(BooleanLiteral(!b)), Seq.empty)
+        case Signature(Label.Not, Seq(c)) =>
+          // TODO: Ok?
+          code2sig(c)
+        case Signature(Label.Or, Seq()) =>
+          // TODO: Comme dans l'orig, mais est-ce "vraiment vrai"?
+          trueSig
+        case Signature(Label.Or, cs) =>
+
+
           ???
+        case sig =>
+          // TODO: Ok?
+          Signature(Label.Not, Seq(sig2code(sig)))
       }
       */
+    }
+
+    // TODO: ok?
+    // TODO: caching?
+    // TODO: En gros la signature de Not(c)
+    def pNegNormal(c: Code): Signature = {
+      assert(code2sig.contains(c))
+      code2sig(c) match {
+        case Signature(Label.Not, Seq(cc)) => code2sig(cc)
+        case Signature(_, _) => Signature(Label.Not, Seq(c)) // TODO: Ok?
+      }
     }
 
     // TODO: Est-ce correct de faire ça?
@@ -252,18 +280,52 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
         case None => ()
       }
 
+      // TODO: Check label (pour voir s'il n'y a pas d'erreur de copié/collé)
       val sig = e match {
+        // TODO: Ne pourrait-on pas envisager certains simplif. ici? Pk "attendre" codeOf?
         case and @ And(_) =>
           val ands = unAnd(and)
-          Signature(Label.And, ands.map(codeOf).sorted)
+//          Signature(Label.And, ands.map(codeOf).sorted) // TODO: Nope
+//          computeSignature(Neg(Or(ands.map(Neg)))) // TODO: codeOf ou computeSignature?
+          code2sig(codeOf(Not(Or(ands.map(Not.apply)))))
         case or @ Or(_) =>
           val ors = unOr(or)
-          Signature(Label.Or, ors.map(codeOf).sorted)
+          Signature(Label.Or, ors.map(codeOf).sorted) // TODO: checkForContradiction?
         case Not(e) =>
-          Signature(Label.Not, Seq(codeOf(e)))
+          pNeg(e)
+//          // TODO: Non!!! C'est pNeg!!!
+//          Signature(Label.Not, Seq(codeOf(e)))
         case Implies(e1, e2) =>
-          computeSignature(Or(Not(e1), e2))
+//          computeSignature(Or(Not(e1), e2)) // TODO: codeOf ou computeSignature?
+          code2sig(codeOf(Or(Not(e1), e2)))
 
+        case Equals(e1, e2) =>
+          val c1 = codeOf(e1)
+          val c2 = codeOf(e2)
+          if (c1 == c2) trueSig
+          else Signature(Label.Equals, Seq(c1, c2).sorted)
+        case LessThan(e1, e2) =>
+          val c1 = codeOf(e1)
+          val c2 = codeOf(e2)
+          if (c1 == c2) falseSig
+          else Signature(Label.LessThan, Seq(c1, c2))
+        case GreaterThan(e1, e2) =>
+          val c1 = codeOf(e1)
+          val c2 = codeOf(e2)
+          if (c1 == c2) falseSig
+          else Signature(Label.GreaterThan, Seq(c1, c2))
+        case LessEquals(e1, e2) =>
+          val c1 = codeOf(e1)
+          val c2 = codeOf(e2)
+          if (c1 == c2) trueSig
+          else Signature(Label.LessEquals, Seq(c1, c2))
+        case GreaterEquals(e1, e2) =>
+          val c1 = codeOf(e1)
+          val c2 = codeOf(e2)
+          if (c1 == c2) trueSig
+          else Signature(Label.GreaterEquals, Seq(c1, c2))
+
+        /*
         case Equals(e1, e2) =>
           Signature(Label.Equals, Seq(codeOf(e1), codeOf(e2)).sorted)
         case LessThan(e1, e2) =>
@@ -274,7 +336,9 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
           Signature(Label.LessEquals, Seq(codeOf(e1), codeOf(e2)))
         case GreaterEquals(e1, e2) =>
           Signature(Label.GreaterEquals, Seq(codeOf(e1), codeOf(e2)))
+        */
 
+        // TODO: Ne pourrait-on pas envisager certains simplif. ici?
         case UMinus(e) =>
           Signature(Label.UMinus, Seq(codeOf(e)))
         case Plus(e1, e2) =>
@@ -333,7 +397,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
           Signature(Label.ArrayLength, Seq(codeOf(array)))
 
         case BooleanLiteral(b) =>
-          if (b) trueSig else falseSig
+          if (b) trueSig else falseSig // TODO: Semble redondant avec le case en dessous?
 
         case l: Literal[_] =>
           Signature(Label.Lit(l), Seq.empty)
@@ -366,6 +430,16 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     def unOr(e: Expr): Seq[Expr] = e match {
       case Or(es) => es.flatMap(unOr)
       case e => Seq(e)
+    }
+
+    def sizeOf(e: Expr): Int = {
+      def rec(e: Expr): Int = {
+        sizeCache.getOrElse(e, {
+          val Operator(es, _) = e
+          1 + es.size + es.map(rec).sum
+        })
+      }
+      sizeCache.getOrElseUpdate(e, rec(e))
     }
   }
 
