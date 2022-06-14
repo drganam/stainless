@@ -8,17 +8,46 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
 
   override val pp: PathProvider[Env] = Env
 
-  private val ocbsl = ThreadLocal.withInitial(() => new OCBSL)
+  private val ocbslTL = ThreadLocal.withInitial(() => new OCBSL)
+  private val ocbsl = ocbslTL.get() // TODO: Does this work as intended???
 
-  override protected def simplify(e: Expr, path: Env): (Expr, Boolean) = e match {
-    // TODO: Un dernier catch-all pour boolean qu'on pourra OCBSLiser
-    case _ => ???
+  override protected def simplify(e: Expr, path: Env): (Expr, Boolean) = {
+    val (re, pr) = e match {
+      case Implies(l, r) =>
+        val (rl, pl) = simplify(l, path)
+        val rPath = if (pl) path withCond rl else path
+        val (rr, pr) = simplify(r, rPath)
+        rr match {
+          case BooleanLiteral(_) => (rr, pl && pr)
+          case _ => (Implies(rl, rr).copiedFrom(e), pl && pr)
+        }
+      //    case e if e.getType == BooleanType() =>
+      //      val (re, pe) = super.simplify(e, path)
+      //      // TODO: This seems to not add anything?
+      //      if (pe) (ocbsl.simplify(re), true)
+      //      else (re, false)
+      case _ => super.simplify(e, path)
+    }
+    println(s"Simplification de $e:")
+    println(s"    pure = $pr")
+    println(s"    simp = $re")
+    (re, pr)
   }
 
   // conditions: Set[Expr], exprSubst: Map[Variable, Expr]
-  case class Env() extends PathLike[Env] with SolvingPath {
+  // TODO: A-t-on vraiment besoin d'un Variable -> Code ? Pk pas juste Variable -> Expr? De toute façon, Expr devrait etre simplifié
+  case class Env(conditions: Set[Code], exprSubst: Map[Variable, Code]) extends PathLike[Env] with SolvingPath {
     // TODO: On pourra supposer que le binding a été simplifié avant
-    override def withBinding(p: (ValDef, Expr)): Env = ??? /*p match {
+    override def withBinding(p: (ValDef, Expr)): Env = p match {
+      case (vd, v: Variable) =>
+        val exp = expand(v)
+        if (v != exp) Env(conditions, exprSubst + (vd.toVariable -> ocbsl.codeOf(exp)))
+        else this
+      case (vd, e) =>
+        Env(conditions, exprSubst + (vd.toVariable -> ocbsl.codeOf(e)))
+    }
+
+    /*p match {
       case (vd, expr @ (_: ADT | _: Tuple | _: Lambda)) =>
         new Env(conditions, exprSubst + (vd.toVariable -> expr))
       case (vd, v: Variable) =>
@@ -31,27 +60,48 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     override def withBound(vd: ValDef): Env = this
 
     // TODO: On pourra supposer que cond a été simplifié avant
-    override def withCond(cond: Expr): Env = ??? // new Env(conditions + cond, exprSubst)
+    override def withCond(cond: Expr): Env =
+      Env(conditions + ocbsl.codeOf(cond), exprSubst)
 
     // TODO: Voir ce qu'on peut faire de ça
-    override def negate: Env = ??? // new Env(Set(not(and(conditions.toSeq : _*))), exprSubst)
+    override def negate: Env = {
+      // TODO: Pas optimal!!!
+      // TODO: Correct???
+      // TODO: Stupide uncodeOf!!!
+      val negExpr = orJoin(conditions.map(c => Not(ocbsl.uncodeOf(c))).toSeq) // TODO: Stupide!!!
+      Env(ocbsl.pDisj(negExpr).toSet, exprSubst) // TODO: Ok?
+      // new Env(Set(not(and(conditions.toSeq : _*))), exprSubst)
+    }
 
-    override def merge(that: Env): Env = ???
-//      new Env(conditions ++ that.conditions, exprSubst ++ that.exprSubst)
+
+    override def merge(that: Env): Env =
+      Env(conditions ++ that.conditions, exprSubst ++ that.exprSubst)
 
     // TODO: Voir ou est-ce que ce truc est utilisé
-    override def expand(expr: Expr): Expr = ??? /*expr match {
-      case v: Variable => exprSubst.getOrElse(v, v)
-      case _ => expr
-    }*/
+    override def expand(expr: Expr): Expr = {
+      expr match {
+        // TODO: Stupide uncodeOf!!!
+        case v: Variable => exprSubst.get(v).map(ocbsl.uncodeOf).getOrElse(v)
+        case _ => expr
+      }
+    }
 
     // TODO: Peut-on supposer que expr a été simplifié?
-    override def implies(expr: Expr): Boolean = ??? // conditions contains expr
+    override def implies(expr: Expr): Boolean = {
+      // TODO: Ok?
+      // TODO: Stupide uncodeOf!!!
+      val exprCode = ocbsl.codeOf(expr)
+      if (conditions.isEmpty) exprCode == ocbsl.trueCode
+      else {
+        val implExpr = Implies(andJoin(conditions.toSeq.map(ocbsl.uncodeOf)), expr)
+        ocbsl.codeOf(implExpr) == exprCode
+      }
+    }
   }
 
   object Env extends PathProvider[Env] {
-//    def empty = new Env(Set(), Map())
-    def empty: Env = Env()
+    def empty = new Env(Set(), Map())
+//    def empty: Env = Env()
   }
 
   override def initEnv = Env.empty
@@ -67,7 +117,6 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     case FnInvoc(id: Identifier, tps: Seq[Type])
 
     case Or
-//    case And // TODO: Nope
     case Not
 
     case Equals
@@ -94,7 +143,6 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
 
     case BVNarrowingCast(newType: BVType)
     case BVWideningCast(newType: BVType)
-
     case BVUnsignedToSigned
     case BVSignedToUnsigned
 
@@ -118,7 +166,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     // TODO: le reste...
 
     // TODO: En gros, quand on sait pas, on incrémente un counter (label "unique" (pour exactement la meme expr, on obtient le meme label), pas de risque de faire n'importe quoi)
-    case Unknown(id: Int)
+    case Unknown(underlying: Expr) // TODO: Ou bien garde-t-on le compteur
   }
 
 
@@ -126,7 +174,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
 
   case class Signature(label: Label, children: Seq[Code])
 
-  class OCBSL {
+  private class OCBSL {
     import scala.collection.mutable
 
     private val codes = mutable.Map.empty[Expr, Code]
@@ -136,13 +184,13 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
 
     // TODO: Voir si avoir un Map[Expr, Signature] est utile
 
-    private val falseSig = Signature(Label.Lit(BooleanLiteral(false)), Seq.empty)
-    private val trueSig = Signature(Label.Lit(BooleanLiteral(true)), Seq.empty)
+    val falseSig = Signature(Label.Lit(BooleanLiteral(false)), Seq.empty)
+    val trueSig = Signature(Label.Lit(BooleanLiteral(true)), Seq.empty)
 
     private var unknownCounter = 0
 
-    private val falseCode = updateCodesSig(falseSig)
-    private val trueCode = updateCodesSig(trueSig)
+    val falseCode = updateCodesSig(falseSig)
+    val trueCode = updateCodesSig(trueSig)
 
     def codeOf(e: Expr): Code = codes.getOrElseUpdate(e, {
       val l = pDisj(e).sorted.distinct.filter(_ != falseCode)
@@ -161,6 +209,65 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
         ???
       }*/
     })
+
+    // TODO: Ok?
+    def simplify(e: Expr): Expr = uncodeOf(codeOf(e))
+
+    // TODO: N'y a-t-il pas un moyen moins stupide?
+    def uncodeOf(c: Code): Expr = {
+      assert(code2sig.contains(c))
+      code2sig(c) match {
+        case Signature(Label.Var(v), Seq()) => v
+        case Signature(Label.Tuple, args) => Tuple(args.map(uncodeOf))
+        case Signature(Label.ADT(id, tps), args) => ADT(id, tps, args.map(uncodeOf))
+        case Signature(Label.FnInvoc(id, tps), args) => FunctionInvocation(id, tps, args.map(uncodeOf))
+        case Signature(Label.Or, args) => Or(args.map(uncodeOf))
+        case Signature(Label.Not, Seq(c)) => Not(uncodeOf(c))
+
+        case Signature(Label.Equals, Seq(c1, c2)) => Equals(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.LessThan, Seq(c1, c2)) => LessThan(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.GreaterThan, Seq(c1, c2)) => GreaterThan(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.LessEquals, Seq(c1, c2)) => LessEquals(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.GreaterEquals, Seq(c1, c2)) => GreaterEquals(uncodeOf(c1), uncodeOf(c2))
+
+        case Signature(Label.UMinus, Seq(c)) => UMinus(uncodeOf(c))
+        case Signature(Label.Plus, Seq(c1, c2)) => Plus(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.Minus, Seq(c1, c2)) => Minus(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.Times, Seq(c1, c2)) => Times(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.Division, Seq(c1, c2)) => Division(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.Remainder, Seq(c1, c2)) => Remainder(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.Modulo, Seq(c1, c2)) => Modulo(uncodeOf(c1), uncodeOf(c2))
+
+        case Signature(Label.BVNot, Seq(c)) => BVNot(uncodeOf(c))
+        case Signature(Label.BVAnd, Seq(c1, c2)) => BVAnd(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.BVOr, Seq(c1, c2)) => BVOr(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.BVXor, Seq(c1, c2)) => BVXor(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.BVShiftLeft, Seq(c1, c2)) => BVShiftLeft(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.BVAShiftRight, Seq(c1, c2)) => BVAShiftRight(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.BVLShiftRight, Seq(c1, c2)) => BVLShiftRight(uncodeOf(c1), uncodeOf(c2))
+
+        case Signature(Label.BVNarrowingCast(newType), Seq(c)) => BVNarrowingCast(uncodeOf(c), newType)
+        case Signature(Label.BVWideningCast(newType), Seq(c)) => BVWideningCast(uncodeOf(c), newType)
+        case Signature(Label.BVUnsignedToSigned, Seq(c)) => BVUnsignedToSigned(uncodeOf(c))
+        case Signature(Label.BVSignedToUnsigned, Seq(c)) => BVSignedToUnsigned(uncodeOf(c))
+
+        case Signature(Label.Lit(lit), Seq()) => lit
+
+        case Signature(Label.TupleSelect(index), Seq(c)) => TupleSelect(uncodeOf(c), index)
+        case Signature(Label.FiniteSet(base), args) => FiniteSet(args.map(uncodeOf), base)
+        case Signature(Label.FiniteArray(base), args) => FiniteArray(args.map(uncodeOf), base)
+        case Signature(Label.LargeArray(elemsIndices, base), elems :+ default :+ size) =>
+          LargeArray(elemsIndices.zip(elems.map(uncodeOf)).toMap, uncodeOf(default), uncodeOf(size), base)
+        case Signature(Label.ArraySelect, Seq(arr, i)) => ArraySelect(uncodeOf(arr), uncodeOf(i))
+        case Signature(Label.ArrayUpdated, Seq(arr, i, v)) => ArrayUpdated(uncodeOf(arr), uncodeOf(i), uncodeOf(v))
+        case Signature(Label.ArrayLength, Seq(arr)) => ArrayLength(uncodeOf(arr))
+
+        case Signature(Label.Unknown(e), Seq()) => e
+
+        case sig =>
+          sys.error(s"What is this: $sig")
+      }
+    }
 
     def checkForContradiction(disj: Seq[Code]): Boolean = {
       // TODO: Relativement different par rapport à l'orig
@@ -221,11 +328,11 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
             val s = (pDisj(ors1.head) ++ r)
               .filter(_ != falseCode)
               .distinct.sorted
-            if (s.contains(trueCode) || checkForContradiction(s)) falseCode
+            if (s.contains(trueCode) || checkForContradiction(s)) falseSig
             else if (s.size == 1) pNegNormal(s.head) // TODO: Ok?
             else {
               val orCode = updateCodesSig(Signature(Label.Or, s))
-              Signature(Label.Not, orCode)
+              Signature(Label.Not, Seq(orCode))
             }
           }
         case _ =>
@@ -282,6 +389,8 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
 
       // TODO: Check label (pour voir s'il n'y a pas d'erreur de copié/collé)
       val sig = e match {
+        // TODO: Reste: ADT, variable, annotated etc.
+
         // TODO: Ne pourrait-on pas envisager certains simplif. ici? Pk "attendre" codeOf?
         case and @ And(_) =>
           val ands = unAnd(and)
@@ -403,10 +512,15 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
           Signature(Label.Lit(l), Seq.empty)
 
         case _ =>
+          // TODO: Ou bien garde-t-on le compteur?
+          println(s"Generated an 'unknown' for $e")
+          Signature(Label.Unknown(e), Seq.empty)
+          /*
           println(s"Generated an 'unknown' for $e (with id $unknownCounter)")
           val sig = Signature(Label.Unknown(unknownCounter), Seq.empty)
           unknownCounter += 1
           sig
+          */
       }
 
       updateCodesSig(sig)
