@@ -20,7 +20,7 @@ class PartialEvaluation(override val s: extraction.Trees)
 
   given givenDebugSection: DebugSectionPartialEval.type = DebugSectionPartialEval
 
-  override protected final val funCache = new ExtractionCache[s.FunDef, FunctionResult]((fd, context) => 
+  override protected final val funCache = new ExtractionCache[s.FunDef, FunctionResult]((fd, context) =>
     getDependencyKey(fd.id)(using context.symbols)
   )
 
