@@ -15,12 +15,20 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     val (re, pr) = e match {
       case Implies(l, r) =>
         val (rl, pl) = simplify(l, path)
-        val rPath = if (pl) path withCond rl else path
-        val (rr, pr) = simplify(r, rPath)
-        rr match {
-          case BooleanLiteral(_) => (rr, pl && pr)
-          case _ => (Implies(rl, rr).copiedFrom(e), pl && pr)
+        rl match {
+          case BooleanLiteral(false) if pl => return (BooleanLiteral(true).copiedFrom(e), true) // TODO: Legal?
+          case _ => ()
         }
+        val newPath = if (pl) path withCond rl else path
+        val (rr, pr) = simplify(r, newPath) // TODO: Legal?
+        if (pl && pr) (implies(rl, rr).copiedFrom(e), true)
+        else (Implies(rl, rr).copiedFrom(e), false)
+//        // TODO: Utiliser env! Ou est-ce déjà le cas?
+//        rr match {
+//          case BooleanLiteral(_) /*if pl*/ =>
+//            (rr, pr) // TODO: Legal?
+//          case _ => (implies(rl, rr).copiedFrom(e), pl && pr)
+//        }
       // TODO: Ce truc semble inutile? Ou bien?
       //    case e if e.getType == BooleanType() =>
       //      val (re, pe) = super.simplify(e, path)
@@ -38,20 +46,35 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     (re, pr)
   }
 
-  // conditions: Set[Expr], exprSubst: Map[Variable, Expr]
-  // TODO: A-t-on vraiment besoin d'un Variable -> Code ? Pk pas juste Variable -> Expr? De toute façon, Expr devrait etre simplifié
-  case class Env(conditions: Set[Code], exprSubst: Map[Variable, Expr]) extends PathLike[Env] with SolvingPath {
+  private val fns = scala.collection.mutable.Map.empty[Identifier, Boolean]
+
+//  def containsImpureExpr(expr: Expr): Boolean = exprOps.exists {
+//    case (_: Assume) | (_: Choose) | (_: Application) |
+//         (_: Division) | (_: Remainder) | (_: Modulo) | (_: ADTSelector) |
+//         (_: Decreases) | (_: Require) | (_: Ensuring) | (_: Assert) => true
+//    case FunctionInvocation(id, _, _) =>
+//      fns.getOrElseUpdate(id, )
+//      // Note: args already checked recursively
+//      containsImpureExpr(getFunction(id).fullBody)
+//    case adt: ADT => adt.getConstructor.sort.definition.hasInvariant
+//    case _ => false
+//  } (expr)
+
+  case class Env(conditions: Set[Code], exprSubst: Map[Variable, Expr], exprCode: Map[Variable, Code]) extends PathLike[Env] with SolvingPath {
     // TODO: On pourra supposer que le binding a été simplifié avant
     override def withBinding(p: (ValDef, Expr)): Env = p match {
       // TODO: Qq binding ajouté
       // TODO: Pk n'ajoute-t-on pas tous les bdgs?
       //  ~> p-e parce que le Let case n'exploite pas ces infos?
       case (vd, expr @ (_: ADT | _: Tuple | _: Lambda | _: FiniteArray | _: LargeArray)) =>
-        Env(conditions, exprSubst + (vd.toVariable -> expr))
+        val c = ocbsl.codeOf(expr)(using exprCode)
+        Env(conditions, exprSubst + (vd.toVariable -> expr), exprCode + (vd.toVariable -> c))
       case (vd, v: Variable) =>
         val exp = expand(v)
-        if (v != exp) Env(conditions, exprSubst + (vd.toVariable -> exp))
-        else this
+        if (v != exp) {
+          val c = ocbsl.codeOf(exp)(using exprCode)
+          Env(conditions, exprSubst + (vd.toVariable -> exp), exprCode + (vd.toVariable -> c))
+        } else this
       case _ => this
     }
 
@@ -68,18 +91,19 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     override def withBound(vd: ValDef): Env = this
 
     // TODO: On pourra supposer que cond a été simplifié avant
+    // TODO: Et si cond est impure???
     override def withCond(cond: Expr): Env = {
-      val codeCond = ocbsl.codeOf(cond)
+      val codeCond = ocbsl.codeOf(cond)(using exprCode)
 //      println("============================")
 //      println(s"Donné $cond")
 //      println(s"Code pour $cond   ~~>   $codeCond")
 //      println("============================")
-      Env(conditions + codeCond, exprSubst)
+      Env(conditions + codeCond, exprSubst, exprCode)
     }
 
-    override def negate: Env = Env(Set(ocbsl.negatedConjunction(conditions)), exprSubst)
+    override def negate: Env = Env(Set(ocbsl.negatedConjunction(conditions)), exprSubst, exprCode)
 
-    override def merge(that: Env): Env = Env(conditions ++ that.conditions, exprSubst ++ that.exprSubst)
+    override def merge(that: Env): Env = Env(conditions ++ that.conditions, exprSubst ++ that.exprSubst, exprCode ++ that.exprCode)
 
     // TODO: Voir ou est-ce que ce truc est utilisé
     override def expand(expr: Expr): Expr = expr match {
@@ -90,11 +114,24 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     // TODO: Peut-on supposer que expr a été simplifié??? Il semblerait que non!!!!
     // TODO: Peut-on supposer que expr a été simplifié??? Il semblerait que non!!!!
     // TODO: Peut-on supposer que expr a été simplifié??? Il semblerait que non!!!!
+    // TODO: Quid purity??? p.ex. size(l) ==> size(l) se fait transformer en true!!!!
+    // TODO: Quid purity??? p.ex. size(l) ==> size(l) se fait transformer en true!!!!
+    // TODO: Quid purity??? p.ex. size(l) ==> size(l) se fait transformer en true!!!!
+    // TODO: Quid purity??? p.ex. size(l) ==> size(l) se fait transformer en true!!!!
+    // TODO: Quid purity??? p.ex. size(l) ==> size(l) se fait transformer en true!!!!
+    // TODO: Quid purity??? p.ex. size(l) ==> size(l) se fait transformer en true!!!!
+    // TODO: Quid purity??? p.ex. size(l) ==> size(l) se fait transformer en true!!!!
+    // TODO: Quid purity??? p.ex. size(l) ==> size(l) se fait transformer en true!!!!
     override def implies(expr: Expr): Boolean = {
+//      if (containsImpureExpr(expr)) {
+//        println(s"Note: $expr en implication rejeté")
+//        return false
+//      }
 //      println("============================")
 //      println("A-t-on cette implication?")
 //      println(s"     $conditions    ==>    $expr")
-      val r = ocbsl.implies(conditions, ocbsl.codeOf(expr))
+      // TODO: On pourrait utiliser les bindings non?
+      val r = ocbsl.implies(conditions, ocbsl.codeOf(expr)(using exprCode))
 //      println(s"     La réponse est $r")
 //      println("============================")
       r
@@ -103,7 +140,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
   }
 
   object Env extends PathProvider[Env] {
-    def empty = new Env(Set.empty, Map.empty)
+    def empty: Env = Env(Set.empty, Map.empty, Map.empty)
   }
 
   override def initEnv: Env = Env.empty
@@ -192,7 +229,9 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
 
     private var unknownCounter = 0
 
-    def codeOf(e: Expr): Code = codes.getOrElseUpdate(e, {
+    // TODO: Au lieu de balader cette map, pourrait-on envisager de la mettre comme un field?
+    //    ~> non! les let bindings sont "temporaire"!!!
+    def codeOf(e: Expr)(using Map[Variable, Code]): Code = codes.getOrElseUpdate(e, {
       // TODO: ok?
       val pDisjRes = pDisj(e)
       val res = simplifiedDisjunction(pDisjRes.toSet)
@@ -261,7 +300,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     // TODO: Cela suppose que c'est une disjunction, mais c'est p-e pas le cas??? Ca peut etre une expr d'un autre type!!!
     // TODO: Ok?
     // TODO: Cache?
-    def pDisj(e: Expr): Seq[Code] = {
+    def pDisj(e: Expr)(using Map[Variable, Code]): Seq[Code] = {
       computeSignature(e) match {
         case Signature(Label.Or, children) => children
         case sig => Seq(updateCodesSig(sig))
@@ -269,7 +308,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     }
 
     // TODO: Signature de Not(child)
-    def pNeg(child: Expr): Signature = {
+    def pNeg(child: Expr)(using Map[Variable, Code]): Signature = {
       codes.get(child) match {
         case Some(c) => return pNegNormal(c)
         case None => ()
@@ -325,7 +364,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     }
 
     // TODO: Est-ce correct de faire ça?
-    def computeSignature(e: Expr): Signature = {
+    def computeSignature(e: Expr)(using subst: Map[Variable, Code]): Signature = {
       codes.get(e).map(code2sig) match {
         case Some(sig) => return sig
         case None => ()
@@ -334,18 +373,24 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
       // TODO: Check label (pour voir s'il n'y a pas d'erreur de copié/collé)
       val sig = e match {
         case v: Variable =>
-          Signature(Label.Var(v), Seq.empty)
+          subst.get(v).map(code2sig)
+            .getOrElse(Signature(Label.Var(v), Seq.empty))
         case Tuple(args) =>
           Signature(Label.Tuple, args.map(codeOf))
         case ADT(id, tps, args) =>
           Signature(Label.ADT(id, tps), args.map(codeOf))
         case ADTSelector(e, selector) =>
-          Signature(Label.ADTSelector(selector), codeOf(e))
+          Signature(Label.ADTSelector(selector), Seq(codeOf(e)))
         case FunctionInvocation(id, tps, args) =>
           Signature(Label.FunctionInvocation(id, tps), args.map(codeOf))
 
+        // TODO: Problématique, car si vd est pas utilisé, on peut drop des constructions "impures"
+//        case Let(vd, e, body) =>
+//          val cE = codeOf(e)
+//          val cB = codeOf(body)(using subst + (vd.toVariable -> cE))
+//          code2sig(cB)
 
-        // TODO:
+        // TODO: If, "is", Application, lambda
 
         // TODO: Annotated peut empecher certaines simplif. non? Voir la PR de Georg.
         // TODO: On pourrait p-e ignorer Annotated? De toute façon, si c'est pour avoir des DropVCs, cela ne change rien dans notre cas de figure?
@@ -457,7 +502,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
 
         case _ =>
           // TODO: Ou bien garde-t-on le compteur?
-          println(s"Generated an 'unknown' for $e")
+//          println(s"Generated an 'unknown' for $e")
           Signature(Label.Unknown(e), Seq.empty)
           /*
           println(s"Generated an 'unknown' for $e (with id $unknownCounter)")

@@ -12,17 +12,16 @@ trait SymbolOps extends inox.ast.SymbolOps with TypeOps { self =>
   import symbols.{given, _}
 
   override protected def simplifierWithPC(popts: inox.solvers.PurityOptions): SimplifierWithPC = {
-    class SimplifierWithPCImpl(override val trees: self.trees.type,
-                               override val symbols: self.symbols.type,
-                               override val s: self.trees.type,
-                               override val t: self.trees.type)
-                              (using override val opts: inox.solvers.PurityOptions)
-      extends transformers.ExpSimplifierWithPC
-         with SimplifierWithPC
-        // with inox.transformers.SimplifierWithPath
-    new SimplifierWithPCImpl(self.trees, self.symbols, self.trees, self.trees)(using popts)
+//    class SimplifierWithPCImpl(override val trees: self.trees.type,
+//                               override val symbols: self.symbols.type,
+//                               override val s: self.trees.type,
+//                               override val t: self.trees.type)
+//                              (using override val opts: inox.solvers.PurityOptions)
+//      extends transformers.ExpSimplifierWithPC
+//         with SimplifierWithPC
+//        // with inox.transformers.SimplifierWithPath
+//    new SimplifierWithPCImpl(self.trees, self.symbols, self.trees, self.trees)(using popts)
 
-    /*
     class SimplifierWithPCImpl(override val trees: self.trees.type,
                                override val symbols: self.symbols.type,
                                override val s: self.trees.type,
@@ -34,7 +33,6 @@ trait SymbolOps extends inox.ast.SymbolOps with TypeOps { self =>
       override val pp = Env
     }
     new SimplifierWithPCImpl(self.trees, self.symbols, self.trees, self.trees)(using popts)
-    */
   }
 
   protected class StainlessTransformerWithPC[P <: PathLike[P]](
