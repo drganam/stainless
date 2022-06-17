@@ -15,12 +15,8 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     val (re, pr) = e match {
       case Implies(l, r) =>
         val (rl, pl) = simplify(l, path)
-        rl match {
-          case BooleanLiteral(false) if pl => return (BooleanLiteral(true).copiedFrom(e), true) // TODO: On drop r!!!
-          case _ => ()
-        }
-        val newPath = if (pl) path withCond rl else path
-        val (rr, pr) = simplify(r, newPath)
+        // val newPath = if (pl) path withCond rl else path
+        val (rr, pr) = simplify(r, path withCond rl) // TODO: Can we add rl even if it's impure? After all, we do smth similar for if expressions...
         if (pl && pr) (implies(rl, rr).copiedFrom(e), true)
         else (Implies(rl, rr).copiedFrom(e), false)
       case _ => super.simplify(e, path)
@@ -335,6 +331,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
         case IsConstructor(e, id) =>
           Signature(Label.IsConstructor(id), Seq(codeOf(e)))
         case IfExpr(cond, thenn, elze) =>
+          // TODO: In case of purity, we can simplify things, akin to what is done in SimplifierWithPC...
           Signature(Label.IfExpr, Seq(codeOf(cond), codeOf(thenn), codeOf(elze)))
         case Application(callee, args) =>
           Signature(Label.Application, Seq(codeOf(callee)) ++ args.map(codeOf))
@@ -365,6 +362,8 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
         case Not(e) => pNeg(e)
         case Implies(e1, e2) =>
           code2sig(codeOf(Or(Not(e1), e2)))
+
+        // TODO: Are we actually allowed to do these simp.? After all, they may be impure expressions...
 
         case Equals(e1, e2) =>
           val c1 = codeOf(e1)
