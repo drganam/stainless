@@ -8,6 +8,8 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
 
   override val pp: PathProvider[Env] = Env
 
+  import OCBSL.{given, _}
+
   private val ocbslTL = ThreadLocal.withInitial(() => new OCBSL)
   private val ocbsl = ocbslTL.get()
 
@@ -37,12 +39,12 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
       // TODO: Pk n'ajoute-t-on pas tous les bdgs?
       //  ~> p-e parce que le Let case n'exploite pas ces infos?
       case (vd, expr @ (_: ADT | _: Tuple | _: Lambda | _: FiniteArray | _: LargeArray)) =>
-        val c = ocbsl.codeOf(expr)(using exprCode)
+        val c = ocbsl.codeOf(expr)(using Subst(exprCode))
         Env(conditions, exprSubst + (vd.toVariable -> expr), exprCode + (vd.toVariable -> c))
       case (vd, v: Variable) =>
         val exp = expand(v)
         if (v != exp) {
-          val c = ocbsl.codeOf(exp)(using exprCode)
+          val c = ocbsl.codeOf(exp)(using Subst(exprCode))
           Env(conditions, exprSubst + (vd.toVariable -> exp), exprCode + (vd.toVariable -> c))
         } else this
       case _ => this
@@ -53,7 +55,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     // TODO: On pourra supposer que cond a été simplifié avant
     // TODO: Et si cond est impure???
     override def withCond(cond: Expr): Env = {
-      val codeCond = ocbsl.codeOf(cond)(using exprCode)
+      val codeCond = ocbsl.codeOf(cond)(using Subst(exprCode))
 //      println("============================")
 //      println(s"Donné $cond")
 //      println(s"Code pour $cond   ~~>   $codeCond")
@@ -73,7 +75,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
 
     // TODO: Peut-on supposer que expr a été simplifié??? Il semblerait que non!!!!
     // TODO: Quid purity??? p.ex. size(l) ==> size(l) se fait transformer en true!!!!
-    override def implies(expr: Expr): Boolean = ocbsl.implies(conditions, ocbsl.codeOf(expr)(using exprCode))
+    override def implies(expr: Expr): Boolean = ocbsl.implies(conditions, ocbsl.codeOf(expr)(using Subst(exprCode)))
   }
 
   object Env extends PathProvider[Env] {
@@ -85,6 +87,8 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
   // TODO: Le gag: comment repr. un lambda? Car la sol. naive semble fausse!!!
   enum Label {
     case Var(v: Variable)
+    case IndexedVar(i: Int)
+    case Let // Indexed
     case Tuple
     case ADT(id: Identifier, tps: Seq[Type])
     case ADTSelector(selector: Identifier)
@@ -93,6 +97,9 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     case IsConstructor(id: Identifier)
     case IfExpr
     case Application
+    case Lambda // Indexed
+    case Choose // Indexed
+    case Forall // Indexed
 
     case Or
     case Not
@@ -144,12 +151,22 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     case Unknown(id: Int)
   }
 
+  object OCBSL {
+    // `Code` wrapped here to avoid accidental conversion from Int to Code
+    opaque type Code = Int
 
-  opaque type Code = Int
+    object Code {
+      def fromInt(i: Int): Code = i
+    }
 
-  case class Signature(label: Label, children: Seq[Code])
+    given Ordering[Code] = summon[Ordering[Int]]
 
-  private class OCBSL {
+    case class Signature(label: Label, children: Seq[Code])
+
+    case class Subst(free: Map[Variable, Code], bound: Map[Variable, Int] = Map.empty, nestingLevel: Int = 0)
+  }
+
+  class OCBSL {
     import scala.collection.mutable
 
     // TODO: Comment mélanger caching et simplification (p.ex. simplifiedDisjunction)?
@@ -166,23 +183,10 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
 
     private var unknownCounter = 0
 
-    // TODO: Au lieu de balader cette map, pourrait-on envisager de la mettre comme un field?
-    //    ~> non! les let bindings sont "temporaire"!!!
-    def codeOf(e: Expr)(using Map[Variable, Code]): Code = codes.getOrElseUpdate(e, {
+    def codeOf(e: Expr)(using Subst): Code = codes.getOrElseUpdate(e, {
       // TODO: ok?
       val pDisjRes = pDisj(e)
-      val res = simplifiedDisjunction(pDisjRes.toSet)
-      res
-      /*
-      val l = pDisj(e).sorted.distinct.filter(_ != falseCode)
-      if (l.isEmpty) falseCode
-      else if (l.size == 1) l.head
-      else if (l.contains(trueCode) || checkForContradiction(l)) trueCode
-      else {
-        val sig = Signature(Label.Or, l)
-        updateCodesSig(sig)
-      }
-      */
+      simplifiedDisjunction(pDisjRes.toSet)
     })
 
     // TODO: Pk ce truc est fait dans codeOf mais pas dans pDisj?
@@ -237,7 +241,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     // TODO: Cela suppose que c'est une disjunction, mais c'est p-e pas le cas??? Ca peut etre une expr d'un autre type!!!
     // TODO: Ok?
     // TODO: Cache?
-    def pDisj(e: Expr)(using Map[Variable, Code]): Seq[Code] = {
+    def pDisj(e: Expr)(using Subst): Seq[Code] = {
       computeSignature(e) match {
         case Signature(Label.Or, children) => children
         case sig => Seq(updateCodesSig(sig))
@@ -245,7 +249,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     }
 
     // TODO: Signature de Not(child)
-    def pNeg(child: Expr)(using Map[Variable, Code]): Signature = {
+    def pNeg(child: Expr)(using Subst): Signature = {
       codes.get(child) match {
         case Some(c) => return pNegNormal(c)
         case None => ()
@@ -301,7 +305,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     }
 
     // TODO: Est-ce correct de faire ça?
-    def computeSignature(e: Expr)(using subst: Map[Variable, Code]): Signature = {
+    def computeSignature(e: Expr)(using subst: Subst): Signature = {
       codes.get(e).map(code2sig) match {
         case Some(sig) => return sig
         case None => ()
@@ -315,7 +319,13 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
       // TODO: Check label (pour voir s'il n'y a pas d'erreur de copié/collé)
       val sig = e match {
         case v: Variable =>
-          subst.get(v).map(code2sig)
+          subst.free.get(v).map(code2sig) // Check if `v` is a "free" variable (free w.r.t. OCBSL, but bound w.r.t. Env)
+            // Check if `v` is bound to a let-binding
+            .orElse(subst.bound.get(v).map { i =>
+              val sig = Signature(Label.IndexedVar(subst.nestingLevel - i), Seq.empty)
+              updateCodesSig(sig)
+              sig
+            })
             .getOrElse(Signature(Label.Var(v), Seq.empty))
         case Tuple(args) =>
           Signature(Label.Tuple, args.map(codeOf))
@@ -326,7 +336,6 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
         case FunctionInvocation(id, tps, args) =>
           Signature(Label.FunctionInvocation(id, tps), args.map(codeOf))
 
-        // TODO: lambda, choose, forall?
 
         case IsConstructor(e, id) =>
           Signature(Label.IsConstructor(id), Seq(codeOf(e)))
@@ -341,6 +350,29 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
 //          val cE = codeOf(e)
 //          val cB = codeOf(body)(using subst + (vd.toVariable -> cE))
 //          code2sig(cB)
+
+        case Let(vd, e, body) =>
+          val cE = codeOf(e)
+          val newSubst = Subst(subst.free, subst.bound + (vd.toVariable -> subst.nestingLevel), subst.nestingLevel + 1)
+          val cB = codeOf(body)(using newSubst)
+          Signature(Label.Let, Seq(cE, cB))
+
+        case Lambda(params, body) =>
+          // Note: params may be empty, which is fine (the nesting level will not increase)
+          val newSubst = Subst(subst.free,
+            subst.bound ++ params.zipWithIndex.map((vd, i) => vd.toVariable -> (subst.nestingLevel + i)).toMap,
+            subst.nestingLevel + params.size)
+          Signature(Label.Lambda, Seq(codeOf(body)(using newSubst)))
+
+        case Choose(res, pred) =>
+          val newSubst = Subst(subst.free, subst.bound + (res.toVariable -> subst.nestingLevel), subst.nestingLevel + 1)
+          Signature(Label.Choose, Seq(codeOf(pred)(using newSubst)))
+
+        case Forall(params, body) =>
+          val newSubst = Subst(subst.free,
+            subst.bound ++ params.zipWithIndex.map((vd, i) => vd.toVariable -> (subst.nestingLevel + i)).toMap,
+            subst.nestingLevel + params.size)
+          Signature(Label.Forall, Seq(codeOf(body)(using newSubst)))
 
         // TODO: Problème: ces (futures) simplifications ne sont appelées que lorsque l'on fait un withCond etc. et ne font pas partie intégrante de simplify!!!
         // TODO: Problème: ces (futures) simplifications ne sont appelées que lorsque l'on fait un withCond etc. et ne font pas partie intégrante de simplify!!!
@@ -511,7 +543,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
       sig
     }
 
-    def codeOfIntLit(lit: BigInt, tpe: Type)(using Map[Variable, Code]): Code = codeOf(intLitOfType(lit, tpe))
+    def codeOfIntLit(lit: BigInt, tpe: Type)(using Subst): Code = codeOf(intLitOfType(lit, tpe))
 
     def intLitOfType(lit: BigInt, tpe: Type): Expr = tpe match {
       case IntegerType() => IntegerLiteral(lit)
@@ -531,7 +563,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
 
     def updateCodesSig(sig: Signature): Code = {
       sig2code.getOrElseUpdate(sig, {
-        val newCode: Code = sig2code.size
+        val newCode = Code.fromInt(sig2code.size)
         assert(!code2sig.contains(newCode))
         code2sig += newCode -> sig
         newCode
