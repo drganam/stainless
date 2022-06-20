@@ -208,7 +208,10 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
       assert(lhs.forall(code2sig.contains))
       assert(code2sig.contains(rhs))
       if (lhs.isEmpty) rhs == trueCode
-      else simplifiedDisjunction(lhs + rhs) == rhs
+      else {
+        val negDisj = lhs.map(c => updateCodesSig(pNegNormal(c)))
+        simplifiedDisjunction(negDisj + rhs) == rhs
+      }
     }
 
     def negatedConjunction(conj: Set[Code]): Code = {

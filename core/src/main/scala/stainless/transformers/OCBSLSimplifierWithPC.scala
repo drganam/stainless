@@ -171,23 +171,28 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
 
   class OCBSL {
     import scala.collection.mutable
+    import Purity._
 
     // TODO: Comment mélanger caching et simplification (p.ex. simplifiedDisjunction)?
 
-    private val purityCache = mutable.Map.empty[Identifier, Boolean]
-    private val blockedBy = mutable.Map.empty[Identifier, Set[Identifier]] // K = fn qui est bloqué par les fn dans V
-    private val blocking = mutable.Map.empty[Identifier, Set[Identifier]] // K = fn qui bloque les fn dans V
-    private val codes = mutable.Map.empty[Expr, (Code, Boolean)]
-    private val sig2code = mutable.Map.empty[Signature, (Code, Boolean)]
+    private val codes = mutable.Map.empty[Expr, Code]
+    private val sig2code = mutable.Map.empty[Signature, Code]
     private val code2sig = mutable.Map.empty[Code, Signature]
     private val sizeCache = mutable.Map.empty[Expr, Int]
 
     private val falseSig = Signature(Label.Lit(BooleanLiteral(false)), Seq.empty)
     private val trueSig = Signature(Label.Lit(BooleanLiteral(true)), Seq.empty)
-    private val falseCode = updateCodesSig(falseSig, isPure = true)
-    private val trueCode = updateCodesSig(trueSig, isPure = true)
+    private val falseCode = updateCodesSig(falseSig, Pure)
+    private val trueCode = updateCodesSig(trueSig, Pure)
 
     private var unknownCounter = 0
+
+    private val purityCache = mutable.Map.empty[Identifier, Boolean]
+    private val codePurityCache = mutable.Map.empty[Code, Boolean]
+    private val fnBlockedBy = mutable.Map.empty[Identifier, Set[Identifier]] // K = fn qui est bloqué par les fn dans V
+    private val codeBlockedBy = mutable.Map.empty[Code, Set[Identifier]] // K = code qui est bloqué par les fn dans V
+    private val blocking = mutable.Map.empty[Identifier, (Set[Identifier], Set[Code])] // K = fn qui bloque les fn et les codes dans V
+    private val visiting = mutable.Set.empty[Identifier]
 
     enum Purity {
       case Pure
@@ -206,95 +211,118 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       }
     }
 
-    import Purity._
+    object Purity {
+      def fold(xs: Seq[Purity]): Purity = xs.foldLeft(Pure)(_ ++ _)
+      def fromBoolean(isPure: Boolean): Purity = if (isPure) Pure else Impure
+    }
 
-    def codeOf(e: Expr)(using Subst): (Code, Boolean) = codes.getOrElseUpdate(e, {
-      // TODO: ok?
-//      val pDisjRes = pDisj(e)
-//      simplifiedDisjunction(pDisjRes.toSet)
-      ???
-    })
+    def codePurity(c: Code): Purity = {
+      assert(code2sig.contains(c))
+      codePurityCache.get(c)
+        .map(fromBoolean)
+        .getOrElse(Delayed(codeBlockedBy(c)))
+    }
 
-    // TODO: Subst map
-    // TODO: Il faudrait egalement retourner les code?
-    def isPure(e: Expr, visiting: Set[Identifier]): Purity = {
-      e match {
-        case FunctionInvocation(id, _, args) =>
-          val pargs = args.foldLeft(Pure)((p, e) => p ++ isPure(e, visiting))
-          lazy val call = {
-            if (visiting.contains(id)) {
-              if (!opts.assumeChecked) Impure
-              else Delayed(Set(id))
-            }
-            else isFnPure(id, visiting)
-          }
-          pargs ++ call
-
-        case _ =>
-          ???
+    def codeOf(e: Expr)(using Subst): (Code, Purity) = {
+      codes.get(e) match {
+        case Some(c) =>
+          (c, codePurity(c))
+        case None =>
+          // TODO: ok?
+          val (c, p) = simplifiedDisjunction(pDisj(e))
+          // TODO: Quid purity????
+          codes += e -> c
+          (c, p)
       }
     }
 
-    def isFnPure(fn: Identifier, visiting: Set[Identifier]): Purity = purityCache.get(fn) match {
-      case Some(true) => Pure
-      case Some(false) => Impure
-      case None =>
-        assert(!visiting.contains(fn))
-        assert(!blockedBy.contains(fn))
-        assert(!blocking.contains(fn))
-        isPure(getFunction(fn).fullBody, visiting + fn) match {
-          case Pure =>
-            purityCache += fn -> true
-            Pure
-          case Impure =>
-            purityCache += fn -> false
-            Impure
-          case Delayed(blockers0) =>
-            assert(blockers0.nonEmpty)
-            assert(opts.assumeChecked)
-            assert(!blockedBy.contains(fn))
-            val blockersWoCurr = blockers0 - fn
+    def isPure(e: Expr)(using Subst): Purity = codeOf(e)._2
 
-            if (blockers0.contains(fn)) {
-              assert(blocking.contains(fn))
-              val blockedByThisFn = blocking.remove(fn).get
-              if (blockersWoCurr.isEmpty) {
-                purityCache += fn -> true
-                for (blocked <- blockedByThisFn) {
-                  assert(blockedBy.contains(blocked))
-                  assert(blockedBy(blocked) == Set(fn))
-                  blockedBy -= blocked
-                }
-                Pure
-              } else {
-                // On s'ajoute à la liste des bloqués
-                blockedBy += fn -> blockersWoCurr
-                for (blocker <- blockersWoCurr) {
-                  val upd = blocking.getOrElse(blocker, Set.empty) + fn
-                  blocking += blocker -> upd
-                }
-                // On upd. les bloqués pour qu'ils pointent vers ceux qui nous bloquent, et pas nous.
-                for (blocked <- blockedByThisFn) {
-                  assert(blockedBy.contains(blocked))
-                  val upd = blockedBy(blocked) - fn ++ blockersWoCurr
-                  blockedBy += blocked -> upd
-                }
-                Delayed(blockersWoCurr)
-              }
-            } else {
-              assert(!blocking.contains(fn))
-              blockedBy += fn -> blockers0
-              for (blocker <- blockers0) {
-                val upd = blocking.getOrElse(blocker, Set.empty) + fn
-                blocking += blocker -> upd
-              }
-              Delayed(blockers0)
-            }
+    def isFnPure(fn: Identifier)(using Subst): Purity = {
+      def resolvedPurity(isPure: Boolean): Unit = {
+        if (blocking.contains(fn)) {
+          val (blockedFns, blockedCodes) = blocking.remove(fn).get
+          purityCache += fn -> isPure
+          for (blockedFn <- blockedFns) {
+            assert(fnBlockedBy.contains(blockedFn))
+            assert(fnBlockedBy(blockedFn) == Set(fn))
+            fnBlockedBy -= blockedFn
+            purityCache += blockedFn -> isPure
+          }
+          for (blockedCode <- blockedCodes) {
+            assert(codeBlockedBy.contains(blockedCode))
+            assert(codeBlockedBy(blockedCode) == Set(fn))
+            codeBlockedBy -= blockedCode
+            codePurityCache += blockedCode -> isPure
+          }
         }
+      }
+      def addToBlocked(blockers: Set[Identifier]): Unit = {
+        assert(!blockers.contains(fn))
+        // On s'ajoute à la liste des bloqués
+        fnBlockedBy += fn -> blockers
+        for (blocker <- blockers) {
+          val (blockedFns, blockedCodes) = blocking.getOrElse(blocker, (Set.empty, Set.empty))
+          blocking += blocker -> (blockedFns + fn, blockedCodes)
+        }
+
+        // On upd. les bloqués pour qu'ils pointent vers ceux qui nous bloquent, et pas nous.
+        val (blockedFnsByThisFn, blockedCodeByThisCode) = blocking.remove(fn).getOrElse((Set.empty, Set.empty))
+        for (blockedFn <- blockedFnsByThisFn) {
+          assert(fnBlockedBy.contains(blockedFn))
+          val upd = fnBlockedBy(blockedFn) - fn ++ blockers
+          fnBlockedBy += blockedFn -> upd
+        }
+        for (blockedCode <- blockedCodeByThisCode) {
+          assert(codeBlockedBy.contains(blockedCode))
+          val upd = codeBlockedBy(blockedCode) - fn ++ blockers
+          codeBlockedBy += blockedCode -> upd
+        }
+      }
+
+      purityCache.get(fn) match {
+        case Some(true) => Pure
+        case Some(false) => Impure
+        case None =>
+          assert(!visiting.contains(fn))
+          assert(!fnBlockedBy.contains(fn))
+          assert(!blocking.contains(fn))
+          visiting += fn
+          val res = isPure(getFunction(fn).fullBody)
+          visiting -= fn
+          res match {
+            case Pure =>
+              resolvedPurity(isPure = true)
+              Pure
+            case Impure =>
+              resolvedPurity(isPure = false)
+              Impure
+            case Delayed(blockers0) =>
+              assert(blockers0.nonEmpty)
+              assert(opts.assumeChecked)
+              assert(!fnBlockedBy.contains(fn))
+              val blockersWoCurr = blockers0 - fn
+
+              if (blockers0.contains(fn)) {
+                assert(blocking.contains(fn))
+                if (blockersWoCurr.isEmpty) {
+                  resolvedPurity(isPure = true)
+                  Pure
+                } else {
+                  addToBlocked(blockersWoCurr)
+                  Delayed(blockersWoCurr)
+                }
+              } else {
+                assert(!blocking.contains(fn))
+                addToBlocked(blockers0)
+                Delayed(blockers0)
+              }
+          }
+      }
     }
 
     // TODO: Pk ce truc est fait dans codeOf mais pas dans pDisj?
-    def simplifiedDisjunction(disj: Set[Code]): Code = {
+    def simplifiedDisjunction(disj: Set[(Code, Purity)]): (Code, Purity) = {
       // TODO: Caching?
       // TODO: Il faudra avoir la purity pour chacune de ces disjs
 //      val disj1 = disj.filter(_ != falseCode)
@@ -308,12 +336,9 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       ???
     }
 
-    // TODO: Est-ce correct de faire ça?
-    def computeSignature(e: Expr)(using subst: Subst): (Signature, Boolean) = {
-      ???
-      /*
-      codes.get(e).map(code2sig) match {
-        case Some(sig) => return sig
+    def computeSignature(e: Expr)(using subst: Subst): (Signature, Purity) = {
+      codes.get(e).map(c => (code2sig(c), codePurity(c))) match {
+        case Some((sig, purity)) => return (sig, purity)
         case None => ()
       }
 
@@ -322,28 +347,48 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       lazy val zeroSig = code2sig(zero)
       lazy val oneSig = code2sig(one)
 
-      val sig = e match {
+      // TODO: Utiliser des simplification similaires à SimplifierWithPC
+      val (sig, purity) = e match {
         case v: Variable =>
-          subst.free.get(v).map(code2sig) // Check if `v` is a "free" variable (free w.r.t. OCBSL, but bound w.r.t. Env)
+          val sig = subst.free.get(v).map(code2sig) // Check if `v` is a "free" variable (free w.r.t. OCBSL, but bound w.r.t. Env)
             // Check if `v` is bound to a let-binding
             .orElse(subst.bound.get(v).map { i =>
               val sig = Signature(Label.IndexedVar(subst.nestingLevel - i), Seq.empty)
-              updateCodesSig(sig)
+              updateCodesSig(sig, Pure)
               sig
             })
             .getOrElse(Signature(Label.Var(v), Seq.empty))
+          (sig, Pure)
+
         case Tuple(args) =>
-          Signature(Label.Tuple, args.map(codeOf))
+          val (cs, ps) = args.map(codeOf).unzip
+          (Signature(Label.Tuple, cs), fold(ps))
         case ADT(id, tps, args) =>
-          Signature(Label.ADT(id, tps), args.map(codeOf))
+          val (cs, ps) = args.map(codeOf).unzip
+          (Signature(Label.ADT(id, tps), cs), fold(ps))
         case ADTSelector(e, selector) =>
-          Signature(Label.ADTSelector(selector), Seq(codeOf(e)))
+          val (c, p) = codeOf(e)
+          (Signature(Label.ADTSelector(selector), Seq(c)), p)
         case FunctionInvocation(id, tps, args) =>
-          Signature(Label.FunctionInvocation(id, tps), args.map(codeOf))
+          val (cs, ps) = args.map(codeOf).unzip
+          lazy val callPurity = {
+            if (visiting.contains(id)) {
+              if (!opts.assumeChecked) Impure
+              else Delayed(Set(id))
+            }
+            else isFnPure(id)
+          }
+          val purity = fold(ps) ++ callPurity
+          (Signature(Label.FunctionInvocation(id, tps), cs), purity)
 
-
+        // TODO: Utiliser qqchose de similaire à isConstructor dans SimplifierWithPC
         case IsConstructor(e, id) =>
-          Signature(Label.IsConstructor(id), Seq(codeOf(e)))
+          val (c, p) = codeOf(e)
+          (Signature(Label.IsConstructor(id), Seq(c)), p)
+
+        // TODO: Pour les cas ou on a besoin d'une réponse "tout de suite" pour procéder à des simplification, comment s'y prendre???
+
+        /*
         case IfExpr(cond, thenn, elze) =>
           Signature(Label.IfExpr, Seq(codeOf(cond), codeOf(thenn), codeOf(elze)))
         case Application(callee, args) =>
@@ -372,9 +417,6 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
             subst.nestingLevel + params.size)
           Signature(Label.Forall, Seq(codeOf(body)(using newSubst)))
 
-        // TODO: Problème: ces (futures) simplifications ne sont appelées que lorsque l'on fait un withCond etc. et ne font pas partie intégrante de simplify!!!
-        // TODO: Problème: ces (futures) simplifications ne sont appelées que lorsque l'on fait un withCond etc. et ne font pas partie intégrante de simplify!!!
-
         // TODO: Annotated peut empecher certaines simplif. non? Voir la PR de Georg.
         // TODO: On pourrait p-e ignorer Annotated? De toute façon, si c'est pour avoir des DropVCs, cela ne change rien dans notre cas de figure?
         //  -> sauf p-e si on fait un "uncodeOf" et qu'on a besoin de restaurer certaines annotation, mais là on pourrait p-e envisager
@@ -392,8 +434,6 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
         case Not(e) => pNeg(e)
         case Implies(e1, e2) =>
           code2sig(codeOf(Or(Not(e1), e2)))
-
-        // TODO: Are we actually allowed to do these simp.? After all, they may be impure expressions...
 
         case Equals(e1, e2) =>
           val c1 = codeOf(e1)
@@ -535,18 +575,25 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
           val sig = Signature(Label.Unknown(unknownCounter), Seq.empty)
           unknownCounter += 1
           sig
+        */
       }
 
-      updateCodesSig(sig)
-      sig
-      */
+      updateCodesSig(sig, purity)
+      (sig, purity)
     }
 
     def implies(lhs: Set[Code], rhs: Code): Boolean = {
       assert(lhs.forall(code2sig.contains))
       assert(code2sig.contains(rhs))
       if (lhs.isEmpty) rhs == trueCode
-      else simplifiedDisjunction(lhs + rhs) == rhs
+      else {
+        val negDisj = lhs.map { c =>
+          val p = codePurity(c)
+          val negCode = updateCodesSig(pNegNormal(c), p)
+          (negCode, p)
+        }
+        simplifiedDisjunction(negDisj + ((rhs, codePurity(rhs)))) == rhs
+      }
     }
 
     def negatedConjunction(conj: Set[Code]): Code = {
@@ -582,7 +629,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
     // TODO: Cela suppose que c'est une disjunction, mais c'est p-e pas le cas??? Ca peut etre une expr d'un autre type!!!
     // TODO: Ok?
     // TODO: Cache?
-    def pDisj(e: Expr)(using Subst): Seq[Code] = {
+    def pDisj(e: Expr)(using Subst): Set[(Code, Purity)] = {
       ???
 //      computeSignature(e) match {
 //        case Signature(Label.Or, children) => children
@@ -591,7 +638,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
     }
 
     // Signature de Not(child)
-    def pNeg(child: Expr)(using Subst): Signature = {
+    def pNeg(child: Expr)(using Subst): (Signature, Purity) = {
       // TODO: Quid de la purity de child? P.ex. si on a !!subChild, on devrait pvoir simplifier cela en subChild, car on ne drop pas subChild
       ???
       /*
@@ -668,15 +715,28 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       case _ => sys.error(s"$tpe is not an integer-like type")
     }
 
-    def updateCodesSig(sig: Signature, isPure: Boolean): Code = {
-      val (c, p) = sig2code.getOrElseUpdate(sig, {
-        val newCode = Code.fromInt(sig2code.size)
-        assert(!code2sig.contains(newCode))
-        code2sig += newCode -> sig
-        (newCode, isPure)
-      })
-      assert(p == isPure)
-      c
+    def updateCodesSig(sig: Signature, purity: Purity): Code = {
+      sig2code.get(sig) match {
+        case Some(c) =>
+          // TODO: Quid purity????
+          c
+        case None =>
+          val newCode = Code.fromInt(sig2code.size)
+          assert(!code2sig.contains(newCode))
+          sig2code += sig -> newCode
+          code2sig += newCode -> sig
+          purity match {
+            case Pure => codePurityCache += newCode -> true
+            case Impure => codePurityCache += newCode -> false
+            case Delayed(blockers) =>
+              codeBlockedBy += newCode -> blockers
+              for (blocker <- blockers) {
+                val (blockedFns, blockedCodes) = blocking.getOrElse(blocker, (Set.empty, Set.empty))
+                blocking += blocker -> (blockedFns, blockedCodes + newCode)
+              }
+          }
+          newCode
+      }
     }
 
     def unAnd(e: Expr): Seq[Expr] = e match {
