@@ -49,6 +49,8 @@ object PartialCompiler {
 
   val program: Expr = Mul(Num(10), Add(Var("x"), Rand(Num(42))))
 
+  // TODO
+  /*
   def left_unbound(y: Int) = partialEval {
     val ctx: Context = Map("y" -> Num(y))
     interpret(program, ctx)(42)                                // Left(Error("Unbound variable: x"))
@@ -62,5 +64,5 @@ object PartialCompiler {
   def right(x: Int) = partialEval {
     interpret(program, Map("x" -> Num(x)))(42)                 // Right(10 * (ctx("x") + random(42)))
   } ensuring { _.isRight }
-
+  */
 }

@@ -77,7 +77,10 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
 
     // TODO: Peut-on supposer que expr a été simplifié??? Il semblerait que non!!!!
     // TODO: Quid purity??? p.ex. size(l) ==> size(l) se fait transformer en true!!!!
-    override def implies(expr: Expr): Boolean = ocbsl.implies(conditions, ocbsl.codeOf(expr)(using Subst(exprCode)))
+    override def implies(expr: Expr): Boolean = {
+      if (expr.getType != BooleanType()) false
+      else ocbsl.implies(conditions, ocbsl.codeOf(expr)(using Subst(exprCode)))
+    }
   }
 
   object Env extends PathProvider[Env] {
@@ -153,6 +156,9 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     case Unknown(id: Int)
   }
 
+  // TODO: Si on fait un summon[Ordering[Int]] dans OCBSL, ça loop...
+  private val intOrdering = summon[Ordering[Int]]
+
   object OCBSL {
     // `Code` wrapped here to avoid accidental conversion from Int to Code
     opaque type Code = Int
@@ -161,7 +167,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
       def fromInt(i: Int): Code = i
     }
 
-    given Ordering[Code] = summon[Ordering[Int]]
+    given Ordering[Code] = intOrdering
 
     case class Signature(label: Label, children: Seq[Code])
 
@@ -209,9 +215,15 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
       assert(code2sig.contains(rhs))
       if (lhs.isEmpty) rhs == trueCode
       else {
-        val negDisj = lhs.map(c => updateCodesSig(pNegNormal(c)))
-        simplifiedDisjunction(negDisj + rhs) == rhs
+        // a ==> b === a && b = a
+        val lhsConj = conjunct(lhs)
+        val rhsLhsConj = conjunct(Set(lhsConj, rhs))
+        rhsLhsConj == lhsConj
       }
+    }
+
+    def conjunct(conj: Set[Code]): Code = {
+      updateCodesSig(pNegNormal(negatedConjunction(conj)))
     }
 
     def negatedConjunction(conj: Set[Code]): Code = {
@@ -350,12 +362,6 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
         case Application(callee, args) =>
           Signature(Label.Application, Seq(codeOf(callee)) ++ args.map(codeOf))
 
-        // TODO: Problématique, car si vd est pas utilisé, on peut drop des constructions "impures"
-//        case Let(vd, e, body) =>
-//          val cE = codeOf(e)
-//          val cB = codeOf(body)(using subst + (vd.toVariable -> cE))
-//          code2sig(cB)
-
         case Let(vd, e, body) =>
           val cE = codeOf(e)
           val newSubst = Subst(subst.free, subst.bound + (vd.toVariable -> subst.nestingLevel), subst.nestingLevel + 1)
@@ -367,7 +373,8 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
           val newSubst = Subst(subst.free,
             subst.bound ++ params.zipWithIndex.map((vd, i) => vd.toVariable -> (subst.nestingLevel + i)).toMap,
             subst.nestingLevel + params.size)
-          Signature(Label.Lambda, Seq(codeOf(body)(using newSubst)))
+          val c = Seq(codeOf(body)(using newSubst))
+          Signature(Label.Lambda, c)
 
         case Choose(res, pred) =>
           val newSubst = Subst(subst.free, subst.bound + (res.toVariable -> subst.nestingLevel), subst.nestingLevel + 1)
@@ -552,6 +559,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
 
     def intLitOfType(lit: BigInt, tpe: Type): Expr = tpe match {
       case IntegerType() => IntegerLiteral(lit)
+      case RealType() => FractionLiteral(lit, 1)
       case BVType(signed, size) =>
         // BVLiteral guards against signed=true and lit < 0, but not against lit not fitting
         // into the given bitwidth (it wrap-around)

@@ -209,6 +209,11 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
           case _ => Impure
         }
       }
+
+      def isDefinitelyPure: Boolean = this match {
+        case Pure => true
+        case _ => false
+      }
     }
 
     object Purity {
@@ -236,9 +241,9 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       }
     }
 
-    def isPure(e: Expr)(using Subst): Purity = codeOf(e)._2
+    def exprPurity(e: Expr)(using Subst): Purity = codeOf(e)._2
 
-    def isFnPure(fn: Identifier)(using Subst): Purity = {
+    def fnPurity(fn: Identifier)(using Subst): Purity = {
       def resolvedPurity(isPure: Boolean): Unit = {
         if (blocking.contains(fn)) {
           val (blockedFns, blockedCodes) = blocking.remove(fn).get
@@ -288,7 +293,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
           assert(!fnBlockedBy.contains(fn))
           assert(!blocking.contains(fn))
           visiting += fn
-          val res = isPure(getFunction(fn).fullBody)
+          val res = exprPurity(getFunction(fn).fullBody)
           visiting -= fn
           res match {
             case Pure =>
@@ -322,6 +327,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
     }
 
     // TODO: Pk ce truc est fait dans codeOf mais pas dans pDisj?
+    // TODO: zipper avec codePurity ferait plus de sens
     def simplifiedDisjunction(disj: Set[(Code, Purity)]): (Code, Purity) = {
       // TODO: Caching?
       // TODO: Il faudra avoir la purity pour chacune de ces disjs
@@ -363,12 +369,15 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
         case Tuple(args) =>
           val (cs, ps) = args.map(codeOf).unzip
           (Signature(Label.Tuple, cs), fold(ps))
+
         case ADT(id, tps, args) =>
           val (cs, ps) = args.map(codeOf).unzip
           (Signature(Label.ADT(id, tps), cs), fold(ps))
+
         case ADTSelector(e, selector) =>
           val (c, p) = codeOf(e)
           (Signature(Label.ADTSelector(selector), Seq(c)), p)
+
         case FunctionInvocation(id, tps, args) =>
           val (cs, ps) = args.map(codeOf).unzip
           lazy val callPurity = {
@@ -376,61 +385,81 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
               if (!opts.assumeChecked) Impure
               else Delayed(Set(id))
             }
-            else isFnPure(id)
+            else fnPurity(id)
           }
           val purity = fold(ps) ++ callPurity
           (Signature(Label.FunctionInvocation(id, tps), cs), purity)
+
+        case Application(callee, args) =>
+          val (cCallee, pCallee) = codeOf(callee)
+          val (cs, ps) = args.map(codeOf).unzip
+          (Signature(Label.Application, cCallee +: cs), pCallee ++ fold(ps))
+
+        // TODO: Pour les cas ou on a besoin d'une réponse "tout de suite" pour procéder à des simplification, comment s'y prendre???
+        case IfExpr(cond, thenn, elze) =>
+          val (cCond, pCond) = codeOf(cond)
+          val (cThen, pThen) = codeOf(thenn)
+          val (cElse, pElse) = codeOf(elze)
+          // Note: on check la purity de `else` parce que c'est elle qu'on va dropper
+          if (cCond == trueCode && pCond.isDefinitelyPure && pElse.isDefinitelyPure)
+            (code2sig(cThen), pThen)
+          else if (cCond == falseCode && pCond.isDefinitelyPure && pThen.isDefinitelyPure)
+            (code2sig(cElse), pElse)
+          else (Signature(Label.IfExpr, Seq(cCond, cThen, cElse)), pCond ++ pThen ++ pElse)
 
         // TODO: Utiliser qqchose de similaire à isConstructor dans SimplifierWithPC
         case IsConstructor(e, id) =>
           val (c, p) = codeOf(e)
           (Signature(Label.IsConstructor(id), Seq(c)), p)
 
-        // TODO: Pour les cas ou on a besoin d'une réponse "tout de suite" pour procéder à des simplification, comment s'y prendre???
-
-        /*
-        case IfExpr(cond, thenn, elze) =>
-          Signature(Label.IfExpr, Seq(codeOf(cond), codeOf(thenn), codeOf(elze)))
-        case Application(callee, args) =>
-          Signature(Label.Application, Seq(codeOf(callee)) ++ args.map(codeOf))
-
+        // TODO: Ok w.r.t purité?
+        // TODO: Plusieurs opti possibles
         case Let(vd, e, body) =>
-          val cE = codeOf(e)
+          val (cE, pE) = codeOf(e)
           val newSubst = Subst(subst.free, subst.bound + (vd.toVariable -> subst.nestingLevel), subst.nestingLevel + 1)
-          val cB = codeOf(body)(using newSubst)
-          Signature(Label.Let, Seq(cE, cB))
+          val (cB, pB) = codeOf(body)(using newSubst)
+          (Signature(Label.Let, Seq(cE, cB)), pE ++ pB)
 
         case Lambda(params, body) =>
           // Note: params may be empty, which is fine (the nesting level will not increase)
           val newSubst = Subst(subst.free,
             subst.bound ++ params.zipWithIndex.map((vd, i) => vd.toVariable -> (subst.nestingLevel + i)).toMap,
             subst.nestingLevel + params.size)
-          Signature(Label.Lambda, Seq(codeOf(body)(using newSubst)))
+          val (c, p) = codeOf(body)(using newSubst)
+          (Signature(Label.Lambda, Seq(c)), p)
 
         case Choose(res, pred) =>
           val newSubst = Subst(subst.free, subst.bound + (res.toVariable -> subst.nestingLevel), subst.nestingLevel + 1)
-          Signature(Label.Choose, Seq(codeOf(pred)(using newSubst)))
+          val (c, p) = codeOf(pred)(using newSubst)
+          (Signature(Label.Choose, Seq(c)), p)
 
         case Forall(params, body) =>
           val newSubst = Subst(subst.free,
             subst.bound ++ params.zipWithIndex.map((vd, i) => vd.toVariable -> (subst.nestingLevel + i)).toMap,
             subst.nestingLevel + params.size)
-          Signature(Label.Forall, Seq(codeOf(body)(using newSubst)))
+          val (c, p) = codeOf(body)(using newSubst)
+          (Signature(Label.Forall, Seq(c)), p)
 
         // TODO: Annotated peut empecher certaines simplif. non? Voir la PR de Georg.
         // TODO: On pourrait p-e ignorer Annotated? De toute façon, si c'est pour avoir des DropVCs, cela ne change rien dans notre cas de figure?
         //  -> sauf p-e si on fait un "uncodeOf" et qu'on a besoin de restaurer certaines annotation, mais là on pourrait p-e envisager
         //  une map ad-hoc qui contient ces infos...?
         case Annotated(e, flags) =>
-          Signature(Label.Annotated(flags), Seq(codeOf(e)))
+          val (c, p) = codeOf(e)
+          (Signature(Label.Annotated(flags), Seq(c)), p)
 
         // TODO: Ne pourrait-on pas envisager certains simplif. ici? Pk "attendre" codeOf?
         case and @ And(_) =>
           val ands = unAnd(and)
-          code2sig(codeOf(Not(Or(ands.map(Not.apply)))))
+          val (c, p) = codeOf(Not(Or(ands.map(Not.apply))))
+          (code2sig(c), p)
         case or @ Or(_) =>
-          val ors = unOr(or)
-          Signature(Label.Or, ors.map(codeOf).sorted) // TODO: checkForContradiction?
+          // TODO: checkForContradiction?
+          // TODO: Pas d'incohérence avec purity? (p.ex. un code qui est pure, mais pas l'autre)?
+          val (cs, ps) = unOr(or).map(codeOf).sortBy(_._1).distinctBy(_._1).unzip
+          (Signature(Label.Or, cs), fold(ps))
+
+        /*
         case Not(e) => pNeg(e)
         case Implies(e1, e2) =>
           code2sig(codeOf(Or(Not(e1), e2)))
