@@ -11,6 +11,8 @@ object MakeFalse {
     require(false)
   }
 
+  // TODO: OCBSL simplifies to false (correct)
+  /*
   def chooseFn[A, B]: A => B = choose[A => B](f => true)
 
   def mkFalse: False = {
@@ -29,4 +31,5 @@ object MakeFalse {
     assert(false)
     ()
   }
+  */
 }

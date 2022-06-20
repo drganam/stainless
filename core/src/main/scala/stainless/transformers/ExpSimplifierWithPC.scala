@@ -34,40 +34,44 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
   }
 
 
-  case class Env(conditions: Set[Code], exprSubst: Map[Variable, Expr], exprCode: Map[Variable, Code]) extends PathLike[Env] with SolvingPath {
+  case class Env(conditions: Set[Code],
+                 exprSubst: Map[Variable, Expr],
+                 exprCode: Map[Variable, Code],
+                 // Note: Order is important (hence Seq)
+                 bound: Seq[Variable]) extends PathLike[Env] with SolvingPath {
     // TODO: On pourra supposer que le binding a été simplifié avant
     override def withBinding(p: (ValDef, Expr)): Env = p match {
       // TODO: Qq binding ajouté
       // TODO: Pk n'ajoute-t-on pas tous les bdgs?
       //  ~> p-e parce que le Let case n'exploite pas ces infos?
       case (vd, expr @ (_: ADT | _: Tuple | _: Lambda | _: FiniteArray | _: LargeArray)) =>
-        val c = ocbsl.codeOf(expr)(using Subst(exprCode))
-        Env(conditions, exprSubst + (vd.toVariable -> expr), exprCode + (vd.toVariable -> c))
+        val c = ocbsl.codeOf(expr)(using mkSubst)
+        Env(conditions, exprSubst + (vd.toVariable -> expr), exprCode + (vd.toVariable -> c), bound)
       case (vd, v: Variable) =>
         val exp = expand(v)
         if (v != exp) {
-          val c = ocbsl.codeOf(exp)(using Subst(exprCode))
-          Env(conditions, exprSubst + (vd.toVariable -> exp), exprCode + (vd.toVariable -> c))
+          val c = ocbsl.codeOf(exp)(using mkSubst)
+          Env(conditions, exprSubst + (vd.toVariable -> exp), exprCode + (vd.toVariable -> c), bound)
         } else this
       case _ => this
     }
 
-    override def withBound(vd: ValDef): Env = this
+    override def withBound(vd: ValDef): Env = Env(conditions, exprSubst, exprCode, bound :+ vd.toVariable)
 
     // TODO: On pourra supposer que cond a été simplifié avant
     // TODO: Et si cond est impure???
     override def withCond(cond: Expr): Env = {
-      val codeCond = ocbsl.codeOf(cond)(using Subst(exprCode))
+      val codeCond = ocbsl.codeOf(cond)(using mkSubst)
 //      println("============================")
 //      println(s"Donné $cond")
 //      println(s"Code pour $cond   ~~>   $codeCond")
 //      println("============================")
-      Env(conditions + codeCond, exprSubst, exprCode)
+      Env(conditions + codeCond, exprSubst, exprCode, bound)
     }
 
-    override def negate: Env = Env(Set(ocbsl.negatedConjunction(conditions)), exprSubst, exprCode)
+    override def negate: Env = Env(Set(ocbsl.negatedConjunction(conditions)), exprSubst, exprCode, bound)
 
-    override def merge(that: Env): Env = Env(conditions ++ that.conditions, exprSubst ++ that.exprSubst, exprCode ++ that.exprCode)
+    override def merge(that: Env): Env = Env(conditions ++ that.conditions, exprSubst ++ that.exprSubst, exprCode ++ that.exprCode, bound)
 
     // TODO: Voir ou est-ce que ce truc est utilisé
     override def expand(expr: Expr): Expr = expr match {
@@ -79,12 +83,17 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
     // TODO: Quid purity??? p.ex. size(l) ==> size(l) se fait transformer en true!!!!
     override def implies(expr: Expr): Boolean = {
       if (expr.getType != BooleanType()) false
-      else ocbsl.implies(conditions, ocbsl.codeOf(expr)(using Subst(exprCode)))
+      else ocbsl.implies(conditions, ocbsl.codeOf(expr)(using mkSubst))
+    }
+
+    def mkSubst: Subst = {
+      val boundMap = bound.zipWithIndex.map((v, i) => v -> i).toMap
+      Subst(exprCode, boundMap, boundMap.size)
     }
   }
 
   object Env extends PathProvider[Env] {
-    def empty: Env = Env(Set.empty, Map.empty, Map.empty)
+    def empty: Env = Env(Set.empty, Map.empty, Map.empty, Seq.empty)
   }
 
   override def initEnv: Env = Env.empty
@@ -191,11 +200,26 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
 
     private var unknownCounter = 0
 
-    def codeOf(e: Expr)(using Subst): Code = codes.getOrElseUpdate(e, {
-      // TODO: ok?
-      val pDisjRes = pDisj(e)
-      simplifiedDisjunction(pDisjRes.toSet)
-    })
+    def codeOf(e: Expr)(using subst: Subst): Code = {
+      def result = {
+        // TODO: ok?
+        val pDisjRes = pDisj(e)
+        simplifiedDisjunction(pDisjRes.toSet)
+      }
+
+      e match {
+        case v: Variable if subst.bound.contains(v) =>
+          // TODO: Cette assertion ne tient pas --' Il semblerait qu'il manque un withBound a quelque part...
+          // TODO: Est-ce que c'est qd meme ok?
+//          if (codes.contains(v)) {
+//            println("Oh no :(")
+//          }
+//          assert(!codes.contains(v))
+          result
+        case _ =>
+          codes.getOrElseUpdate(e, result)
+      }
+    }
 
     // TODO: Pk ce truc est fait dans codeOf mais pas dans pDisj?
     def simplifiedDisjunction(disj: Set[Code]): Code = {
@@ -336,6 +360,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
       // TODO: Check label (pour voir s'il n'y a pas d'erreur de copié/collé)
       val sig = e match {
         case v: Variable =>
+          // TODO: Est-ce que c'est ok d'avoir des indexed var meme a travers plsrs call de computeSignature???
           subst.free.get(v).map(code2sig) // Check if `v` is a "free" variable (free w.r.t. OCBSL, but bound w.r.t. Env)
             // Check if `v` is bound to a let-binding
             .orElse(subst.bound.get(v).map { i =>

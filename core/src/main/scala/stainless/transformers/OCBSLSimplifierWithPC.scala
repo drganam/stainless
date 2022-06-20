@@ -79,7 +79,11 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
 
     // TODO: Peut-on supposer que expr a été simplifié??? Il semblerait que non!!!!
     // TODO: Quid purity??? p.ex. size(l) ==> size(l) se fait transformer en true!!!!
-    override def implies(expr: Expr): Boolean = ??? // ocbsl.implies(conditions, ocbsl.codeOf(expr)(using Subst(exprCode)))
+    override def implies(expr: Expr): Boolean = {
+      // if (expr.getType != BooleanType()) false
+      // ocbsl.implies(conditions, ocbsl.codeOf(expr)(using Subst(exprCode)))
+      ???
+    }
   }
 
   object Env extends PathProvider[Env] {
@@ -154,6 +158,9 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
     case Unknown(id: Int)
   }
 
+  // TODO: Si on fait un summon[Ordering[Int]] dans OCBSL, ça loop...
+  private val intOrdering = summon[Ordering[Int]]
+
   object OCBSL {
     // `Code` wrapped here to avoid accidental conversion from Int to Code
     opaque type Code = Int
@@ -162,7 +169,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       def fromInt(i: Int): Code = i
     }
 
-    given Ordering[Code] = summon[Ordering[Int]]
+    given Ordering[Code] = intOrdering
 
     case class Signature(label: Label, children: Seq[Code])
 
@@ -210,7 +217,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
         }
       }
 
-      def isDefinitelyPure: Boolean = this match {
+      def isPure: Boolean = this match {
         case Pure => true
         case _ => false
       }
@@ -353,6 +360,8 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       lazy val zeroSig = code2sig(zero)
       lazy val oneSig = code2sig(one)
 
+      // TODO: Assume, Match, Require, etc. bref, tout ce qui été géré par SimplifierWithPC!!!
+      // TODO: Env!!!!
       // TODO: Utiliser des simplification similaires à SimplifierWithPC
       val (sig, purity) = e match {
         case v: Variable =>
@@ -401,9 +410,9 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
           val (cThen, pThen) = codeOf(thenn)
           val (cElse, pElse) = codeOf(elze)
           // Note: on check la purity de `else` parce que c'est elle qu'on va dropper
-          if (cCond == trueCode && pCond.isDefinitelyPure && pElse.isDefinitelyPure)
+          if (cCond == trueCode && pCond.isPure && pElse.isPure)
             (code2sig(cThen), pThen)
-          else if (cCond == falseCode && pCond.isDefinitelyPure && pThen.isDefinitelyPure)
+          else if (cCond == falseCode && pCond.isPure && pThen.isPure)
             (code2sig(cElse), pElse)
           else (Signature(Label.IfExpr, Seq(cCond, cThen, cElse)), pCond ++ pThen ++ pElse)
 
@@ -458,153 +467,176 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
           // TODO: Pas d'incohérence avec purity? (p.ex. un code qui est pure, mais pas l'autre)?
           val (cs, ps) = unOr(or).map(codeOf).sortBy(_._1).distinctBy(_._1).unzip
           (Signature(Label.Or, cs), fold(ps))
-
-        /*
         case Not(e) => pNeg(e)
         case Implies(e1, e2) =>
-          code2sig(codeOf(Or(Not(e1), e2)))
-
+          val (c, p) = codeOf(Or(Not(e1), e2))
+          (code2sig(c), p)
         case Equals(e1, e2) =>
-          val c1 = codeOf(e1)
-          val c2 = codeOf(e2)
-          if (c1 == c2) trueSig
-          else Signature(Label.Equals, Seq(c1, c2).sorted)
+          val (c1, p1) = codeOf(e1)
+          val (c2, p2) = codeOf(e2)
+          if (c1 == c2 && p1.isPure && p2.isPure) (trueSig, Pure)
+          else (Signature(Label.Equals, Seq(c1, c2).sorted), p1 ++ p2)
         case LessThan(e1, e2) =>
-          val c1 = codeOf(e1)
-          val c2 = codeOf(e2)
-          if (c1 == c2) falseSig
-          else Signature(Label.LessThan, Seq(c1, c2))
+          val (c1, p1) = codeOf(e1)
+          val (c2, p2) = codeOf(e2)
+          if (c1 == c2 && p1.isPure && p2.isPure) (falseSig, Pure)
+          else (Signature(Label.LessThan, Seq(c1, c2)), p1 ++ p2)
         case GreaterThan(e1, e2) =>
-          val c1 = codeOf(e1)
-          val c2 = codeOf(e2)
-          if (c1 == c2) falseSig
-          else Signature(Label.GreaterThan, Seq(c1, c2))
+          val (c1, p1) = codeOf(e1)
+          val (c2, p2) = codeOf(e2)
+          if (c1 == c2 && p1.isPure && p2.isPure) (falseSig, Pure)
+          else (Signature(Label.GreaterThan, Seq(c1, c2)), p1 ++ p2)
         case LessEquals(e1, e2) =>
-          val c1 = codeOf(e1)
-          val c2 = codeOf(e2)
-          if (c1 == c2) trueSig
-          else Signature(Label.LessEquals, Seq(c1, c2))
+          val (c1, p1) = codeOf(e1)
+          val (c2, p2) = codeOf(e2)
+          if (c1 == c2 && p1.isPure && p2.isPure) (trueSig, Pure)
+          else (Signature(Label.LessEquals, Seq(c1, c2)), p1 ++ p2)
         case GreaterEquals(e1, e2) =>
-          val c1 = codeOf(e1)
-          val c2 = codeOf(e2)
-          if (c1 == c2) trueSig
-          else Signature(Label.GreaterEquals, Seq(c1, c2))
+          val (c1, p1) = codeOf(e1)
+          val (c2, p2) = codeOf(e2)
+          if (c1 == c2 && p1.isPure && p2.isPure) (trueSig, Pure)
+          else (Signature(Label.GreaterEquals, Seq(c1, c2)), p1 ++ p2)
 
+        // TODO: We can do more (such as in simplifyArith)
         case UMinus(UMinus(e)) =>
-          code2sig(codeOf(e))
+          val (c, p) = codeOf(e)
+          // This simp. is Ok even if e is impure, as we are only "peeling off" the UMinus
+          (code2sig(c), p)
         case UMinus(e) =>
-          Signature(Label.UMinus, Seq(codeOf(e)))
+          val (c, p) = codeOf(e)
+          (Signature(Label.UMinus, Seq(c)), p)
+
         case Plus(e1, e2) =>
-          val c1 = codeOf(e1)
-          val c2 = codeOf(e2)
+          val (c1, p1) = codeOf(e1)
+          val (c2, p2) = codeOf(e2)
+          // TODO: Si c1 == zero, alors p1 == Pure, n'est-ce pas? (ditto pr c2)
           if (c1 == zero) code2sig(c2)
           else if (c2 == zero) code2sig(c1)
-          else Signature(Label.Plus, Seq(c1, c2).sorted)
+          else (Signature(Label.Plus, Seq(c1, c2).sorted), p1 ++ p2)
         case Minus(e1, e2) =>
-          val c1 = codeOf(e1)
-          val c2 = codeOf(e2)
-          if (c1 == c2) code2sig(codeOfIntLit(0, e.getType))
-          else Signature(Label.Minus, Seq(c1, c2))
+          val (c1, p1) = codeOf(e1)
+          val (c2, p2) = codeOf(e2)
+          // TODO: Si c1 == c2, alors les deux ont la meme purity non?
+          if (c1 == c2 && p1.isPure && p2.isPure) (code2sig(codeOfIntLit(0, e.getType)), Pure)
+          else (Signature(Label.Minus, Seq(c1, c2)), p1 ++ p2)
         case Times(e1, e2) =>
-          val c1 = codeOf(e1)
-          val c2 = codeOf(e2)
-          if (c1 == zero || c2 == zero) zeroSig
+          val (c1, p1) = codeOf(e1)
+          val (c2, p2) = codeOf(e2)
+          if ((c1 == zero || c2 == zero) && p1.isPure && p2.isPure) zeroSig
           else if (c1 == one) code2sig(c2)
           else if (c2 == one) code2sig(c1)
-          else Signature(Label.Times, Seq(c1, c2).sorted)
+          else (Signature(Label.Times, Seq(c1, c2).sorted), p1 ++ p2)
         case Division(e1, e2) =>
-          val c1 = codeOf(e1)
-          val c2 = codeOf(e2)
-          if (c1 == zero) zeroSig
-          else if (c1 == c2) oneSig
-          else Signature(Label.Division, Seq(c1, c2))
+          val (c1, p1) = codeOf(e1)
+          val (c2, p2) = codeOf(e2)
+          if (c1 == zero && p2.isPure) zeroSig
+          else if (c1 == c2 && p1.isPure && p2.isPure) oneSig
+          else (Signature(Label.Division, Seq(c1, c2)), p1 ++ p2)
         case Remainder(e1, e2) =>
-          val c1 = codeOf(e1)
-          val c2 = codeOf(e2)
-          if (c1 == c2) zeroSig
-          else Signature(Label.Remainder, Seq(c1, c2))
+          val (c1, p1) = codeOf(e1)
+          val (c2, p2) = codeOf(e2)
+          if (c1 == c2 && p1.isPure && p2.isPure) zeroSig
+          else (Signature(Label.Remainder, Seq(c1, c2)), p1 ++ p2)
         case Modulo(e1, e2) =>
-          val c1 = codeOf(e1)
-          val c2 = codeOf(e2)
-          if (c1 == c2) zeroSig
-          else Signature(Label.Modulo, Seq(c1, c2))
+          val (c1, p1) = codeOf(e1)
+          val (c2, p2) = codeOf(e2)
+          if (c1 == c2 && p1.isPure && p2.isPure) zeroSig
+          else (Signature(Label.Modulo, Seq(c1, c2)), p1 ++ p2)
 
         case BVNot(BVNot(e)) =>
-          code2sig(codeOf(e))
+          val (c, p) = codeOf(e)
+          (code2sig(c), p)
         case BVNot(e) =>
-          Signature(Label.BVNot, Seq(codeOf(e)))
+          val (c, p) = codeOf(e)
+          (Signature(Label.BVNot, Seq(c)), p)
         case BVAnd(e1, e2) =>
-          val c1 = codeOf(e1)
-          val c2 = codeOf(e2)
-          if (c1 == c2) code2sig(c1)
-          else if (c1 == zero || c2 == zero) zeroSig
-          else Signature(Label.BVAnd, Seq(c1, c2).sorted)
+          val (c1, p1) = codeOf(e1)
+          val (c2, p2) = codeOf(e2)
+          if (c1 == c2 && p1.isPure && p2.isPure) (code2sig(c1), Pure)
+          else if ((c1 == zero || c2 == zero) && p1.isPure && p2.isPure) zeroSig
+          else (Signature(Label.BVAnd, Seq(c1, c2).sorted), p1 ++ p2)
         case BVOr(e1, e2) =>
-          val c1 = codeOf(e1)
-          val c2 = codeOf(e2)
-          if (c1 == c2) code2sig(c1)
-          else if (c1 == zero) code2sig(c2)
-          else if (c2 == zero) code2sig(c1)
-          else Signature(Label.BVOr, Seq(c1, c2).sorted)
+          val (c1, p1) = codeOf(e1)
+          val (c2, p2) = codeOf(e2)
+          if (c1 == c2 && p1.isPure && p2.isPure) code2sig(c1)
+          else if (c1 == zero) (code2sig(c2), p2)
+          else if (c2 == zero) (code2sig(c1), p1)
+          else (Signature(Label.BVOr, Seq(c1, c2).sorted), p1 ++ p2)
         case BVXor(e1, e2) =>
-          val c1 = codeOf(e1)
-          val c2 = codeOf(e2)
-          if (c1 == c2) zeroSig
-          else if (c1 == zero) code2sig(c2)
-          else if (c2 == zero) code2sig(c1)
-          else Signature(Label.BVXor, Seq(c1, c2).sorted)
+          val (c1, p1) = codeOf(e1)
+          val (c2, p2) = codeOf(e2)
+          if (c1 == c2 && p1.isPure && p2.isPure) zeroSig
+          else if (c1 == zero) (code2sig(c2), p2)
+          else if (c2 == zero) (code2sig(c1), p1)
+          else (Signature(Label.BVXor, Seq(c1, c2).sorted), p1 ++ p2)
         case BVShiftLeft(e1, e2) =>
-          val c1 = codeOf(e1)
-          val c2 = codeOf(e2)
-          if (c2 == zero) code2sig(c1)
-          else Signature(Label.BVShiftLeft, Seq(c1, c2))
+          val (c1, p1) = codeOf(e1)
+          val (c2, p2) = codeOf(e2)
+          if (c2 == zero) (code2sig(c1), p1)
+          else (Signature(Label.BVShiftLeft, Seq(c1, c2)), p1 ++ p2)
         case BVAShiftRight(e1, e2) =>
-          val c1 = codeOf(e1)
-          val c2 = codeOf(e2)
-          if (c2 == zero) code2sig(c1)
-          else Signature(Label.BVAShiftRight, Seq(c1, c2))
+          val (c1, p1) = codeOf(e1)
+          val (c2, p2) = codeOf(e2)
+          if (c2 == zero) (code2sig(c1), p1)
+          else (Signature(Label.BVAShiftRight, Seq(c1, c2)), p1 ++ p2)
         case BVLShiftRight(e1, e2) =>
-          val c1 = codeOf(e1)
-          val c2 = codeOf(e2)
-          if (c2 == zero) code2sig(c1)
-          else Signature(Label.BVLShiftRight, Seq(c1, c2))
+          val (c1, p1) = codeOf(e1)
+          val (c2, p2) = codeOf(e2)
+          if (c2 == zero) (code2sig(c1), p1)
+          else (Signature(Label.BVLShiftRight, Seq(c1, c2)), p1 ++ p2)
 
         case BVNarrowingCast(e, newType) =>
-          Signature(Label.BVNarrowingCast(newType), Seq(codeOf(e)))
+          val (c, p) = codeOf(e)
+          (Signature(Label.BVNarrowingCast(newType), Seq(c)), p)
         case BVWideningCast(e, newType) =>
-          Signature(Label.BVWideningCast(newType), Seq(codeOf(e)))
+          val (c, p) = codeOf(e)
+          (Signature(Label.BVWideningCast(newType), Seq(c)), p)
 
         case BVUnsignedToSigned(e) =>
-          Signature(Label.BVUnsignedToSigned, Seq(codeOf(e)))
+          val (c, p) = codeOf(e)
+          (Signature(Label.BVUnsignedToSigned, Seq(c)), p)
         case BVSignedToUnsigned(e) =>
-          Signature(Label.BVSignedToUnsigned, Seq(codeOf(e)))
+          val (c, p) = codeOf(e)
+          (Signature(Label.BVSignedToUnsigned, Seq(c)), p)
 
         case TupleSelect(e, index) =>
-          Signature(Label.TupleSelect(index), Seq(codeOf(e)))
+          val (c, p) = codeOf(e)
+          (Signature(Label.TupleSelect(index), Seq(c)), p)
 
         case FiniteArray(elems, base) =>
-          Signature(Label.FiniteArray(base), elems.map(codeOf))
+          val (cs, ps) = elems.map(codeOf).unzip
+          (Signature(Label.FiniteArray(base), cs), fold(ps))
+
         case LargeArray(elems, default, size, base) =>
           val elemsSorted = elems.toSeq.sortBy(_._1)
           val elemsIndices = elemsSorted.map(_._1)
-          val elemsCode = elemsSorted.map((_, e) => codeOf(e))
-          Signature(Label.LargeArray(elemsIndices, base), elemsCode ++ Seq(codeOf(default), codeOf(size)))
+          val (codeElems, purityElems) = elemsSorted.map((_, e) => codeOf(e)).unzip
+          val (codeDef, purityDef) = codeOf(default)
+          val (codeSz, puritySz) = codeOf(size)
+          (Signature(Label.LargeArray(elemsIndices, base), codeElems ++ Seq(codeDef, codeSz)), fold(purityElems) ++ purityDef ++ puritySz)
+
         case ArraySelect(array, index) =>
-          Signature(Label.ArraySelect, Seq(codeOf(array), codeOf(index)))
+          val (cArr, pArr) = codeOf(array)
+          val (cIx, pIx) = codeOf(index)
+          (Signature(Label.ArraySelect, Seq(cArr, cIx)), pArr ++ pIx)
         case ArrayUpdated(array, index, value) =>
-          Signature(Label.ArrayUpdated, Seq(codeOf(array), codeOf(index), codeOf(value)))
+          val (cArr, pArr) = codeOf(array)
+          val (cIx, pIx) = codeOf(index)
+          val (cVal, pVal) = codeOf(value)
+          (Signature(Label.ArrayUpdated, Seq(cArr, cIx, cVal)), pArr ++ pIx ++ pVal)
         case ArrayLength(array) =>
-          Signature(Label.ArrayLength, Seq(codeOf(array)))
+          val (cArr, pArr) = codeOf(array)
+          (Signature(Label.ArrayLength, Seq(cArr)), pArr)
 
         case l: Literal[_] =>
-          Signature(Label.Lit(l), Seq.empty)
+          (Signature(Label.Lit(l), Seq.empty), Pure)
 
         case _ =>
           // println(s"Generated an 'unknown' for $e (with id $unknownCounter)")
           val sig = Signature(Label.Unknown(unknownCounter), Seq.empty)
           unknownCounter += 1
-          sig
-        */
+          // TODO: Impure car risque de supprimer qqchose qui peut etre utile? (malgré opts.assumeChecked)
+          (sig, Impure)
       }
 
       updateCodesSig(sig, purity)
@@ -616,13 +648,24 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       assert(code2sig.contains(rhs))
       if (lhs.isEmpty) rhs == trueCode
       else {
-        val negDisj = lhs.map { c =>
-          val p = codePurity(c)
-          val negCode = updateCodesSig(pNegNormal(c), p)
-          (negCode, p)
-        }
-        simplifiedDisjunction(negDisj + ((rhs, codePurity(rhs)))) == rhs
+        // TODO: Quid purité de rhs???
+        // a ==> b === a && b = a
+        val lhsConj = conjunct(lhs)
+        val rhsLhsConj = conjunct(Set(lhsConj, rhs))
+        rhsLhsConj == lhsConj
+
+//        val negDisj = lhs.map { c =>
+//          val p = codePurity(c)
+//          val negCode = updateCodesSig(pNegNormal(c), p)
+//          (negCode, p)
+//        }
+//        simplifiedDisjunction(negDisj + ((rhs, codePurity(rhs)))) == rhs
       }
+    }
+
+    def conjunct(conj: Set[Code]): Code = {
+      // updateCodesSig(pNegNormal(negatedConjunction(conj)))
+      ???
     }
 
     def negatedConjunction(conj: Set[Code]): Code = {
@@ -730,6 +773,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
 
     def intLitOfType(lit: BigInt, tpe: Type): Expr = tpe match {
       case IntegerType() => IntegerLiteral(lit)
+      case RealType() => FractionLiteral(lit, 1)
       case BVType(signed, size) =>
         // BVLiteral guards against signed=true and lit < 0, but not against lit not fitting
         // into the given bitwidth (it wrap-around)
