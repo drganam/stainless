@@ -1,7 +1,7 @@
 package stainless
 package transformers
 
-trait ExpSimplifierWithPC extends Transformer with stainless.transformers.SimplifierWithPC {
+trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.SimplifierWithPC {
   val trees: ast.Trees
   import trees._
   import symbols.{given, _}
@@ -14,15 +14,16 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
   private val ocbsl = ocbslTL.get()
 
   override protected def simplify(e: Expr, path: Env): (Expr, Boolean) = {
-    val (re, pr) = e match {
-      case Implies(l, r) =>
-        val (rl, pl) = simplify(l, path)
-        // val newPath = if (pl) path withCond rl else path
-        val (rr, pr) = simplify(r, path withCond rl) // TODO: Can we add rl even if it's impure? After all, we do smth similar for if expressions...
-        if (pl && pr) (implies(rl, rr).copiedFrom(e), true)
-        else (Implies(rl, rr).copiedFrom(e), false)
-      case _ => super.simplify(e, path)
-    }
+    ???
+//    val (re, pr) = e match {
+//      case Implies(l, r) =>
+//        val (rl, pl) = simplify(l, path)
+//        // val newPath = if (pl) path withCond rl else path
+//        val (rr, pr) = simplify(r, path withCond rl) // TODO: Can we add rl even if it's impure? After all, we do smth similar for if expressions...
+//        if (pl && pr) (implies(rl, rr).copiedFrom(e), true)
+//        else (Implies(rl, rr).copiedFrom(e), false)
+//      case _ => super.simplify(e, path)
+//    }
 
 //    println("============================")
 //    println(s"Simplification de $e:")
@@ -30,13 +31,13 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
 //    println(s"    pure = $pr")
 //    println(s"    simp = $re")
 //    println("============================")
-    (re, pr)
+//    (re, pr)
   }
 
 
   case class Env(conditions: Set[Code], exprSubst: Map[Variable, Expr], exprCode: Map[Variable, Code]) extends PathLike[Env] with SolvingPath {
     // TODO: On pourra supposer que le binding a été simplifié avant
-    override def withBinding(p: (ValDef, Expr)): Env = p match {
+    override def withBinding(p: (ValDef, Expr)): Env = ??? /*p match {
       // TODO: Qq binding ajouté
       // TODO: Pk n'ajoute-t-on pas tous les bdgs?
       //  ~> p-e parce que le Let case n'exploite pas ces infos?
@@ -50,22 +51,23 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
           Env(conditions, exprSubst + (vd.toVariable -> exp), exprCode + (vd.toVariable -> c))
         } else this
       case _ => this
-    }
+    }*/
 
     override def withBound(vd: ValDef): Env = this
 
     // TODO: On pourra supposer que cond a été simplifié avant
     // TODO: Et si cond est impure???
     override def withCond(cond: Expr): Env = {
-      val codeCond = ocbsl.codeOf(cond)(using Subst(exprCode))
-//      println("============================")
-//      println(s"Donné $cond")
-//      println(s"Code pour $cond   ~~>   $codeCond")
-//      println("============================")
-      Env(conditions + codeCond, exprSubst, exprCode)
+      ???
+//      val codeCond = ocbsl.codeOf(cond)(using Subst(exprCode))
+////      println("============================")
+////      println(s"Donné $cond")
+////      println(s"Code pour $cond   ~~>   $codeCond")
+////      println("============================")
+//      Env(conditions + codeCond, exprSubst, exprCode)
     }
 
-    override def negate: Env = Env(Set(ocbsl.negatedConjunction(conditions)), exprSubst, exprCode)
+    override def negate: Env = ??? // Env(Set(ocbsl.negatedConjunction(conditions)), exprSubst, exprCode)
 
     override def merge(that: Env): Env = Env(conditions ++ that.conditions, exprSubst ++ that.exprSubst, exprCode ++ that.exprCode)
 
@@ -77,7 +79,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
 
     // TODO: Peut-on supposer que expr a été simplifié??? Il semblerait que non!!!!
     // TODO: Quid purity??? p.ex. size(l) ==> size(l) se fait transformer en true!!!!
-    override def implies(expr: Expr): Boolean = ocbsl.implies(conditions, ocbsl.codeOf(expr)(using Subst(exprCode)))
+    override def implies(expr: Expr): Boolean = ??? // ocbsl.implies(conditions, ocbsl.codeOf(expr)(using Subst(exprCode)))
   }
 
   object Env extends PathProvider[Env] {
@@ -86,7 +88,6 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
 
   override def initEnv: Env = Env.empty
 
-  // TODO: Le gag: comment repr. un lambda? Car la sol. naive semble fausse!!!
   enum Label {
     case Var(v: Variable)
     case IndexedVar(i: Int)
@@ -173,141 +174,144 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
 
     // TODO: Comment mélanger caching et simplification (p.ex. simplifiedDisjunction)?
 
-    private val codes = mutable.Map.empty[Expr, Code]
-    private val sig2code = mutable.Map.empty[Signature, Code]
+    private val purityCache = mutable.Map.empty[Identifier, Boolean]
+    private val blockedBy = mutable.Map.empty[Identifier, Set[Identifier]] // K = fn qui est bloqué par les fn dans V
+    private val blocking = mutable.Map.empty[Identifier, Set[Identifier]] // K = fn qui bloque les fn dans V
+    private val codes = mutable.Map.empty[Expr, (Code, Boolean)]
+    private val sig2code = mutable.Map.empty[Signature, (Code, Boolean)]
     private val code2sig = mutable.Map.empty[Code, Signature]
     private val sizeCache = mutable.Map.empty[Expr, Int]
 
     private val falseSig = Signature(Label.Lit(BooleanLiteral(false)), Seq.empty)
     private val trueSig = Signature(Label.Lit(BooleanLiteral(true)), Seq.empty)
-    private val falseCode = updateCodesSig(falseSig)
-    private val trueCode = updateCodesSig(trueSig)
+    private val falseCode = updateCodesSig(falseSig, isPure = true)
+    private val trueCode = updateCodesSig(trueSig, isPure = true)
 
     private var unknownCounter = 0
 
-    def codeOf(e: Expr)(using Subst): Code = codes.getOrElseUpdate(e, {
-      // TODO: ok?
-      val pDisjRes = pDisj(e)
-      simplifiedDisjunction(pDisjRes.toSet)
-    })
+    enum Purity {
+      case Pure
+      case Impure
+      case Delayed(blockers: Set[Identifier])
 
-    // TODO: Pk ce truc est fait dans codeOf mais pas dans pDisj?
-    def simplifiedDisjunction(disj: Set[Code]): Code = {
-      // TODO: Caching?
-      val disj1 = disj.filter(_ != falseCode)
-      if (disj1.isEmpty) falseCode
-      else if (disj1.size == 1) disj1.head
-      else if (disj1.contains(trueCode) || checkForContradiction(disj1)) trueCode
-      else {
-        val sig = Signature(Label.Or, disj1.toSeq.sorted)
-        updateCodesSig(sig)
-      }
-    }
-
-    def implies(lhs: Set[Code], rhs: Code): Boolean = {
-      assert(lhs.forall(code2sig.contains))
-      assert(code2sig.contains(rhs))
-      if (lhs.isEmpty) rhs == trueCode
-      else simplifiedDisjunction(lhs + rhs) == rhs
-    }
-
-    def negatedConjunction(conj: Set[Code]): Code = {
-      // TODO: Caching?
-      val negDisj = conj.map(c => updateCodesSig(pNegNormal(c)))
-      simplifiedDisjunction(negDisj)
-    }
-
-    def checkForContradiction(disj: Set[Code]): Boolean = {
-      // TODO: Relativement different par rapport à l'orig
-      val (pos, neg) = disj.foldLeft((Set.empty[Code], Set.empty[Code])) {
-        case ((posAcc, negAcc), c) =>
-          code2sig(c) match {
-            case Signature(Label.Not, Seq(cc)) => (posAcc, negAcc + cc)
-            case _ => (posAcc + c, negAcc)
-          }
-      }
-
-      if (pos.intersect(neg).nonEmpty) true
-      else {
-        neg.exists { negC =>
-          code2sig(negC) match {
-            case Signature(Label.Or, negDisj) =>
-              // TODO: Est-ce vrai? Quid si un meme code apparait dans un truc negatif?
-              negDisj.forall(disj.contains)
-            case _ => false
-          }
+      def ++(that: => Purity): Purity = {
+        if (this == Impure) Impure
+        else (this, that) match { // TODO: Evaluated once or multiple time?
+          case (Pure, Pure) => Pure
+          case (Delayed(s1), Delayed(s2)) => Delayed(s1 ++ s2)
+          case (Delayed(s1), Pure) => Delayed(s1)
+          case (Pure, Delayed(s2)) => Delayed(s2)
+          case _ => Impure
         }
       }
     }
 
-    // TODO: Cela suppose que c'est une disjunction, mais c'est p-e pas le cas??? Ca peut etre une expr d'un autre type!!!
-    // TODO: Ok?
-    // TODO: Cache?
-    def pDisj(e: Expr)(using Subst): Seq[Code] = {
-      computeSignature(e) match {
-        case Signature(Label.Or, children) => children
-        case sig => Seq(updateCodesSig(sig))
-      }
-    }
+    import Purity._
 
-    // TODO: Signature de Not(child)
-    def pNeg(child: Expr)(using Subst): Signature = {
-      codes.get(child) match {
-        case Some(c) => return pNegNormal(c)
-        case None => ()
-      }
+    def codeOf(e: Expr)(using Subst): (Code, Boolean) = codes.getOrElseUpdate(e, {
+      // TODO: ok?
+//      val pDisjRes = pDisj(e)
+//      simplifiedDisjunction(pDisjRes.toSet)
+      ???
+    })
 
-      // TODO: Où devrait-on mettre le caching? C'est appelé par computeSignature donc ça devrait faire l'affaire non?
-
-      child match {
-        case Not(e) => computeSignature(e) // TODO: Orig fait pDisj, mais pDisj et un computeSignature pour nous (du moins, pour le moment)
-        case or @ Or(_) =>
-          // Note: ors cannot be empty (by Or `require`)
-          val ors0 = unOr(or)
-          val ors1 = ors0.sortBy(sizeOf)
-          // TODO: Ici, on fait un filter..distinct.sorted, ce que l'orig ne fait pas vraiment?
-          val r = ors1.tail.flatMap(pDisj)
-            .filter(_ != falseCode)
-            .distinct.sorted
-          if (r.isEmpty) pNeg(ors1.head) // TODO: Caching?
-          else {
-            // TODO: Ok?
-            // TODO: Ressemble pas mal à simplifiedDisjunction
-            val s = (pDisj(ors1.head) ++ r)
-              .filter(_ != falseCode)
-              .distinct.sorted
-            if (s.contains(trueCode) || checkForContradiction(s.toSet)) falseSig
-            else if (s.size == 1) pNegNormal(s.head) // TODO: Ok?
-            else {
-              val orCode = updateCodesSig(Signature(Label.Or, s))
-              Signature(Label.Not, Seq(orCode))
+    // TODO: Subst map
+    // TODO: Il faudrait egalement retourner les code?
+    def isPure(e: Expr, visiting: Set[Identifier]): Purity = {
+      e match {
+        case FunctionInvocation(id, _, args) =>
+          val pargs = args.foldLeft(Pure)((p, e) => p ++ isPure(e, visiting))
+          lazy val call = {
+            if (visiting.contains(id)) {
+              if (!opts.assumeChecked) Impure
+              else Delayed(Set(id))
             }
+            else isFnPure(id, visiting)
           }
+          pargs ++ call
+
         case _ =>
-          // TODO: Ok?
-          computeSignature(child) match {
-            case Signature(Label.Lit(BooleanLiteral(b)), Seq()) =>
-              Signature(Label.Lit(BooleanLiteral(!b)), Seq.empty)
-            case sig =>
-              // TODO: Ok?
-              Signature(Label.Not, Seq(sig2code(sig)))
-          }
+          ???
       }
     }
 
-    // TODO: ok?
-    // TODO: caching?
-    // TODO: En gros la signature de Not(c)
-    def pNegNormal(c: Code): Signature = {
-      assert(code2sig.contains(c))
-      code2sig(c) match {
-        case Signature(Label.Not, Seq(cc)) => code2sig(cc)
-        case Signature(_, _) => Signature(Label.Not, Seq(c)) // TODO: Ok?
-      }
+    def isFnPure(fn: Identifier, visiting: Set[Identifier]): Purity = purityCache.get(fn) match {
+      case Some(true) => Pure
+      case Some(false) => Impure
+      case None =>
+        assert(!visiting.contains(fn))
+        assert(!blockedBy.contains(fn))
+        assert(!blocking.contains(fn))
+        isPure(getFunction(fn).fullBody, visiting + fn) match {
+          case Pure =>
+            purityCache += fn -> true
+            Pure
+          case Impure =>
+            purityCache += fn -> false
+            Impure
+          case Delayed(blockers0) =>
+            assert(blockers0.nonEmpty)
+            assert(opts.assumeChecked)
+            assert(!blockedBy.contains(fn))
+            val blockersWoCurr = blockers0 - fn
+
+            if (blockers0.contains(fn)) {
+              assert(blocking.contains(fn))
+              val blockedByThisFn = blocking.remove(fn).get
+              if (blockersWoCurr.isEmpty) {
+                purityCache += fn -> true
+                for (blocked <- blockedByThisFn) {
+                  assert(blockedBy.contains(blocked))
+                  assert(blockedBy(blocked) == Set(fn))
+                  blockedBy -= blocked
+                }
+                Pure
+              } else {
+                // On s'ajoute à la liste des bloqués
+                blockedBy += fn -> blockersWoCurr
+                for (blocker <- blockersWoCurr) {
+                  val upd = blocking.getOrElse(blocker, Set.empty) + fn
+                  blocking += blocker -> upd
+                }
+                // On upd. les bloqués pour qu'ils pointent vers ceux qui nous bloquent, et pas nous.
+                for (blocked <- blockedByThisFn) {
+                  assert(blockedBy.contains(blocked))
+                  val upd = blockedBy(blocked) - fn ++ blockersWoCurr
+                  blockedBy += blocked -> upd
+                }
+                Delayed(blockersWoCurr)
+              }
+            } else {
+              assert(!blocking.contains(fn))
+              blockedBy += fn -> blockers0
+              for (blocker <- blockers0) {
+                val upd = blocking.getOrElse(blocker, Set.empty) + fn
+                blocking += blocker -> upd
+              }
+              Delayed(blockers0)
+            }
+        }
+    }
+
+    // TODO: Pk ce truc est fait dans codeOf mais pas dans pDisj?
+    def simplifiedDisjunction(disj: Set[Code]): Code = {
+      // TODO: Caching?
+      // TODO: Il faudra avoir la purity pour chacune de ces disjs
+//      val disj1 = disj.filter(_ != falseCode)
+//      if (disj1.isEmpty) falseCode
+//      else if (disj1.size == 1) disj1.head
+//      else if (disj1.contains(trueCode) || checkForContradiction(disj1)) trueCode
+//      else {
+//        val sig = Signature(Label.Or, disj1.toSeq.sorted)
+//        updateCodesSig(sig)
+//      }
+      ???
     }
 
     // TODO: Est-ce correct de faire ça?
-    def computeSignature(e: Expr)(using subst: Subst): Signature = {
+    def computeSignature(e: Expr)(using subst: Subst): (Signature, Boolean) = {
+      ???
+      /*
       codes.get(e).map(code2sig) match {
         case Some(sig) => return sig
         case None => ()
@@ -318,7 +322,6 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
       lazy val zeroSig = code2sig(zero)
       lazy val oneSig = code2sig(one)
 
-      // TODO: Check label (pour voir s'il n'y a pas d'erreur de copié/collé)
       val sig = e match {
         case v: Variable =>
           subst.free.get(v).map(code2sig) // Check if `v` is a "free" variable (free w.r.t. OCBSL, but bound w.r.t. Env)
@@ -342,16 +345,9 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
         case IsConstructor(e, id) =>
           Signature(Label.IsConstructor(id), Seq(codeOf(e)))
         case IfExpr(cond, thenn, elze) =>
-          // TODO: In case of purity, we can simplify things, akin to what is done in SimplifierWithPC...
           Signature(Label.IfExpr, Seq(codeOf(cond), codeOf(thenn), codeOf(elze)))
         case Application(callee, args) =>
           Signature(Label.Application, Seq(codeOf(callee)) ++ args.map(codeOf))
-
-        // TODO: Problématique, car si vd est pas utilisé, on peut drop des constructions "impures"
-//        case Let(vd, e, body) =>
-//          val cE = codeOf(e)
-//          val cB = codeOf(body)(using subst + (vd.toVariable -> cE))
-//          code2sig(cB)
 
         case Let(vd, e, body) =>
           val cE = codeOf(e)
@@ -543,9 +539,118 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
 
       updateCodesSig(sig)
       sig
+      */
     }
 
-    def codeOfIntLit(lit: BigInt, tpe: Type)(using Subst): Code = codeOf(intLitOfType(lit, tpe))
+    def implies(lhs: Set[Code], rhs: Code): Boolean = {
+      assert(lhs.forall(code2sig.contains))
+      assert(code2sig.contains(rhs))
+      if (lhs.isEmpty) rhs == trueCode
+      else simplifiedDisjunction(lhs + rhs) == rhs
+    }
+
+    def negatedConjunction(conj: Set[Code]): Code = {
+      // TODO: Caching?
+//      val negDisj = conj.map(c => updateCodesSig(pNegNormal(c)))
+//      simplifiedDisjunction(negDisj)
+      ???
+    }
+
+    def checkForContradiction(disj: Set[Code]): Boolean = {
+      // TODO: Relativement different par rapport à l'orig
+      val (pos, neg) = disj.foldLeft((Set.empty[Code], Set.empty[Code])) {
+        case ((posAcc, negAcc), c) =>
+          code2sig(c) match {
+            case Signature(Label.Not, Seq(cc)) => (posAcc, negAcc + cc)
+            case _ => (posAcc + c, negAcc)
+          }
+      }
+
+      if (pos.intersect(neg).nonEmpty) true
+      else {
+        neg.exists { negC =>
+          code2sig(negC) match {
+            case Signature(Label.Or, negDisj) =>
+              // TODO: Est-ce vrai? Quid si un meme code apparait dans un truc negatif?
+              negDisj.forall(disj.contains)
+            case _ => false
+          }
+        }
+      }
+    }
+
+    // TODO: Cela suppose que c'est une disjunction, mais c'est p-e pas le cas??? Ca peut etre une expr d'un autre type!!!
+    // TODO: Ok?
+    // TODO: Cache?
+    def pDisj(e: Expr)(using Subst): Seq[Code] = {
+      ???
+//      computeSignature(e) match {
+//        case Signature(Label.Or, children) => children
+//        case sig => Seq(updateCodesSig(sig))
+//      }
+    }
+
+    // Signature de Not(child)
+    def pNeg(child: Expr)(using Subst): Signature = {
+      // TODO: Quid de la purity de child? P.ex. si on a !!subChild, on devrait pvoir simplifier cela en subChild, car on ne drop pas subChild
+      ???
+      /*
+      codes.get(child) match {
+        case Some(c) => return pNegNormal(c)
+        case None => ()
+      }
+
+      // TODO: Où devrait-on mettre le caching? C'est appelé par computeSignature donc ça devrait faire l'affaire non?
+
+      child match {
+        case Not(e) => computeSignature(e) // TODO: Orig fait pDisj, mais pDisj et un computeSignature pour nous (du moins, pour le moment)
+        case or @ Or(_) =>
+          // Note: ors cannot be empty (by Or `require`)
+          val ors0 = unOr(or)
+          val ors1 = ors0.sortBy(sizeOf)
+          // TODO: Ici, on fait un filter..distinct.sorted, ce que l'orig ne fait pas vraiment?
+          val r = ors1.tail.flatMap(pDisj)
+            .filter(_ != falseCode)
+            .distinct.sorted
+          if (r.isEmpty) pNeg(ors1.head) // TODO: Caching?
+          else {
+            // TODO: Ok?
+            // TODO: Ressemble pas mal à simplifiedDisjunction
+            val s = (pDisj(ors1.head) ++ r)
+              .filter(_ != falseCode)
+              .distinct.sorted
+            if (s.contains(trueCode) || checkForContradiction(s.toSet)) falseSig
+            else if (s.size == 1) pNegNormal(s.head) // TODO: Ok?
+            else {
+              val orCode = updateCodesSig(Signature(Label.Or, s))
+              Signature(Label.Not, Seq(orCode))
+            }
+          }
+        case _ =>
+          // TODO: Ok?
+          computeSignature(child) match {
+            case Signature(Label.Lit(BooleanLiteral(b)), Seq()) =>
+              Signature(Label.Lit(BooleanLiteral(!b)), Seq.empty)
+            case sig =>
+              // TODO: Ok?
+              Signature(Label.Not, Seq(sig2code(sig)))
+          }
+      }
+      */
+    }
+
+    // TODO: ok?
+    // TODO: caching?
+    // TODO: En gros la signature de Not(c)
+    def pNegNormal(c: Code): Signature = {
+      assert(code2sig.contains(c))
+      code2sig(c) match {
+        case Signature(Label.Not, Seq(cc)) => code2sig(cc)
+        case Signature(_, _) => Signature(Label.Not, Seq(c)) // TODO: Ok?
+      }
+    }
+
+    def codeOfIntLit(lit: BigInt, tpe: Type)(using Subst): Code = codeOf(intLitOfType(lit, tpe))._1
 
     def intLitOfType(lit: BigInt, tpe: Type): Expr = tpe match {
       case IntegerType() => IntegerLiteral(lit)
@@ -563,13 +668,15 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
       case _ => sys.error(s"$tpe is not an integer-like type")
     }
 
-    def updateCodesSig(sig: Signature): Code = {
-      sig2code.getOrElseUpdate(sig, {
+    def updateCodesSig(sig: Signature, isPure: Boolean): Code = {
+      val (c, p) = sig2code.getOrElseUpdate(sig, {
         val newCode = Code.fromInt(sig2code.size)
         assert(!code2sig.contains(newCode))
         code2sig += newCode -> sig
-        newCode
+        (newCode, isPure)
       })
+      assert(p == isPure)
+      c
     }
 
     def unAnd(e: Expr): Seq[Expr] = e match {

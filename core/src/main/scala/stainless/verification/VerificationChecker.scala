@@ -241,6 +241,10 @@ trait VerificationChecker { self =>
         reporter.debug("Solving with: " + s.name)
       }
 
+      if (cond == BooleanLiteral(true)) {
+        return VCResult(VCStatus.Valid, Some("(trivial)"), Some(0))
+      }
+
       val (time, tryRes) = timers.verification.runAndGetTime {
         if (vc.satisfiability) {
           s.assertCnstr(cond)
