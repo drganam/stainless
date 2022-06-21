@@ -11,7 +11,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
   import OCBSL.{given, _}
 
   private val ocbslTL = ThreadLocal.withInitial(() => new OCBSL)
-  private val ocbsl = ocbslTL.get()
+  private def ocbsl = ocbslTL.get()
 
   override protected def simplify(e: Expr, path: Env): (Expr, Boolean) = {
     val (re, pr) = e match {
@@ -71,7 +71,7 @@ trait ExpSimplifierWithPC extends Transformer with stainless.transformers.Simpli
 
     override def negate: Env = Env(Set(ocbsl.negatedConjunction(conditions)), exprSubst, exprCode, bound)
 
-    override def merge(that: Env): Env = Env(conditions ++ that.conditions, exprSubst ++ that.exprSubst, exprCode ++ that.exprCode, bound)
+    override def merge(that: Env): Env = Env(conditions ++ that.conditions, exprSubst ++ that.exprSubst, exprCode ++ that.exprCode, bound ++ that.bound)
 
     // TODO: Voir ou est-ce que ce truc est utilisé
     override def expand(expr: Expr): Expr = expr match {

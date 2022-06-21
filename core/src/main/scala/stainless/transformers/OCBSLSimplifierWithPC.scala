@@ -11,65 +11,47 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
   import OCBSL.{given, _}
 
   private val ocbslTL = ThreadLocal.withInitial(() => new OCBSL)
-  private val ocbsl = ocbslTL.get()
+  private def ocbsl = ocbslTL.get()
 
   override protected def simplify(e: Expr, path: Env): (Expr, Boolean) = {
     ???
-//    val (re, pr) = e match {
-//      case Implies(l, r) =>
-//        val (rl, pl) = simplify(l, path)
-//        // val newPath = if (pl) path withCond rl else path
-//        val (rr, pr) = simplify(r, path withCond rl) // TODO: Can we add rl even if it's impure? After all, we do smth similar for if expressions...
-//        if (pl && pr) (implies(rl, rr).copiedFrom(e), true)
-//        else (Implies(rl, rr).copiedFrom(e), false)
-//      case _ => super.simplify(e, path)
-//    }
-
-//    println("============================")
-//    println(s"Simplification de $e:")
-//    println(s"Donné $path:")
-//    println(s"    pure = $pr")
-//    println(s"    simp = $re")
-//    println("============================")
-//    (re, pr)
   }
 
-
-  case class Env(conditions: Set[Code], exprSubst: Map[Variable, Expr], exprCode: Map[Variable, Code]) extends PathLike[Env] with SolvingPath {
+  case class Env(conditions: Set[Code],
+                 exprSubst: Map[Variable, Expr],
+                 exprCode: Map[Variable, Code],
+                 // Note: Order is important (hence Seq)
+                 bound: Seq[Variable]) extends PathLike[Env] with SolvingPath {
     // TODO: On pourra supposer que le binding a été simplifié avant
-    override def withBinding(p: (ValDef, Expr)): Env = ??? /*p match {
+    override def withBinding(p: (ValDef, Expr)): Env = p match {
       // TODO: Qq binding ajouté
       // TODO: Pk n'ajoute-t-on pas tous les bdgs?
       //  ~> p-e parce que le Let case n'exploite pas ces infos?
       case (vd, expr @ (_: ADT | _: Tuple | _: Lambda | _: FiniteArray | _: LargeArray)) =>
-        val c = ocbsl.codeOf(expr)(using Subst(exprCode))
-        Env(conditions, exprSubst + (vd.toVariable -> expr), exprCode + (vd.toVariable -> c))
+        // TODO: Quid purity???
+        val (c, _) = ocbsl.codeOf(expr)(using mkSubst)
+        Env(conditions, exprSubst + (vd.toVariable -> expr), exprCode + (vd.toVariable -> c), bound)
       case (vd, v: Variable) =>
         val exp = expand(v)
         if (v != exp) {
-          val c = ocbsl.codeOf(exp)(using Subst(exprCode))
-          Env(conditions, exprSubst + (vd.toVariable -> exp), exprCode + (vd.toVariable -> c))
+          val (c, _) = ocbsl.codeOf(exp)(using mkSubst)
+          Env(conditions, exprSubst + (vd.toVariable -> exp), exprCode + (vd.toVariable -> c), bound)
         } else this
       case _ => this
-    }*/
-
-    override def withBound(vd: ValDef): Env = this
-
-    // TODO: On pourra supposer que cond a été simplifié avant
-    // TODO: Et si cond est impure???
-    override def withCond(cond: Expr): Env = {
-      ???
-//      val codeCond = ocbsl.codeOf(cond)(using Subst(exprCode))
-////      println("============================")
-////      println(s"Donné $cond")
-////      println(s"Code pour $cond   ~~>   $codeCond")
-////      println("============================")
-//      Env(conditions + codeCond, exprSubst, exprCode)
     }
 
-    override def negate: Env = ??? // Env(Set(ocbsl.negatedConjunction(conditions)), exprSubst, exprCode)
+    override def withBound(vd: ValDef): Env = Env(conditions, exprSubst, exprCode, bound :+ vd.toVariable)
 
-    override def merge(that: Env): Env = Env(conditions ++ that.conditions, exprSubst ++ that.exprSubst, exprCode ++ that.exprCode)
+    // TODO: On pourra supposer que cond a été simplifié avant
+    override def withCond(cond: Expr): Env = {
+      // TODO: Et si cond est impure???
+      val (codeCond, _) = ocbsl.codeOf(cond)(using mkSubst)
+      Env(conditions + codeCond, exprSubst, exprCode, bound)
+    }
+
+    override def negate: Env = Env(Set(ocbsl.negatedConjunction(conditions)._1), exprSubst, exprCode, bound)
+
+    override def merge(that: Env): Env = Env(conditions ++ that.conditions, exprSubst ++ that.exprSubst, exprCode ++ that.exprCode, bound ++ that.bound)
 
     // TODO: Voir ou est-ce que ce truc est utilisé
     override def expand(expr: Expr): Expr = expr match {
@@ -80,14 +62,22 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
     // TODO: Peut-on supposer que expr a été simplifié??? Il semblerait que non!!!!
     // TODO: Quid purity??? p.ex. size(l) ==> size(l) se fait transformer en true!!!!
     override def implies(expr: Expr): Boolean = {
-      // if (expr.getType != BooleanType()) false
-      // ocbsl.implies(conditions, ocbsl.codeOf(expr)(using Subst(exprCode)))
-      ???
+       if (expr.getType != BooleanType()) false
+       else {
+         given Subst = mkSubst
+         // TODO: Purity????
+         ocbsl.implies(conditions, ocbsl.codeOf(expr)._1)
+       }
+    }
+
+    def mkSubst: Subst = {
+      val boundMap = bound.zipWithIndex.map((v, i) => v -> i).toMap
+      Subst(exprCode, boundMap, boundMap.size)
     }
   }
 
   object Env extends PathProvider[Env] {
-    def empty: Env = Env(Set.empty, Map.empty, Map.empty)
+    def empty: Env = Env(Set.empty, Map.empty, Map.empty, Seq.empty)
   }
 
   override def initEnv: Env = Env.empty
@@ -235,14 +225,24 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
         .getOrElse(Delayed(codeBlockedBy(c)))
     }
 
-    def codeOf(e: Expr)(using Subst): (Code, Purity) = {
-      codes.get(e) match {
-        case Some(c) =>
-          (c, codePurity(c))
-        case None =>
-          // TODO: ok?
-          val (c, p) = simplifiedDisjunction(pDisj(e))
-          // TODO: Quid purity????
+    def codeOf(e: Expr)(using subst: Subst): (Code, Purity) = {
+      def result = {
+        codes.get(e) match {
+          case Some(c) =>
+            (c, codePurity(c))
+          case None =>
+            simplifiedDisjunction(pDisj(e).toSet)
+        }
+      }
+      e match {
+        case v: Variable if subst.bound.contains(v) =>
+          // TODO: Cette assertion ne tient pas --' Il semblerait qu'il manque un withBound a quelque part...
+          // TODO: Est-ce que c'est qd meme ok?
+          // assert(!codes.contains(v))
+          result
+        case _ =>
+          val (c, p) = result
+          // TODO: Quid purity (cache)????
           codes += e -> c
           (c, p)
       }
@@ -334,19 +334,17 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
     }
 
     // TODO: Pk ce truc est fait dans codeOf mais pas dans pDisj?
-    // TODO: zipper avec codePurity ferait plus de sens
-    def simplifiedDisjunction(disj: Set[(Code, Purity)]): (Code, Purity) = {
+    def simplifiedDisjunction(disj: Set[Code]): (Code, Purity) = {
       // TODO: Caching?
-      // TODO: Il faudra avoir la purity pour chacune de ces disjs
-//      val disj1 = disj.filter(_ != falseCode)
-//      if (disj1.isEmpty) falseCode
-//      else if (disj1.size == 1) disj1.head
-//      else if (disj1.contains(trueCode) || checkForContradiction(disj1)) trueCode
-//      else {
-//        val sig = Signature(Label.Or, disj1.toSeq.sorted)
-//        updateCodesSig(sig)
-//      }
-      ???
+      val purity = fold(disj.map(codePurity).toSeq)
+      val disj1 = disj.filter(_ != falseCode)
+      if (disj1.isEmpty) (falseCode, Pure)
+      else if (disj1.size == 1) (disj1.head, purity)
+      else if (purity.isPure && (disj1.contains(trueCode) || checkForContradiction(disj1))) (trueCode, purity)
+      else {
+        val sig = Signature(Label.Or, disj1.toSeq.sorted)
+        (updateCodesSig(sig, purity), purity)
+      }
     }
 
     def computeSignature(e: Expr)(using subst: Subst): (Signature, Purity) = {
@@ -361,7 +359,10 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       lazy val oneSig = code2sig(one)
 
       // TODO: Assume, Match, Require, etc. bref, tout ce qui été géré par SimplifierWithPC!!!
+      // TODO: Assume, Match, Require, etc. bref, tout ce qui été géré par SimplifierWithPC!!!
       // TODO: Env!!!!
+      // TODO: Env!!!!
+      // TODO: Utiliser des simplification similaires à SimplifierWithPC
       // TODO: Utiliser des simplification similaires à SimplifierWithPC
       val (sig, purity) = e match {
         case v: Variable =>
@@ -379,10 +380,12 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
           val (cs, ps) = args.map(codeOf).unzip
           (Signature(Label.Tuple, cs), fold(ps))
 
+        // TODO: Non, voir SWP
         case ADT(id, tps, args) =>
           val (cs, ps) = args.map(codeOf).unzip
           (Signature(Label.ADT(id, tps), cs), fold(ps))
 
+        // TODO: Non, voir SWP
         case ADTSelector(e, selector) =>
           val (c, p) = codeOf(e)
           (Signature(Label.ADTSelector(selector), Seq(c)), p)
@@ -399,6 +402,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
           val purity = fold(ps) ++ callPurity
           (Signature(Label.FunctionInvocation(id, tps), cs), purity)
 
+        // TODO: Non, voir SWP
         case Application(callee, args) =>
           val (cCallee, pCallee) = codeOf(callee)
           val (cs, ps) = args.map(codeOf).unzip
@@ -421,6 +425,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
           val (c, p) = codeOf(e)
           (Signature(Label.IsConstructor(id), Seq(c)), p)
 
+        // TODO: Non, voir SWP
         // TODO: Ok w.r.t purité?
         // TODO: Plusieurs opti possibles
         case Let(vd, e, body) =>
@@ -429,6 +434,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
           val (cB, pB) = codeOf(body)(using newSubst)
           (Signature(Label.Let, Seq(cE, cB)), pE ++ pB)
 
+        // TODO: Non, voir SWP
         case Lambda(params, body) =>
           // Note: params may be empty, which is fine (the nesting level will not increase)
           val newSubst = Subst(subst.free,
@@ -497,7 +503,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
           if (c1 == c2 && p1.isPure && p2.isPure) (trueSig, Pure)
           else (Signature(Label.GreaterEquals, Seq(c1, c2)), p1 ++ p2)
 
-        // TODO: We can do more (such as in simplifyArith)
+        // TODO: On pourrait faire plus? (cf simplifyArith)
         case UMinus(UMinus(e)) =>
           val (c, p) = codeOf(e)
           // This simp. is Ok even if e is impure, as we are only "peeling off" the UMinus
@@ -650,32 +656,28 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       else {
         // TODO: Quid purité de rhs???
         // a ==> b === a && b = a
-        val lhsConj = conjunct(lhs)
-        val rhsLhsConj = conjunct(Set(lhsConj, rhs))
+        val (lhsConj, _) = conjunct(lhs)
+        val (rhsLhsConj, _) = conjunct(Set(lhsConj, rhs))
         rhsLhsConj == lhsConj
-
-//        val negDisj = lhs.map { c =>
-//          val p = codePurity(c)
-//          val negCode = updateCodesSig(pNegNormal(c), p)
-//          (negCode, p)
-//        }
-//        simplifiedDisjunction(negDisj + ((rhs, codePurity(rhs)))) == rhs
       }
     }
 
-    def conjunct(conj: Set[Code]): Code = {
-      // updateCodesSig(pNegNormal(negatedConjunction(conj)))
-      ???
+    def conjunct(conj: Set[Code]): (Code, Purity) = {
+      val (neg, p) = negatedConjunction(conj)
+      (updateCodesSig(pNegNormal(neg), p), p)
     }
 
-    def negatedConjunction(conj: Set[Code]): Code = {
+    def negatedConjunction(conj: Set[Code]): (Code, Purity) = {
       // TODO: Caching?
-//      val negDisj = conj.map(c => updateCodesSig(pNegNormal(c)))
-//      simplifiedDisjunction(negDisj)
-      ???
+      val negDisj = conj.map(c => updateCodesSig(pNegNormal(c), codePurity(c)))
+      simplifiedDisjunction(negDisj)
     }
 
     def checkForContradiction(disj: Set[Code]): Boolean = {
+      if (disj.exists(c => !codePurity(c).isPure)) {
+        return false
+      }
+
       // TODO: Relativement different par rapport à l'orig
       val (pos, neg) = disj.foldLeft((Set.empty[Code], Set.empty[Code])) {
         case ((posAcc, negAcc), c) =>
@@ -701,21 +703,17 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
     // TODO: Cela suppose que c'est une disjunction, mais c'est p-e pas le cas??? Ca peut etre une expr d'un autre type!!!
     // TODO: Ok?
     // TODO: Cache?
-    def pDisj(e: Expr)(using Subst): Set[(Code, Purity)] = {
-      ???
-//      computeSignature(e) match {
-//        case Signature(Label.Or, children) => children
-//        case sig => Seq(updateCodesSig(sig))
-//      }
+    def pDisj(e: Expr)(using Subst): Seq[Code] = {
+      computeSignature(e) match {
+        case (Signature(Label.Or, children), _) => children
+        case (sig, p) => Seq(updateCodesSig(sig, p))
+      }
     }
 
     // Signature de Not(child)
     def pNeg(child: Expr)(using Subst): (Signature, Purity) = {
-      // TODO: Quid de la purity de child? P.ex. si on a !!subChild, on devrait pvoir simplifier cela en subChild, car on ne drop pas subChild
-      ???
-      /*
       codes.get(child) match {
-        case Some(c) => return pNegNormal(c)
+        case Some(c) => return (pNegNormal(c), codePurity(c))
         case None => ()
       }
 
@@ -730,32 +728,32 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
           // TODO: Ici, on fait un filter..distinct.sorted, ce que l'orig ne fait pas vraiment?
           val r = ors1.tail.flatMap(pDisj)
             .filter(_ != falseCode)
-            .distinct.sorted
+            .sorted.distinct
           if (r.isEmpty) pNeg(ors1.head) // TODO: Caching?
           else {
             // TODO: Ok?
             // TODO: Ressemble pas mal à simplifiedDisjunction
             val s = (pDisj(ors1.head) ++ r)
               .filter(_ != falseCode)
-              .distinct.sorted
-            if (s.contains(trueCode) || checkForContradiction(s.toSet)) falseSig
-            else if (s.size == 1) pNegNormal(s.head) // TODO: Ok?
+              .sorted.distinct
+            val purity = fold(s.map(codePurity))
+            if (purity.isPure && (s.contains(trueCode) || checkForContradiction(s.toSet))) (falseSig, Pure)
+            else if (s.size == 1) (pNegNormal(s.head), purity)
             else {
-              val orCode = updateCodesSig(Signature(Label.Or, s))
-              Signature(Label.Not, Seq(orCode))
+              val orCode = updateCodesSig(Signature(Label.Or, s), purity)
+              (Signature(Label.Not, Seq(orCode)), purity)
             }
           }
         case _ =>
           // TODO: Ok?
           computeSignature(child) match {
-            case Signature(Label.Lit(BooleanLiteral(b)), Seq()) =>
-              Signature(Label.Lit(BooleanLiteral(!b)), Seq.empty)
-            case sig =>
+            case (Signature(Label.Lit(BooleanLiteral(b)), Seq()), Pure) =>
+              (Signature(Label.Lit(BooleanLiteral(!b)), Seq.empty), Pure)
+            case (sig, purity) =>
               // TODO: Ok?
-              Signature(Label.Not, Seq(sig2code(sig)))
+              (Signature(Label.Not, Seq(sig2code(sig))), purity)
           }
       }
-      */
     }
 
     // TODO: ok?
