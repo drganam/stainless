@@ -62,17 +62,19 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
     // TODO: Peut-on supposer que expr a été simplifié??? Il semblerait que non!!!!
     // TODO: Quid purity??? p.ex. size(l) ==> size(l) se fait transformer en true!!!!
     override def implies(expr: Expr): Boolean = {
-       if (expr.getType != BooleanType()) false
-       else {
-         given Subst = mkSubst
-         // TODO: Purity????
-         ocbsl.implies(conditions, ocbsl.codeOf(expr)._1)
-       }
+//       if (expr.getType != BooleanType()) false
+//       else {
+//         given Subst = mkSubst
+//         // TODO: Purity????
+//         ocbsl.implies(conditions, ocbsl.codeOf(expr)._1)
+//       }
+      ???
     }
 
     def mkSubst: Subst = {
-      val boundMap = bound.zipWithIndex.map((v, i) => v -> i).toMap
-      Subst(exprCode, boundMap, boundMap.size)
+//      val boundMap = bound.zipWithIndex.map((v, i) => v -> i).toMap
+//      Subst(exprCode, boundMap, boundMap.size)
+      ???
     }
   }
 
@@ -92,6 +94,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
     case FunctionInvocation(id: Identifier, tps: Seq[Type])
     case Annotated(flags: Seq[Flag])
     case IsConstructor(id: Identifier)
+    case Assume
     case IfExpr
     case Application
     case Lambda // Indexed
@@ -163,7 +166,34 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
 
     case class Signature(label: Label, children: Seq[Code])
 
-    case class Subst(free: Map[Variable, Code], bound: Map[Variable, Int] = Map.empty, nestingLevel: Int = 0)
+    // TODO: Rename
+    case class Subst(conditions: Set[Code],
+                     free: Map[Variable, Code],
+                     bound: Map[Variable, Int],
+                     nestingLevel: Int,
+                     /*
+                     // TODO: Dire à quoi ça sert. Essentiellement pr implied. Et aussi dire qu'on mets les let dans bound aussi
+                     letDef: Map[Variable, Code],
+                     // TODO: Gros gag: c'est trop tard car on a deja les codes!!!!
+                     // TODO: Utilise letDef (donc le code de la definition) au lieu du code de l'indexed var
+                     //   A utiliser dans implied (l'equiv. de path expand de SWP) car permet d'avoir acces à la def du vd
+                     //   (p.ex. utile pour let vd = ADT(...) in vd is ctor  avec cette subst, on aura ADT is ctor, ce qui permet de simplifier par la suite
+                     //   et aussi dans les cas ou on peut se permettre de dupliquer des defs ou d'en drop (typiquement que pour les Pure)
+                     substituteLet: Boolean*/) {
+      def withCond(c: Code): Subst = copy(conditions = conditions + c)
+
+      def withLetBound(vd: ValDef, c: Code): Subst =
+        Subst(conditions, free, bound + (vd.toVariable -> nestingLevel), nestingLevel + 1) // , letDef + (vd.toVariable -> c))
+
+      def withOpenBound(param: ValDef): Subst = withOpenBounds(Seq(param))
+
+      def withOpenBounds(params: Seq[ValDef]): Subst = {
+        // Note: params may be empty, which is fine (the nesting level will not increase)
+        Subst(conditions, free,
+          bound ++ params.zipWithIndex.map((vd, i) => vd.toVariable -> (nestingLevel + i)).toMap,
+          nestingLevel + params.size) // , letDef)
+      }
+    }
   }
 
   class OCBSL {
@@ -347,6 +377,35 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       }
     }
 
+    // Is `c` an ADT with constructor `id`?
+    //   Some(true) - Yes
+    //   Some(false) - No
+    //   None - Can't tell
+    def isConstructor(c: Code, adt: ADTType, id: Identifier)(using subst: Subst): Option[Boolean] = {
+      // TODO: What about purity?
+      def codeIsCtor(ofId: Identifier): Code =
+        updateCodesSig(Signature(Label.IsConstructor(ofId), Seq(c)), codePurity(c))
+      def codeNotCtor(ofId: Identifier): Code =
+        updateCodesSig(pNegNormal(codeIsCtor(ofId)), codePurity(c))
+
+      code2sig(c) match {
+        case Signature(Label.ADT(id2, _), _) => Some(id == id2)
+        case _ =>
+          if (implied(codeIsCtor(id))) Some(true)
+          else if (implied(codeNotCtor(id))) Some(false)
+          else {
+            val sort = adt.getSort
+            val cons = getConstructor(id, adt.tps)
+            // All other constructors (excluding `id`) for the ADT
+            val alts = (sort.constructors.toSet - cons).map(_.id)
+
+            if (alts.exists(alt => implied(codeIsCtor(alt)))) Some(false)
+            else if (alts.forall(alt => implied(codeNotCtor(alt)))) Some(true)
+            else None
+          }
+      }
+    }
+
     def computeSignature(e: Expr)(using subst: Subst): (Signature, Purity) = {
       codes.get(e).map(c => (code2sig(c), codePurity(c))) match {
         case Some((sig, purity)) => return (sig, purity)
@@ -358,11 +417,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       lazy val zeroSig = code2sig(zero)
       lazy val oneSig = code2sig(one)
 
-      // TODO: Assume, Match, Require, etc. bref, tout ce qui été géré par SimplifierWithPC!!!
-      // TODO: Assume, Match, Require, etc. bref, tout ce qui été géré par SimplifierWithPC!!!
-      // TODO: Env!!!!
-      // TODO: Env!!!!
-      // TODO: Utiliser des simplification similaires à SimplifierWithPC
+      // TODO: Match, Require, etc. bref, tout ce qui été géré par SimplifierWithPC!!!
       // TODO: Utiliser des simplification similaires à SimplifierWithPC
       val (sig, purity) = e match {
         case v: Variable =>
@@ -375,6 +430,20 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
             })
             .getOrElse(Signature(Label.Var(v), Seq.empty))
           (sig, Pure)
+
+        case Assume(pred, body) =>
+          codeOf(pred) match {
+            case (`trueCode`, Pure) =>
+              val (cBody, pBody) = codeOf(body)
+              (code2sig(cBody), pBody)
+            case (`falseCode`, Pure) =>
+              val (cBody, _) = codeOf(body)
+              (Signature(Label.Assume, Seq(falseCode, cBody)), Impure)
+            case (cPred, _) =>
+              val newSubst = subst.withCond(cPred)
+              val (cBody, _) = codeOf(body)(using newSubst)
+              (Signature(Label.Assume, Seq(cPred, cBody)), Impure)
+          }
 
         case Tuple(args) =>
           val (cs, ps) = args.map(codeOf).unzip
@@ -409,6 +478,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
           (Signature(Label.Application, cCallee +: cs), pCallee ++ fold(ps))
 
         // TODO: Pour les cas ou on a besoin d'une réponse "tout de suite" pour procéder à des simplification, comment s'y prendre???
+        // TODO: SWP
         case IfExpr(cond, thenn, elze) =>
           val (cCond, pCond) = codeOf(cond)
           val (cThen, pThen) = codeOf(thenn)
@@ -422,6 +492,8 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
 
         // TODO: Utiliser qqchose de similaire à isConstructor dans SimplifierWithPC
         case IsConstructor(e, id) =>
+          // TODO: P.ex. si on a let v = ADT(...) in v is ctor, est-ce qu'on arrivera à lier v avec sa definition???
+          //  Dans SWP, on fait un path expand e. Devrait-on faire qqchose de similaire?
           val (c, p) = codeOf(e)
           (Signature(Label.IsConstructor(id), Seq(c)), p)
 
@@ -430,28 +502,22 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
         // TODO: Plusieurs opti possibles
         case Let(vd, e, body) =>
           val (cE, pE) = codeOf(e)
-          val newSubst = Subst(subst.free, subst.bound + (vd.toVariable -> subst.nestingLevel), subst.nestingLevel + 1)
+          val newSubst = subst.withLetBound(vd, cE)
           val (cB, pB) = codeOf(body)(using newSubst)
           (Signature(Label.Let, Seq(cE, cB)), pE ++ pB)
 
-        // TODO: Non, voir SWP
         case Lambda(params, body) =>
-          // Note: params may be empty, which is fine (the nesting level will not increase)
-          val newSubst = Subst(subst.free,
-            subst.bound ++ params.zipWithIndex.map((vd, i) => vd.toVariable -> (subst.nestingLevel + i)).toMap,
-            subst.nestingLevel + params.size)
+          val newSubst = subst.withOpenBounds(params)
           val (c, p) = codeOf(body)(using newSubst)
           (Signature(Label.Lambda, Seq(c)), p)
 
         case Choose(res, pred) =>
-          val newSubst = Subst(subst.free, subst.bound + (res.toVariable -> subst.nestingLevel), subst.nestingLevel + 1)
+          val newSubst = subst.withOpenBound(res)
           val (c, p) = codeOf(pred)(using newSubst)
           (Signature(Label.Choose, Seq(c)), p)
 
         case Forall(params, body) =>
-          val newSubst = Subst(subst.free,
-            subst.bound ++ params.zipWithIndex.map((vd, i) => vd.toVariable -> (subst.nestingLevel + i)).toMap,
-            subst.nestingLevel + params.size)
+          val newSubst = subst.withOpenBounds(params)
           val (c, p) = codeOf(body)(using newSubst)
           (Signature(Label.Forall, Seq(c)), p)
 
@@ -649,14 +715,13 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       (sig, purity)
     }
 
-    def implies(lhs: Set[Code], rhs: Code): Boolean = {
-      assert(lhs.forall(code2sig.contains))
-      assert(code2sig.contains(rhs))
-      if (lhs.isEmpty) rhs == trueCode
+    def implied(rhs: Code)(using subst: Subst): Boolean = {
+      if (subst.conditions.isEmpty) rhs == trueCode
       else {
         // TODO: Quid purité de rhs???
         // a ==> b === a && b = a
-        val (lhsConj, _) = conjunct(lhs)
+        // TODO: Pourrait-on envisager de cache subst.condition?
+        val (lhsConj, _) = conjunct(subst.conditions)
         val (rhsLhsConj, _) = conjunct(Set(lhsConj, rhs))
         rhsLhsConj == lhsConj
       }
