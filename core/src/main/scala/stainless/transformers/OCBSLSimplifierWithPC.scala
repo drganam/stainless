@@ -90,16 +90,17 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
     case Let // Indexed
     case Tuple
     case ADT(id: Identifier, tps: Seq[Type])
-    case ADTSelector(selector: Identifier)
+    // TODO: Trimbaler ce ctor n'est pas très joli non?
+    case ADTSelector(adt: ADTType, ctor: TypedADTConstructor, selector: Identifier)
     case FunctionInvocation(id: Identifier, tps: Seq[Type])
     case Annotated(flags: Seq[Flag])
-    case IsConstructor(id: Identifier)
+    case IsConstructor(adt: ADTType, id: Identifier)
     case Assume
     case IfExpr
     case Application
-    case Lambda // Indexed
+    case Lambda(nbParams: Int) // Indexed
     case Choose // Indexed
-    case Forall // Indexed
+    case Forall(nbParams: Int) // Indexed
 
     case Or
     case Not
@@ -190,6 +191,16 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
     }
   }
 
+  // TODO (liste de rappel):
+  //    - Pour le "uncodeOf", pour éviter des duplication, on pourra let-bind les codes pour lesquelles
+  //    les expr. sont non triviales
+  //    - Pourrait-on envisager de supprimer les indexed var pour les lets (slmt pour les lets) et simplement utiliser les codes
+  //    des definitions? On maintiendra un Let(def, body) et le "uncodeOf" pourra l'utiliser pour savoir
+  //    où remettre le let (et là, on pourra même le supprimer si def est pas utilisé et qu'il est pur)
+  //    Cela nous permettra d'éviter de devoir faire des substitutions explicites
+  //      - Attention au gag avec les lambdas!! On risquera de tout inliner dans le truc de simplification...
+  //        Sauf si: On arrive a flairer le truc et qu'on arrive a voir combien il y a de references a cette lambda
+  //        si cest let-bound etc.
   class OCBSL {
     import scala.collection.mutable
     import Purity._
@@ -244,7 +255,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
 
     extension (c1: Code) {
       def stripTopLvlAnnot: Code = code2sig(c1) match {
-        case Signature(Label.Annotated(_), Seq(cc1)) => cc1.stripTopLvlAnnot
+        case Signature(Label.Annotated(_), Seq(cc1)) => cc1.stripTopLvlAnnot // TODO: !!!! quid wrappingArith??? !!!!
         case _ => c1
       }
 
@@ -263,6 +274,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
 
     def letDefSubstMap(using subst: Subst) = subst.letDef.map((v, c) => codeOfVariable(v) -> c)
 
+    // TODO: Archi faux!!!
     def withLetBoundSubsted(c: Code)(using subst: Subst): Code = substCode(c, letDefSubstMap)
 
     def codePurity(c: Code): Purity = {
@@ -401,7 +413,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
     def isConstructor(c: Code, adt: ADTType, id: Identifier)(using subst: Subst): Option[Boolean] = {
       // TODO: What about purity?
       def codeIsCtor(ofId: Identifier): Code =
-        updateCodesSig(Signature(Label.IsConstructor(ofId), Seq(c)), codePurity(c))
+        updateCodesSig(Signature(Label.IsConstructor(adt, ofId), Seq(c)), codePurity(c))
       def codeNotCtor(ofId: Identifier): Code =
         updateCodesSig(pNegNormal(codeIsCtor(ofId)), codePurity(c))
 
@@ -423,14 +435,17 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       }
     }
 
+    def sigOfIndexedVar(lvl: Int)(using subst: Subst): Signature = {
+      assert(lvl < subst.nestingLevel)
+      Signature(Label.IndexedVar(subst.nestingLevel - lvl), Seq.empty)
+    }
+
+    def codeOfIndexedVar(lvl: Int)(using subst: Subst): Code = updateCodesSig(sigOfIndexedVar(lvl), Pure)
+
     def sigOfVariable(v: Variable)(using subst: Subst): Signature = {
       subst.free.get(v).map(code2sig) // Check if `v` is a "free" variable (free w.r.t. OCBSL, but bound w.r.t. Env)
         // Check if `v` is bound to a lambda, choose forall or let
-        .orElse(subst.bound.get(v).map { i =>
-          val sig = Signature(Label.IndexedVar(subst.nestingLevel - i), Seq.empty)
-          updateCodesSig(sig, Pure)
-          sig
-        })
+        .orElse(subst.bound.get(v).map(sigOfIndexedVar))
         .getOrElse(Signature(Label.Var(v), Seq.empty))
     }
 
@@ -479,7 +494,8 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
         // TODO: Non, voir SWP
         case s @ ADTSelector(e, selector) =>
           val (c, p) = codeOf(e)
-          (Signature(Label.ADTSelector(selector), Seq(c)), p)
+          val adt @ ADTType(_, _) = e.getType
+          (Signature(Label.ADTSelector(adt, s.constructor, selector), Seq(c)), p)
 
         case FunctionInvocation(id, tps, args) =>
           val (cs, ps) = args.map(codeOf).unzip
@@ -517,7 +533,8 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
           // TODO: P.ex. si on a let v = ADT(...) in v is ctor, est-ce qu'on arrivera à lier v avec sa definition???
           //  Dans SWP, on fait un path expand e. Devrait-on faire qqchose de similaire?
           val (c, p) = codeOf(e)
-          (Signature(Label.IsConstructor(id), Seq(c)), p)
+          val adt @ ADTType(_, _) = e.getType
+          (Signature(Label.IsConstructor(adt, id), Seq(c)), p)
 
         // TODO: Non, voir SWP
         // TODO: Ok w.r.t purité?
@@ -531,7 +548,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
         case Lambda(params, body) =>
           val newSubst = subst.withOpenBounds(params)
           val (c, p) = codeOf(body)(using newSubst)
-          (Signature(Label.Lambda, Seq(c)), p)
+          (Signature(Label.Lambda(params.size), Seq(c)), p)
 
         case Choose(res, pred) =>
           val newSubst = subst.withOpenBound(res)
@@ -541,7 +558,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
         case Forall(params, body) =>
           val newSubst = subst.withOpenBounds(params)
           val (c, p) = codeOf(body)(using newSubst)
-          (Signature(Label.Forall, Seq(c)), p)
+          (Signature(Label.Forall(params.size), Seq(c)), p)
 
         // TODO: Annotated peut empecher certaines simplif. non? Voir la PR de Georg.
         // TODO: On pourrait p-e ignorer Annotated? De toute façon, si c'est pour avoir des DropVCs, cela ne change rien dans notre cas de figure?
@@ -901,8 +918,201 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       }
     }
 
+    def b2c(b: Boolean): Code = if (b) trueCode else falseCode
+    def b2sig(b: Boolean): Signature = if (b) trueSig else falseSig
+
+    // TODO: Ne pas oublier de faire des subst sur les codes avec les let là où c'est approprié!!!
+    def simplifySigTopLvl(sig: Signature)(using Subst): (Signature, Purity) = sig match {
+      case Signature(Label.Assume, Seq(pred, body)) =>
+        if (pred ~ trueCode) (code2sig(body), codePurity(body))
+        else if (pred ~ falseCode) (Signature(Label.Assume, Seq(falseCode, body)), Impure)
+        else (sig, Impure)
+
+      case Signature(Label.IfExpr, Seq(cond, thenn, elze)) =>
+        val pCond = codePurity(cond)
+        val pThen = codePurity(thenn)
+        val pElse = codePurity(elze)
+        val purity = pCond ++ pThen ++ pElse
+
+        // Note: on check la purity de `else` parce que c'est elle qu'on va dropper
+        // TODO: On peut faire des trucs comme ifExpr
+        if (pCond.isPure) {
+          if (pElse.isPure && cond ~ trueCode) (code2sig(thenn), pThen)
+          else if (pThen.isPure && cond ~ falseCode) (code2sig(elze), pElse)
+          else if (thenn ~ elze) {
+            assert(pThen == pElse)
+            (code2sig(thenn), pThen)
+          }
+          else (sig, purity)
+        }
+        else (code2sig(thenn), code2sig(elze)) match {
+          case (Signature(Label.IfExpr, Seq(cond2, thenn2, elze2)), _) if elze ~ elze2 =>
+            val combinedCond = conjunct(Set(cond, cond2))._1
+            val sig2 = Signature(Label.IfExpr, Seq(combinedCond, thenn2, elze2))
+            simplifySigTopLvl(sig2)
+          case (_, Signature(Label.IfExpr, Seq(cond2, thenn2, elze2))) if thenn ~ thenn2 =>
+            val combinedCond = simplifiedDisjunction(Set(cond, cond2))._1
+            val sig2 = Signature(Label.IfExpr, Seq(combinedCond, thenn2, elze2))
+            simplifySigTopLvl(sig2)
+          case _ => (sig, purity)
+        }
+
+      case Signature(Label.IsConstructor(adt, id), Seq(e)) =>
+        val purity = codePurity(e)
+        isConstructor(e, adt, id) match {
+          case Some(b) if purity.isPure => (b2sig(b), Pure)
+          case Some(b) =>
+            (Signature(Label.Let, Seq(e, b2c(b))), purity)
+          case None => (sig, purity)
+        }
+
+      case Signature(Label.ADTSelector(_, ctor, sel), Seq(e)) =>
+        // TODO: Cette histoire de ADT invariant?
+        // TODO: Cette histoire de ADT invariant?
+        // TODO: Cette histoire de ADT invariant?
+        // TODO: approche un peu différente de SWP
+        code2sig(withLetBoundSubsted(e)) match {
+          // TODO: A-t-on de toute façon id == ctor.id ?
+          case Signature(Label.ADT(id, _), args) =>
+            assert(id == ctor.id, "woot? les ids ne correspondent pas!!!!")
+            val index = ctor.definition.selectorID2Index(sel)
+            // Les args qui ne sont pas pures doivent être let-bound
+            val toBeBound = args.zipWithIndex.filter { case (c, i) => i != index && !codePurity(c).isPure }.map(_._1)
+            // Le résultat de la selection
+            val selRes = args(index)
+            val resWithBdgs = toBeBound.foldRight(selRes) {
+              case (arg, rest) =>
+                val p = codePurity(arg) ++ codePurity(rest)
+                updateCodesSig(Signature(Label.Let, Seq(arg, rest)), p)
+            }
+            (code2sig(resWithBdgs), codePurity(resWithBdgs))
+          case _ =>
+            // TODO: Cette histoire de ADT invariant?
+            (sig, codePurity(e) ++ (if (opts.assumeChecked) Pure else Impure)) // TODO: Ok avec assumeChecked?
+        }
+        /*
+        val pE = codePurity(e)
+        // TODO: Ne pourrait-on pas skip ce isCtor? Apres tout, on doit avoir un Signature(ADT) pour continuer...
+        if (isConstructor(e, adt, ctor.id) == Some(true)) {
+          val index = ctor.definition.selectorID2Index(sel)
+          // TODO: Subst sur e !!!!
+          code2sig(e) match {
+            case Signature(Label.ADT(_, _), args) =>
+              if (pE.isPure) (code2sig(args(index)), Pure)
+              else {
+                ???
+              }
+            case _ => (sig, pE)
+          }
+        }
+        else (sig, pE ++ (if (opts.assumeChecked) Pure else Impure)) // TODO: Ok avec assumeChecked?
+        */
+
+      case Signature(Label.ADT(id, tps), args) =>
+        // TODO: Cette histoire de ADT invariant?
+        // TODO: Cette histoire de ADT invariant?
+        // TODO: Cette histoire de ADT invariant?
+
+        // Simplification de ADT(base.fld1, base.fld2, etc.) en base si base est de meme nature que l'adt construite
+        // TODO: args substed ok? slmt pour voir si on a à faire avec un adtselector
+        //  ~~> n'y a-t-il pas un risque de code duplication??? Ou pourrait-on gérer ce prob. lorsque l'on fera le "uncodeOf"???
+        // val argsSubsted = args.map()
+        val ctor: TypedADTConstructor = getConstructor(id, tps)
+        val bases: Seq[Code] = ctor.fields.zip(args.map(code2sig)).collect {
+          case (vd, Signature(Label.ADTSelector(_, ctor2, sel), Seq(base)))
+            if vd.id == sel && ctor == ctor2 => base
+        }
+        val newAdt = bases match {
+          case base +: basesRest
+            // TODO: N'y a-t-il pas un risque de code duplication??? Ou pourrait-on gérer ce prob. lorsque l'on fera le "uncodeOf"???
+            // TODO: Pas seulement ça, mais on risque de dupliquer "a tort" base non (problematique si impure)???
+            // TODO: Orig fait e.getType == adt.getType, mais nous on fait ctor == ctor2, est-ce que ça va aussi?
+            if bases.size == args.size &&
+              basesRest.forall(_ ~ base) &&
+              isConstructor(base, ADTType(id, tps), id) == Some(true) =>
+            // Comme pour ADTSelector, les args qui ne sont pas pures doivent être let-bound
+            val toBeBound = basesRest.filter(c => !codePurity(c).isPure)
+            // On bind toBeBound et on retourne `base` (en foldant dessus)
+            // let _ = toBeBound in base
+            val resWithBdgs = toBeBound.foldRight(base) {
+              case (arg, rest) =>
+                val p = codePurity(arg) ++ codePurity(rest)
+                updateCodesSig(Signature(Label.Let, Seq(arg, rest)), p)
+            }
+            code2sig(resWithBdgs)
+          case _ =>
+            sig
+        }
+        val argsPurity = fold(args.map(codePurity))
+        // TODO: Commentaire au sujet de opts.assumeChecked || !isImpureExpr(newAdt)
+        //  en gros, les base.fld1 seront marqué pures si isCtor est vrai, donc l'adt invariant
+        //  peut venir a disparaitre si on marque cette ADT(..) comme pur aussi
+        // TODO: Mais puisqu'on a `base`, on doit bien avoir l'adt invariant (que ce soit par param ou ailleurs) non?
+        val consingPurity = {
+          if (opts.assumeChecked || !ctor.sort.definition.hasInvariant) Pure
+          else Impure
+        }
+        (newAdt, argsPurity ++ consingPurity)
+
+      case Signature(Label.TupleSelect(i), Seq(e)) =>
+        (code2sig(e), codePurity(e)) match {
+          case (Signature(Label.Tuple, args), p) =>
+            // Comme pour ADTSelector, les args qui ne sont pas pures doivent être let-bound
+            val toBeBound = args.zipWithIndex.filter { case (c, j) => i != j && !codePurity(c).isPure }.map(_._1)
+            // let _ = toBeBound in args(i)
+            val resWithBdgs = toBeBound.foldRight(args(i)) {
+              case (arg, rest) =>
+                val p = codePurity(arg) ++ codePurity(rest)
+                updateCodesSig(Signature(Label.Let, Seq(arg, rest)), p)
+            }
+            (code2sig(resWithBdgs), p)
+          case (_, p) => (sig, p)
+        }
+
+      case Signature(Label.Application, Seq(callee, args)) =>
+        // TODO: Ici, on suppose qu'on a changé l'alg pour faire des subst de let explicite
+        //  Donc, qu'il faudra faire gaffe à ce que callee n'apparaissent qu'une fois si on veut inline!
+        // TODO: Gag, comment sait-on le nb d'occurrences de callee???
+        //  Idée: on maintient un compte dans subst? Ou qqchose comme ça. Il faudra par contre l'update à chaque fois...
+        ???
+
+      case sig => (sig, ???)
+    }
+
+    def simpForall(nbParams: Int, body: Code): Signature = {
+      def liftForall(es: Seq[Code]): Signature = {
+        val (nbParamss, bodies) = es.map(c => code2sig(c) match {
+          case Signature(Label.Forall(nbParams2), body2) => (nbParams2, ???) // TODO: Qqchose à faire par rapport aux indexed vars???
+          case s => (0, s)
+        }).unzip
+        val allParams = nbParams + nbParamss.sum
+        val combinedBody = ???
+        if (allParams == nbParams) Signature(Label.Forall(nbParams), combinedBody)
+        else simpForall(allParams, combinedBody)
+      }
+
+      code2sig(body) match {
+        case Signature(Label.Forall(nbParams2), Seq(body2)) => simpForall(nbParams + nbParams2, body2)
+        // TODO: On n'a pas de And ou Implies!!! On devrait pouvoir les "reconstruire"
+        case Signature(Label.Or, disjs) => ???
+        case _ => Signature(Label.Forall(nbParams), Seq(body))
+      }
+    }
+
+    private val nbOccurrencesCache = mutable.Map.empty[(Code, Code), Int]
+
+    // TODO: Et pour les indexed vars???
+    def nbOccurrences(hay: Code, needle: Code): Int = {
+      if (hay == needle) 1 // How can a stack of hay be a needle? Hmm...
+      else nbOccurrencesCache.getOrElseUpdate((hay, needle), {
+        val Signature(_, children) = code2sig(hay)
+        children.map(nbOccurrences(_, needle)).sum
+      })
+    }
+
     private val substCodeCache = mutable.Map.empty[(Code, Map[Code, Code]), Code]
 
+    // TODO: !!!! Et les indexed var ??? On ne voudra pas toutes les subst ou bien ??? !!!!
     def substCode(c: Code, subst: Map[Code, Code]): Code = {
       subst.get(c) match {
         case Some(newC) => return newC
@@ -921,11 +1131,14 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       // TODO: Un subst comme ça ne permettra pas de bénéficier d'eventuelles simplifications!!!!
       val Signature(label, children) = code2sig(c)
       val substedChildren = children.map(substCode(_, subst))
-      // TODO: Purity ok???
-      // TODO: En gros, le codePurity de c permet de dire d'avoir une idée de la purity pour ce label là.
-      val newPurity = codePurity(c) ++ fold(substedChildren.map(codePurity))
-      val newSig = Signature(label, substedChildren)
-      updateCodesSig(newSig, newPurity)
+      if (children == substedChildren) c
+      else {
+        // TODO: Purity ok???
+        // TODO: En gros, le codePurity de c permet de dire d'avoir une idée de la purity pour ce label là.
+        val newPurity = codePurity(c) ++ fold(substedChildren.map(codePurity))
+        val newSig = Signature(label, substedChildren)
+        updateCodesSig(newSig, newPurity)
+      }
     }
 
     def unAnd(e: Expr): Seq[Expr] = e match {
