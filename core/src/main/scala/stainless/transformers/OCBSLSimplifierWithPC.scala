@@ -14,14 +14,18 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
   private def ocbsl = ocbslTL.get()
 
   override protected def simplify(e: Expr, path: Env): (Expr, Boolean) = {
-    ???
+    given Subst = path.mkSubst
+    val oc = ocbsl
+    val code = oc.codeOf(e)
+    val simpE = oc.uncodeOf(code).copiedFrom(e)
+    (simpE, oc.codePurity(code).isPure)
   }
 
   case class Env(conditions: Set[Code],
                  exprSubst: Map[Variable, Expr],
                  exprCode: Map[Variable, Code],
                  // Note: Order is important (hence Seq)
-                 bound: Seq[Variable]) extends PathLike[Env] with SolvingPath {
+                 bound: Seq[ValDef]) extends PathLike[Env] with SolvingPath {
     // TODO: On pourra supposer que le binding a été simplifié avant
     override def withBinding(p: (ValDef, Expr)): Env = p match {
       // TODO: Qq binding ajouté
@@ -40,7 +44,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       case _ => this
     }
 
-    override def withBound(vd: ValDef): Env = Env(conditions, exprSubst, exprCode, bound :+ vd.toVariable)
+    override def withBound(vd: ValDef): Env = Env(conditions, exprSubst, exprCode, bound :+ vd)
 
     // TODO: On pourra supposer que cond a été simplifié avant
     override def withCond(cond: Expr): Env = {
@@ -65,19 +69,18 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
     // TODO: Peut-on supposer que expr a été simplifié??? Il semblerait que non!!!!
     // TODO: Quid purity??? p.ex. size(l) ==> size(l) se fait transformer en true!!!!
     override def implies(expr: Expr): Boolean = {
-//       if (expr.getType != BooleanType()) false
-//       else {
-//         given Subst = mkSubst
-//         // TODO: Purity????
-//         ocbsl.implies(conditions, ocbsl.codeOf(expr)._1)
-//       }
-      ???
+       if (expr.getType != BooleanType()) false
+       else {
+         given Subst = mkSubst
+         // TODO: Purity????
+         ocbsl.implied(ocbsl.codeOf(expr))
+       }
     }
 
     def mkSubst: Subst = {
-//      val boundMap = bound.zipWithIndex.map((v, i) => v -> i).toMap
-//      Subst(exprCode, boundMap, boundMap.size)
-      ???
+      // TODO: Ok?
+      Subst(conditions, free = exprCode, bound = Map.empty, 0, letDef = Map.empty)
+        .withOpenBounds(bound)
     }
   }
 
@@ -95,6 +98,8 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
     // TODO: What is recs???
     case Unapply(recs: Seq[Code], id: Identifier, tps: Seq[Type], sub: Seq[LabelledPattern])
   }
+
+  case class LabMatchCase(pattern: LabelledPattern, guard: Code, rhs: Code)
 
   enum Label {
     case Var(v: Variable)
@@ -216,39 +221,6 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
           nestingLevel + params.size, letDef)
       }
     }
-  }
-
-  // TODO (liste de rappel):
-  //    - Pour le "uncodeOf", pour éviter des duplication, on pourra let-bind les codes pour lesquelles
-  //    les expr. sont non triviales
-  //    - Pourrait-on envisager de supprimer les indexed var pour les lets (slmt pour les lets) et simplement utiliser les codes
-  //    des definitions? On maintiendra un Let(def, body) et le "uncodeOf" pourra l'utiliser pour savoir
-  //    où remettre le let (et là, on pourra même le supprimer si def est pas utilisé et qu'il est pur)
-  //    Cela nous permettra d'éviter de devoir faire des substitutions explicites
-  //      - Attention au gag avec les lambdas!! On risquera de tout inliner dans le truc de simplification...
-  //        Sauf si: On arrive a flairer le truc et qu'on arrive a voir combien il y a de references a cette lambda
-  //        si cest let-bound etc.
-  class OCBSL {
-    import scala.collection.mutable
-    import Purity._
-
-    // TODO: Comment mélanger caching et simplification (p.ex. simplifiedDisjunction)?
-
-    private val sig2code = mutable.Map.empty[Signature, Code]
-    private val code2sig = mutable.Map.empty[Code, Signature]
-    private val sizeCache = mutable.Map.empty[Expr, Int]
-
-    private val falseSig = Signature(Label.Lit(BooleanLiteral(false)), Seq.empty)
-    private val trueSig = Signature(Label.Lit(BooleanLiteral(true)), Seq.empty)
-    private val falseCode = updateCodesSig(falseSig, Pure)
-    private val trueCode = updateCodesSig(trueSig, Pure)
-
-    private val purityCache = mutable.Map.empty[Identifier, Boolean]
-    private val codePurityCache = mutable.Map.empty[Code, Boolean]
-    private val fnBlockedBy = mutable.Map.empty[Identifier, Set[Identifier]] // K = fn qui est bloqué par les fn dans V
-    private val codeBlockedBy = mutable.Map.empty[Code, Set[Identifier]] // K = code qui est bloqué par les fn dans V
-    private val blocking = mutable.Map.empty[Identifier, (Set[Identifier], Set[Code])] // K = fn qui bloque les fn et les codes dans V
-    private val visiting = mutable.Set.empty[Identifier]
 
     enum Purity {
       case Pure
@@ -277,7 +249,40 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       def fromBoolean(isPure: Boolean): Purity = if (isPure) Pure else Impure
     }
 
-    case class LabMatchCase(pattern: LabelledPattern, guard: Code, rhs: Code)
+  }
+
+  // TODO (liste de rappel):
+  //    - Pour le "uncodeOf", pour éviter des duplication, on pourra let-bind les codes pour lesquelles
+  //    les expr. sont non triviales
+  //    - Pourrait-on envisager de supprimer les indexed var pour les lets (slmt pour les lets) et simplement utiliser les codes
+  //    des definitions? On maintiendra un Let(def, body) et le "uncodeOf" pourra l'utiliser pour savoir
+  //    où remettre le let (et là, on pourra même le supprimer si def est pas utilisé et qu'il est pur)
+  //    Cela nous permettra d'éviter de devoir faire des substitutions explicites
+  //      - Attention au gag avec les lambdas!! On risquera de tout inliner dans le truc de simplification...
+  //        Sauf si: On arrive a flairer le truc et qu'on arrive a voir combien il y a de references a cette lambda
+  //        si cest let-bound etc.
+  class OCBSL {
+    import scala.collection.mutable
+    import Purity._
+
+    // TODO: Comment mélanger caching et simplification (p.ex. simplifiedDisjunction)?
+
+    private val sig2code = mutable.Map.empty[Signature, Code]
+    private val code2sig = mutable.Map.empty[Code, Signature]
+    private val sizeCache = mutable.Map.empty[Expr, Int]
+    private val codeTpe = mutable.Map.empty[Code, Type]
+
+    private val falseSig = Signature(Label.Lit(BooleanLiteral(false)), Seq.empty)
+    private val trueSig = Signature(Label.Lit(BooleanLiteral(true)), Seq.empty)
+    private val falseCode = updateCodesSig(falseSig, Pure, BooleanType())
+    private val trueCode = updateCodesSig(trueSig, Pure, BooleanType())
+
+    private val purityCache = mutable.Map.empty[Identifier, Boolean]
+    private val codePurityCache = mutable.Map.empty[Code, Boolean]
+    private val fnBlockedBy = mutable.Map.empty[Identifier, Set[Identifier]] // K = fn qui est bloqué par les fn dans V
+    private val codeBlockedBy = mutable.Map.empty[Code, Set[Identifier]] // K = code qui est bloqué par les fn dans V
+    private val blocking = mutable.Map.empty[Identifier, (Set[Identifier], Set[Code])] // K = fn qui bloque les fn et les codes dans V
+    private val visiting = mutable.Set.empty[Identifier]
 
     def codePurity(c: Code): Purity = {
       assert(code2sig.contains(c))
@@ -288,7 +293,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
 
     def codeOf(e: Expr)(using subst: Subst): Code = simplifiedDisjunction(pDisj(e).toSet)
 
-    def negCodeOf(c: Code)(using Subst): Code = updateCodesSig(pNegNormal(c), codePurity(c))
+    def negCodeOf(c: Code)(using Subst): Code = updateCodesSig(pNegNormal(c), codePurity(c), BooleanType())
 
     def fnPurity(fn: Identifier)(using subst: Subst): Purity = {
       def resolvedPurity(isPure: Boolean): Unit = {
@@ -388,7 +393,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       else if (purity.isPure && (disj1.contains(trueCode) || checkForContradiction(disj1))) trueCode
       else {
         val sig = Signature(Label.Or, disj1.toSeq.sorted)
-        updateCodesSig(sig, purity)
+        updateCodesSig(sig, purity, BooleanType())
       }
     }
 
@@ -399,7 +404,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
     def isConstructor(c: Code, adt: ADTType, id: Identifier)(using subst: Subst): Option[Boolean] = {
       // TODO: What about purity?
       def codeIsCtor(ofId: Identifier): Code =
-        updateCodesSig(Signature(Label.IsConstructor(adt, ofId), Seq(c)), codePurity(c))
+        updateCodesSig(Signature(Label.IsConstructor(adt, ofId), Seq(c)), codePurity(c), BooleanType())
       def codeNotCtor(ofId: Identifier): Code =
         negCodeOf(codeIsCtor(ofId))
 
@@ -426,7 +431,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       mkIxVar(subst.nestingLevel - lvl)
     }
 
-    def codeOfIndexedVar(lvl: Int)(using subst: Subst): Code = updateCodesSig(sigOfIndexedVar(lvl), Pure)
+    def codeOfIndexedVar(lvl: Int, tpe: Type)(using subst: Subst): Code = updateCodesSig(sigOfIndexedVar(lvl), Pure, tpe)
 
     def sigOfVariable(v: Variable)(using subst: Subst): Signature = {
       subst.free.get(v).map(code2sig) // Check if `v` is a "free" variable (free w.r.t. OCBSL, but bound w.r.t. Env)
@@ -437,7 +442,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
         .getOrElse(mkFreeVar(v))
     }
 
-    def codeOfVariable(v: Variable)(using Subst): Code = updateCodesSig(sigOfVariable(v), Pure)
+    def codeOfVariable(v: Variable)(using Subst): Code = updateCodesSig(sigOfVariable(v), Pure, v.getType)
 
     def mkFreeVar(v: Variable): Signature = Signature(Label.Var(v), Seq.empty)
     def mkIxVar(i: Int): Signature = Signature(Label.IndexedVar(i), Seq.empty)
@@ -540,26 +545,27 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
           simplifySigTopLvl(mkADT(id, tps, args.map(codeOf)), tpe)
 
         case MatchExpr(scrut, cases) =>
-          def processPattern(subScrut: Code, pat: Pattern): (LabelledPattern, Seq[(ValDef, Code)], Set[Code]) = {
+          def processPattern(subScrut: Code, scrutTpe: Type, pat: Pattern): (LabelledPattern, Seq[(ValDef, Code)], Set[Code]) = {
             // On doit être vigilent avec les subst implicites qu'on utilise!!!
             given dontDefaultUseOuterSubst: Subst = sys.error("Carefully consider the appropriate subst to use")
             val pSubScrut = codePurity(subScrut)
-            val bdgs1: Seq[(ValDef, Code)] = pat.binder.map((_, subScrut)).toSeq
+            val vdBinder: ValDef = pat.binder.getOrElse(ValDef.fresh("dummyBinder", scrutTpe))
+            val bdgs1 = Seq((vdBinder, subScrut))
             pat match {
               case WildcardPattern(_) => (LabelledPattern.Wildcard, bdgs1, Set.empty)
               case ADTPattern(_, id, tps, subps) =>
                 val adt = ADTType(id, tps)
                 val tcons = getConstructor(id, tps)
                 assert(tcons.fields.size == subps.size)
-                val conds1 = updateCodesSig(mkIsCtor(subScrut, adt, id), pSubScrut)
+                val conds1 = updateCodesSig(mkIsCtor(subScrut, adt, id), pSubScrut, BooleanType())
                 val (labSubPats, bdgs2, conds2) = tcons.fields.zip(subps).foldLeft((Seq.empty[LabelledPattern], bdgs1, Set(conds1))) {
                   // TODO: Annoté en dropvc?
                   case ((labSubPatAcc, bdgsAcc, condsAcc), (fld, subpat)) =>
                     // TODO: Il nous faut un adt selector
                     // TODO: Ok????
                     // TODO: Purity de toussa??? devrait on inclure purity scrut???
-                    val newScrut = updateCodesSig(mkADTSelector(subScrut, adt, tcons, fld.id), pSubScrut)
-                    val (labSubPat, newBdgs, newConds) = processPattern(newScrut, subpat)
+                    val newScrut = updateCodesSig(mkADTSelector(subScrut, adt, tcons, fld.id), pSubScrut, fld.getType)
+                    val (labSubPat, newBdgs, newConds) = processPattern(newScrut, fld.getType, subpat)
                     (labSubPatAcc :+ labSubPat, bdgsAcc ++ newBdgs, condsAcc ++ newConds)
                 }
                 (LabelledPattern.ADT(id, tps, labSubPats), bdgs2, conds2)
@@ -569,122 +575,73 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
                 sys.error(s"Does not know how to handle $pat")
             }
           }
-          /*
-          def processPattern(subScrut: Code, pat: Pattern, subst0: Subst): (Subst, LabelledPattern) = {
-            // On doit être vigilent avec les subst implicites qu'on utilise!!!
-            given dontDefaultUseOuterSubst: Subst = sys.error("Carefully consider the appropriate subst to use")
-            val pSubScrut = codePurity(subScrut)
-            // TODO: canSubst?
-            val subst1: Subst = pat.binder.map(subst0.withLetBound(_, subScrut, canSubst = true)).getOrElse(subst0)
-            pat match {
-              case WildcardPattern(_) => (subst1, LabelledPattern.Wildcard)
-              case ADTPattern(_, id, tps, subps) =>
-                val adt = ADTType(id, tps)
-                val tcons = getConstructor(id, tps)
-                assert(tcons.fields.size == subps.size)
-                val subst2 = subst1.withCond(updateCodesSig(mkIsCtor(subScrut, adt, id), pSubScrut))
-                val (subst3, labSubPats) = tcons.fields.zip(subps).foldLeft((subst2, Seq.empty[LabelledPattern])) {
-                  // TODO: Annoté en dropvc?
-                  case ((substAcc, labSubPatAcc), (fld, subpat)) =>
-                    // TODO: Il nous faut un adt selector
-                    // TODO: Ok????
-                    // TODO: Purity de toussa??? devrait on inclure purity scrut???
-                    val newScrut = updateCodesSig(mkADTSelector(subScrut, adt, tcons, fld.id), pSubScrut)
-                    val (newSubst, labSubPat) = processPattern(newScrut, subpat, substAcc)
-                    (newSubst, labSubPatAcc :+ labSubPat)
-                }
-                (subst3, LabelledPattern.ADT(id, tps, labSubPats))
-              case LiteralPattern(_, lit) => (subst1, LabelledPattern.Lit(lit))
-              case UnapplyPattern(_, recs, id, tps, subps) =>
-                // TODO: !!!! Si on utilise codeOf, ne pas oublier d'utiliser le subst approprié !!!
-                sys.error(s"Does not know how to handle $pat")
-            }
-          }
-          */
+
           val cScrut = codeOf(scrut)
           val pScrut = codePurity(cScrut)
 
           // accumulatedConds: la negation des conds des cases antérieures
-          def processCase(mc: MatchCase, accumulatedConds: Set[Code]/*, subst0: Subst*/): Option[(LabMatchCase, Set[Code], Boolean)] = {
+          def processCase(mc: MatchCase, accumulatedConds: Set[Code]): Option[(LabMatchCase, Set[Code], Boolean)] = {
             given dontDefaultUseOuterSubst: Subst = sys.error("Carefully consider the appropriate subst to use")
             // patConds: SANS le guard!!!
-            val (labPat, bdgs, patConds) = processPattern(cScrut, mc.pattern)
+            val (labPat, bdgs, patConds) = processPattern(cScrut, scrut.getType, mc.pattern)
             // TODO: canSubst?
             val subst1 = subst.withLetBounds(bdgs, canSubst = true).withConds(accumulatedConds ++ patConds)
             val cGuard = mc.optGuard.map(codeOf(_)(using subst1)).getOrElse(trueCode)
             val subst2 = subst1.withCond(cGuard)
 
+            val cRhs = codeOf(mc.rhs)(using subst2)
+//            // TODO: Non non non, les bdgs ne seront pas "visible" pour les guard???
+//            val cRhs1 = letBind(bdgs.map(_._2))(cRhs0, mc.rhs.getType)
+
             if (pScrut.isPure) {
               // TODO: Ok par rapport à la pureté?
 
               if (implied(trueCode)(using subst2)) {
-                val subst2: Subst = ???
-                val cRhs = codeOf(mc.rhs)(using subst2)
+                // TODO: A-t-on besoin de faire qqchose pour ces bindings?
+//                val subst3: Subst = ???
+//                val cRhs = codeOf(mc.rhs)(using subst2)
                 return Some(LabMatchCase(LabelledPattern.Wildcard, trueCode, cRhs), Set(trueCode), true)
               } else if (implied(falseCode)(using subst2)) {
                 // Unreachable
                 return None
               }
-              /*
-//              val caseCondsWithGuard = caseCondsNoGuard + cGuard
-//              val cCaseConds = conjunct(caseCondsWithGuard)(using subst)
-              // TODO: Ok par rapport à la pureté?
-              // TODO: En gros, on collecte toutes les conditions accumulées jusqu'à mtn
-              //  Note: subst.condition subsetOf subst2.conditions, donc on va conjunct des trucs qu'on a déjà, mais c'est ok
-              val subst2Conj = conjunct(subst2.conditions)(using subst)
-              if (subst2Conj == falseCode) {
-                // Unreachable
-                return None
-              } else if (subst2Conj == trueCode) {
-                val subst3: Subst = ???
-                val cRhs = codeOf(mc.rhs)(using subst3)
-                return Some(LabMatchCase(LabelledPattern.Wildcard, trueCode, cRhs), subst3, true)
-              }
-              */
             }
-            val cRhs = codeOf(mc.rhs)(using subst2)
-            Some(LabMatchCase(labPat, cGuard, cRhs), patConds + cGuard, false)
-//            // TODO: Si "condition for pattern" pure et que guard pure, alors on peut considerer des opti
-//            // TODO: Voir ce que fait Stainless
-//            // TODO: Et voir pk on bind pas le premier path...
 //            val cRhs = codeOf(mc.rhs)(using subst2)
-//            Some(LabMatchCase(labPat, cGuard, cRhs), subst2, false)
+            Some(LabMatchCase(labPat, cGuard, cRhs), patConds + cGuard, false)
           }
 
-          def processCases(cases: Seq[MatchCase], /*subst: Subst, */acc: Seq[LabMatchCase]): Seq[LabMatchCase] = {
+          def processCases(cases: Seq[MatchCase], accumulatedConds: Set[Code], acc: Seq[LabMatchCase]): (Seq[LabMatchCase], Boolean) = {
             given dontDefaultUseOuterSubst: Subst = sys.error("Carefully consider the appropriate subst to use")
-            if (cases.isEmpty) acc
+            if (cases.isEmpty) (acc, false)
             else {
-              // TODO: !!! "reset" les binding a chaque fois !!!
-              //  Ah bah voilà pk le premier path n'est pas inclu!! C'est parce qu'on est juste intéressé aux
-              //  conditions accumulées, pas aux bindings (qui reste "local" au match case)
-              // TODO: On ajoute la negation des cond accumulées!
+              processCase(cases.head, accumulatedConds) match {
+                case Some((labMatchCase, caseConds, allCovered)) =>
+                  if (allCovered) (acc :+ labMatchCase, true)
+                  else {
+                    val negCaseConds = negatedConjunction(caseConds)(using subst)
+                    processCases(cases.tail, accumulatedConds + negCaseConds, acc :+ labMatchCase)
+                  }
+                case None =>
+                  processCases(cases.tail, accumulatedConds, acc)
+              }
+            }
+          }
+
+          // TODO: Quid pureté???? Et celle des guard+rhs????
+          processCases(cases, Set.empty, Seq.empty) match {
+            // TODO: Et simplifySigTopLvl ???
+            case (Seq(), _) =>
               ???
-            }
+            case (Seq(matchCase), true) =>
+              // Remarque: si allCovered = true, alors on a forcément un wildcard pattern (et aucune subst n'est nécessaire)
+              assert(matchCase.pattern == LabelledPattern.Wildcard)
+              // TODO: Et simplifySigTopLvl ???
+              // TODO: Autre chose pour les bdgs?
+              (code2sig(matchCase.rhs), pScrut)
+            case (matchCases, _) =>
+              // TODO: Et simplifySigTopLvl ???
+              (mkMatchExpr(cScrut, matchCases), pScrut)
           }
-
-
-          /*
-          def computeCaseSig(cse: MatchCase): Unit = {
-            // TODO: canSubst?
-            cse.pattern match {
-              case WildcardPattern(bdg) =>
-                val newSubst = bdg.map(subst.withLetBound(_, cScrut, canSubst = true)).getOrElse(subst)
-                ???
-              case ADTPattern(_, id, tps, subs) =>
-                ???
-              case TuplePattern(_, subs) =>
-                ???
-              case LiteralPattern(_, lit) =>
-                ???
-              case UnapplyPattern(_, recs, id, tps, subs) =>
-                sys.error(s"Does not know how to handle $cse")
-            }
-          }
-          */
-
-          // TODO: Il faudra notre propre "conditionForPattern" parce qu'on a besoin d'un scrut simplifié --'
-          ???
 
         case s @ ADTSelector(e, selector) =>
           val adt @ ADTType(_, _) = e.getType
@@ -844,7 +801,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
 //          (sig, Impure)
       }
 
-      val code = updateCodesSig(sig, purity)
+      val code = updateCodesSig(sig, purity, tpe)
       val simpSig = {
         if (purity.isPure && tpe == BooleanType() && implied(code)) trueSig
         else sig
@@ -903,9 +860,10 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
     // TODO: Ok?
     // TODO: Cache?
     def pDisj(e: Expr)(using Subst): Seq[Code] = {
+      assert(e.getType == BooleanType())
       computeSignature(e) match {
         case (Signature(Label.Or, children), _) => children
-        case (sig, p) => Seq(updateCodesSig(sig, p))
+        case (sig, p) => Seq(updateCodesSig(sig, p, BooleanType()))
       }
     }
 
@@ -939,7 +897,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
             if (purity.isPure && (s.contains(trueCode) || checkForContradiction(s.toSet))) (falseSig, Pure)
             else if (s.size == 1) (pNegNormal(s.head), purity)
             else {
-              val orCode = updateCodesSig(Signature(Label.Or, s), purity)
+              val orCode = updateCodesSig(Signature(Label.Or, s), purity, BooleanType())
               (Signature(Label.Not, Seq(orCode)), purity)
             }
           }
@@ -985,16 +943,17 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       case _ => sys.error(s"$tpe is not an integer-like type")
     }
 
-    def updateCodesSig(sig: Signature, purity: Purity): Code = {
+    def updateCodesSig(sig: Signature, purity: Purity, tpe: Type): Code = {
       sig2code.get(sig) match {
         case Some(c) =>
-          // TODO: Quid purity????
+          // TODO: Quid purity et type coherence????
           c
         case None =>
           val newCode = Code.fromInt(sig2code.size)
           assert(!code2sig.contains(newCode))
           sig2code += sig -> newCode
           code2sig += newCode -> sig
+          codeTpe += newCode -> tpe
           purity match {
             case Pure => codePurityCache += newCode -> true
             case Impure => codePurityCache += newCode -> false
@@ -1006,6 +965,14 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
               }
           }
           newCode
+      }
+    }
+
+    def letBind(bdgs: Seq[Code]): (Code, Type) => Code = { (body, tpe) =>
+      bdgs.foldRight(body) {
+        case (let, rest) =>
+          // TODO: purity ok?
+          updateCodesSig(mkLet(let, body), codePurity(let) ++ codePurity(rest), tpe)
       }
     }
 
@@ -1045,11 +1012,17 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
             case _ => (sig, Impure)
           }
 
-        case Signature(Label.MatchExpr(patterns), scrut +: cases) =>
-          ???
+        // TODO: Voir ce qu'on peut faire de plus?
+//        case Signature(Label.MatchExpr(patterns), scrut +: cases) =>
+//          ???
 
         case Signature(Label.Let, Seq(e, body)) =>
-          ???
+          // TODO: Peut-on faire autre chose???
+          // TODO: Cette histoire de vd dans lambda???
+          //  -> Ah, mais c'est peut-être pour éviter une explosion en cas de lambda inlining?
+          //  Hmmm, on devra p-e gérer ça dans le "uncodeOf"? Ou du moins l'opti intermédiaire...
+          // TODO: Cette histoire de inline lambda???
+          (sig, codePurity(e) ++ codePurity(body))
 
         case Signature(Label.IfExpr, Seq(cond, thenn, elze)) =>
           val pCond = codePurity(cond)
@@ -1106,7 +1079,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
               val resWithBdgs = toBeBound.foldRight(selRes) {
                 case (arg, rest) =>
                   val p = codePurity(arg) ++ codePurity(rest)
-                  updateCodesSig(Signature(Label.Let, Seq(arg, rest)), p)
+                  updateCodesSig(Signature(Label.Let, Seq(arg, rest)), p, tpe)
               }
               (code2sig(resWithBdgs), codePurity(resWithBdgs))
             case _ =>
@@ -1140,7 +1113,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
               val resWithBdgs = toBeBound.foldRight(base) {
                 case (arg, rest) =>
                   val p = codePurity(arg) ++ codePurity(rest)
-                  updateCodesSig(Signature(Label.Let, Seq(arg, rest)), p)
+                  updateCodesSig(Signature(Label.Let, Seq(arg, rest)), p, tpe)
               }
               code2sig(resWithBdgs)
             case _ =>
@@ -1166,18 +1139,21 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
               val resWithBdgs = toBeBound.foldRight(args(i)) {
                 case (arg, rest) =>
                   val p = codePurity(arg) ++ codePurity(rest)
-                  updateCodesSig(Signature(Label.Let, Seq(arg, rest)), p)
+                  updateCodesSig(Signature(Label.Let, Seq(arg, rest)), p, tpe)
               }
               (code2sig(resWithBdgs), p)
             case (_, p) => (sig, p)
           }
 
-        case Signature(Label.Application, Seq(callee, args)) =>
-          // TODO: Ici, on suppose qu'on a changé l'alg pour faire des subst de let explicite
-          //  Donc, qu'il faudra faire gaffe à ce que callee n'apparaissent qu'une fois si on veut inline!
-          // TODO: Gag, comment sait-on le nb d'occurrences de callee???
-          //  Idée: on maintient un compte dans subst? Ou qqchose comme ça. Il faudra par contre l'update à chaque fois...
-          ???
+        case Signature(Label.Application, callee +: args) =>
+          // TODO: On suppose que si callee est originellement let-bound, alors son occurence est de 1 (pr éviter explosion d'inlining)
+          // TODO: Opti
+          // TODO: Pureté?
+          (sig, assmChkPurity ++ fold(args.map(codePurity)))
+
+        case Signature(Label.Choose, Seq(`trueCode`)) if hasInstance(tpe) == Some(true) => (sig, Pure)
+        case Signature(Label.Choose, Seq(_)) => (sig, Impure) // TODO: simp choose
+        case Signature(Label.Forall(_), Seq(pred)) => (sig, codePurity(pred)) // TODO: simp forall
 
         case Signature(Label.Equals | Label.GreaterEquals | Label.LessEquals, Seq(e1, e2)) =>
           val p1 = codePurity(e1)
@@ -1260,9 +1236,9 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
           if (e2 == zero) {assert(p2.isPure); (code2sig(e1), p1) }
           else (sig, p1 ++ p2)
 
-        // TODO: Couvrir le reste, et juste ++ les args?
-
-        case sig => (sig, ???)
+        case sig =>
+          println("What is this: "+sig)
+          ???
       }
     }
 
@@ -1330,6 +1306,83 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       }
     }
     */
+    def uncodeOf(c: Code): Expr = {
+      // TODO: Les let...
+      code2sig(c) match {
+        case Signature(Label.Var(v), Seq()) => v
+        case Signature(Label.IndexedVar(i), Seq()) =>
+          // TODO: Il faudra "l'inverse" d'une subst
+          ???
+        case Signature(Label.Let, Seq(cE, cBody)) =>
+          val e = uncodeOf(cE)
+          ???
+
+        case Signature(Label.Tuple, args) => Tuple(args.map(uncodeOf))
+        case Signature(Label.ADT(id, tps), args) => ADT(id, tps, args.map(uncodeOf))
+        case Signature(Label.ADTSelector(_, _, sel), Seq(recv)) => ADTSelector(uncodeOf(recv), sel)
+        case Signature(Label.FunctionInvocation(id, tps), args) => FunctionInvocation(id, tps, args.map(uncodeOf))
+        case Signature(Label.Annotated(flags), Seq(e)) => Annotated(uncodeOf(e), flags)
+        case Signature(Label.IsConstructor(_, id), Seq(e)) => IsConstructor(uncodeOf(e), id)
+        case Signature(Label.Assume, Seq(pred, body)) => Assume(uncodeOf(pred), uncodeOf(body))
+        case Signature(Label.Assert, Seq(pred, body)) => Assert(uncodeOf(pred), None, uncodeOf(body))
+        case Signature(Label.Require, Seq(pred, body)) => Require(uncodeOf(pred), uncodeOf(body))
+        case Signature(Label.Ensuring, Seq(body, pred)) =>
+          // Ensuring(uncodeOf(body), None, uncodeOf(pred))
+          ???
+        case Signature(Label.MatchExpr(pats), cScrut +: cGuardRhs) =>
+          assert(2 * pats.size == cGuardRhs.size)
+          val (guards, rhss) = cGuardRhs.grouped(2).map { case Seq(guard, rhs) => (guard, rhs) }.toSeq.unzip
+          ???
+        case Signature(Label.IfExpr, Seq(cond, thn, els)) => IfExpr(uncodeOf(cond), uncodeOf(thn), uncodeOf(els))
+        case Signature(Label.Application, callee +: args) => Application(uncodeOf(callee), args.map(uncodeOf))
+        case Signature(Label.Lambda(nbParams), Seq(body)) => ???
+        case Signature(Label.Choose, Seq(pred)) => ???
+        case Signature(Label.Forall(nbParams), Seq(pred)) => ???
+        case Signature(Label.Or, args) => Or(args.map(uncodeOf))
+        case Signature(Label.Not, Seq(c)) => Not(uncodeOf(c))
+
+        case Signature(Label.Equals, Seq(c1, c2)) => Equals(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.LessThan, Seq(c1, c2)) => LessThan(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.GreaterThan, Seq(c1, c2)) => GreaterThan(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.LessEquals, Seq(c1, c2)) => LessEquals(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.GreaterEquals, Seq(c1, c2)) => GreaterEquals(uncodeOf(c1), uncodeOf(c2))
+
+        case Signature(Label.UMinus, Seq(c)) => UMinus(uncodeOf(c))
+        case Signature(Label.Plus, Seq(c1, c2)) => Plus(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.Minus, Seq(c1, c2)) => Minus(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.Times, Seq(c1, c2)) => Times(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.Division, Seq(c1, c2)) => Division(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.Remainder, Seq(c1, c2)) => Remainder(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.Modulo, Seq(c1, c2)) => Modulo(uncodeOf(c1), uncodeOf(c2))
+
+        case Signature(Label.BVNot, Seq(c)) => BVNot(uncodeOf(c))
+        case Signature(Label.BVAnd, Seq(c1, c2)) => BVAnd(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.BVOr, Seq(c1, c2)) => BVOr(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.BVXor, Seq(c1, c2)) => BVXor(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.BVShiftLeft, Seq(c1, c2)) => BVShiftLeft(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.BVAShiftRight, Seq(c1, c2)) => BVAShiftRight(uncodeOf(c1), uncodeOf(c2))
+        case Signature(Label.BVLShiftRight, Seq(c1, c2)) => BVLShiftRight(uncodeOf(c1), uncodeOf(c2))
+
+        case Signature(Label.BVNarrowingCast(newType), Seq(c)) => BVNarrowingCast(uncodeOf(c), newType)
+        case Signature(Label.BVWideningCast(newType), Seq(c)) => BVWideningCast(uncodeOf(c), newType)
+        case Signature(Label.BVUnsignedToSigned, Seq(c)) => BVUnsignedToSigned(uncodeOf(c))
+        case Signature(Label.BVSignedToUnsigned, Seq(c)) => BVSignedToUnsigned(uncodeOf(c))
+
+        case Signature(Label.Lit(lit), Seq()) => lit
+
+        case Signature(Label.TupleSelect(index), Seq(c)) => TupleSelect(uncodeOf(c), index)
+        case Signature(Label.FiniteSet(base), args) => FiniteSet(args.map(uncodeOf), base)
+        case Signature(Label.FiniteArray(base), args) => FiniteArray(args.map(uncodeOf), base)
+        case Signature(Label.LargeArray(elemsIndices, base), elems :+ default :+ size) =>
+          LargeArray(elemsIndices.zip(elems.map(uncodeOf)).toMap, uncodeOf(default), uncodeOf(size), base)
+        case Signature(Label.ArraySelect, Seq(arr, i)) => ArraySelect(uncodeOf(arr), uncodeOf(i))
+        case Signature(Label.ArrayUpdated, Seq(arr, i, v)) => ArrayUpdated(uncodeOf(arr), uncodeOf(i), uncodeOf(v))
+        case Signature(Label.ArrayLength, Seq(arr)) => ArrayLength(uncodeOf(arr))
+
+        case sig =>
+          sys.error(s"What is this: $sig")
+      }
+    }
 
     def unAnd(e: Expr): Seq[Expr] = e match {
       case And(es) => es.flatMap(unAnd)
