@@ -17,8 +17,11 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
     given Subst = path.mkSubst
     val oc = ocbsl
     val code = oc.codeOf(e)
+    /*
     val simpE = oc.uncodeOf(code).copiedFrom(e)
     (simpE, oc.codePurity(code).isPure)
+    */
+    ???
   }
 
   case class Env(conditions: Set[Code],
@@ -206,6 +209,10 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
 
       def withLetBounds(vds: Seq[(ValDef, Code)], canSubst: Boolean): Subst = {
         // Note: params may be empty, which is fine (the nesting level will not increase)
+
+        assert(letDef.values.map(_._1).toSet.intersect(vds.map(_._2).toSet).isEmpty)
+        assert(letDef.keySet.intersect(vds.map(_._1.toVariable).toSet).isEmpty)
+
         Subst(conditions, free,
           bound ++ vds.zipWithIndex.map { case ((vd, _), i) => vd.toVariable -> (nestingLevel + i) }.toMap,
           nestingLevel + vds.size,
@@ -220,6 +227,9 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
           bound ++ params.zipWithIndex.map((vd, i) => vd.toVariable -> (nestingLevel + i)).toMap,
           nestingLevel + params.size, letDef)
       }
+
+      // TODO: Sert à rien, puisque c'est pop...
+      lazy val revLetDef: Map[Code, Variable] = letDef.map { case (v, (c, _)) => c -> v }
     }
 
     enum Purity {
@@ -677,10 +687,14 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
 
         case Let(vd, e, body) =>
           val cE = codeOf(e)
-          // TODO: Ok par rapport à la purité et ces subst?
+          // TODO: Ok par rapport à la pureté et ces subst?
           val canSubst = code2sig(cE) match {
             case Signature(Label.Lambda(_), _) =>
               val v = vd.toVariable
+              // TODO: Par rapport à orig body, et pas simplified body --'
+              // TODO: !!!! ??? immediateCall + inLambda ??? !!!!
+              //    pour le "immediateCall": ? p-e par rapport au path condition supplémentaire résultant de stmts intermediaire avant le call?
+              //    pour le "inLambda": pour eviter explosion en cas d'inling lambda (~> à gérer dans "uncodeOf"?)
               exprOps.count { case `v` => 1 case _ => 0 } (body) <= 1
             case _ => true
           }
@@ -1306,9 +1320,99 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       }
     }
     */
-    def uncodeOf(c: Code): Expr = {
-      // TODO: Les let...
+
+    case class RevEnv(nestingLevel: Int)
+    case class Count(occurrences: Int, inLambda: Boolean, containsLambda: Boolean, noPC: Boolean) {
+      def ++(other: Count): Count =
+        Count(occurrences + other.occurrences,
+          inLambda || other.inLambda,
+          containsLambda || other.containsLambda,
+          noPC && other.noPC)
+    }
+    case class Counts(cts: Map[Int, Count]) {
+      def ++(other: Counts): Counts = ???
+    }
+    object Counts {
+      def empty: Counts = Counts(Map.empty)
+    }
+    case class Holed(expr: Map[Int, Expr] => Expr, holes: Set[Int]) {
+      def plugged(ix: Int, e: Expr): Holed = {
+        assert(holes.contains(ix))
+        // TODO: Hmmm, ça n'a pas de sens? Ou bien?
+        Holed.chkd({ subst => expr(subst.updated(ix, e)) }, holes - ix)
+      }
+      def plugged(ix: Int, other: Holed): Holed = {
+        assert(!other.holes.contains(ix))
+        Holed.chkd({ subst =>
+          // TODO: Ok?
+          expr(subst.updated(ix, other.expr(subst)))
+        }, (holes ++ other.holes) - ix)
+      }
+    }
+    object Holed {
+      def const(e: Expr): Holed = Holed.chkd(_ => e, Set.empty)
+
+      def ofOne(ix: Int): Holed = Holed.chkd(_(ix), Set(ix))
+
+      def chkd(expr: Map[Int, Expr] => Expr, holes: Set[Int]): Holed = Holed({ subst =>
+        assert(subst.keySet == holes)
+        expr(subst)
+      }, holes)
+
+      def combined(holeds: Seq[Holed])(recons: Seq[Expr] => Expr): Holed =
+        Holed.chkd({ subst =>
+          val exprs = holeds.map(_.expr(subst))
+          recons(exprs)
+        }, holeds.flatMap(_.holes).toSet)
+    }
+    case class RevRes(holed: Holed, counts: Counts) {
+      def ++(other: RevRes): RevRes = ???
+
+      def countOf(ix: Int): Count = counts.cts.getOrElse(ix, Count(0, false, false, true))
+    }
+
+    def recHelper(args: Seq[Code])(recons: Seq[Expr] => Expr)(using RevEnv): RevRes = {
+      val revRes = args.map(uncodeOf)
+      val holed = Holed.combined(revRes.map(_.holed))(recons) // ((substs: Map[Int, Expr]) => recons(revRes.map(_.holed.expr(substs))))
+      RevRes(holed, revRes.foldLeft(Counts.empty)(_ ++ _.counts))
+    }
+
+    def uncodeOf(c: Code)(using renv: RevEnv): RevRes = {
       code2sig(c) match {
+        case Signature(Label.Var(v), Seq()) => RevRes(Holed.const(v), Counts.empty)
+        case Signature(Label.IndexedVar(v), Seq()) =>
+          val ix = v + renv.nestingLevel
+          RevRes(Holed.ofOne(ix), Counts(Map(ix -> Count(1, false, false, true))))
+
+        case Signature(Label.Let, Seq(cE, cBody)) =>
+          val ix = renv.nestingLevel
+          val resE = uncodeOf(cE)
+          val resBody = uncodeOf(cBody)(using RevEnv(renv.nestingLevel + 1))
+          val cntsInBody = resBody.countOf(???)
+          val canSubstPure = codePurity(cE).isPure &&
+            cntsInBody.occurrences <= 1 &&
+            (!cntsInBody.inLambda || !cntsInBody.containsLambda)
+          lazy val canSubstImpure = !cntsInBody.inLambda && cntsInBody.noPC && cntsInBody.occurrences == 1
+          // TODO: !!!! Pas vrai le totCounts va dépendre de comment on subst !!!!
+          // TODO: !!!! On n'utilise pas forcément les IndexedVar, car on fait une subst explicite dans la plupart des cas !!!!
+          val totCounts: Counts = ??? // resE.counts ++ resBody.counts
+          val letHoled = {
+            if (canSubstPure || canSubstImpure) resBody.holed.plugged(ix, resE.holed)
+            else {
+              val vd = ValDef.fresh("tmp", codeTpe(cE))
+              val bodyPlugged = resBody.holed.plugged(ix, vd.toVariable: Expr)
+              Holed.combined(Seq(resE.holed, bodyPlugged)) { case Seq(e, b) => Let(vd, e, b) }
+//              Holed({ subst =>
+//                Let(vd, resE.holed.expr(subst), bodyPlugged.expr(subst))
+//              }, (resE.holed.holes ++ resBody.holed.holes) - ix)
+            }
+          }
+          RevRes(letHoled, totCounts)
+
+        case Signature(Label.Tuple, args) =>
+          recHelper(args)(Tuple.apply)
+
+        /*
         case Signature(Label.Var(v), Seq()) => v
         case Signature(Label.IndexedVar(i), Seq()) =>
           // TODO: Il faudra "l'inverse" d'une subst
@@ -1378,7 +1482,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
         case Signature(Label.ArraySelect, Seq(arr, i)) => ArraySelect(uncodeOf(arr), uncodeOf(i))
         case Signature(Label.ArrayUpdated, Seq(arr, i, v)) => ArrayUpdated(uncodeOf(arr), uncodeOf(i), uncodeOf(v))
         case Signature(Label.ArrayLength, Seq(arr)) => ArrayLength(uncodeOf(arr))
-
+*/
         case sig =>
           sys.error(s"What is this: $sig")
       }
