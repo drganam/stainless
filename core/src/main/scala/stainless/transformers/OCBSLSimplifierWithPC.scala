@@ -93,13 +93,24 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
 
   override def initEnv: Env = Env.empty
 
-  enum LabelledPattern {
-    case Wildcard
-    case ADT(id: Identifier, tps: Seq[Type], sub: Seq[LabelledPattern])
-    case TuplePattern(sub: Seq[LabelledPattern])
-    case Lit[T](lit: Literal[T])
+  // TODO: "scrut" sert à la fois de scrut et de binder. En gros, cela réfère au node qui est scrutineed
+  //  (pour les subpattern, ce sera un node a.c. un ADTSelector/TupleSelect etc.)
+  enum LabelledPattern(val scrut: Code) {
+    case Wildcard(scrut0: Code) extends LabelledPattern(scrut0)
+    case ADT(scrut0: Code, id: Identifier, tps: Seq[Type], sub: Seq[LabelledPattern]) extends LabelledPattern(scrut0)
+    case TuplePattern(scrut0: Code, sub: Seq[LabelledPattern]) extends LabelledPattern(scrut0)
+    case Lit[T](scrut0: Code, lit: Literal[T]) extends LabelledPattern(scrut0)
     // TODO: What is recs???
-    case Unapply(recs: Seq[Code], id: Identifier, tps: Seq[Type], sub: Seq[LabelledPattern])
+    case Unapply(scrut0: Code, recs: Seq[Code], id: Identifier, tps: Seq[Type], sub: Seq[LabelledPattern]) extends LabelledPattern(scrut0)
+
+    import LabelledPattern._
+    def allPatterns: Seq[LabelledPattern] = Seq(this) ++ (this match {
+      case Wildcard(_) => Seq.empty
+      case ADT(_, _, _, sub) => sub.flatMap(_.allPatterns)
+      case TuplePattern(_, sub) => sub.flatMap(_.allPatterns)
+      case Lit(_, _) => Seq.empty
+      case Unapply(_, _, _, _, sub) => sub.flatMap(_.allPatterns)
+    })
   }
 
   case class LabMatchCase(pattern: LabelledPattern, guard: Code, rhs: Code)
@@ -562,11 +573,12 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
             val vdBinder: ValDef = pat.binder.getOrElse(ValDef.fresh("dummyBinder", scrutTpe))
             val bdgs1 = Seq((vdBinder, subScrut))
             pat match {
-              case WildcardPattern(_) => (LabelledPattern.Wildcard, bdgs1, Set.empty)
+              case WildcardPattern(_) => (LabelledPattern.Wildcard(subScrut), bdgs1, Set.empty)
               case ADTPattern(_, id, tps, subps) =>
                 val adt = ADTType(id, tps)
                 val tcons = getConstructor(id, tps)
                 assert(tcons.fields.size == subps.size)
+                // TODO: Opti: pas besoin de mkIsCtor comme cond si unique ctor
                 val conds1 = updateCodesSig(mkIsCtor(subScrut, adt, id), pSubScrut, BooleanType())
                 val (labSubPats, bdgs2, conds2) = tcons.fields.zip(subps).foldLeft((Seq.empty[LabelledPattern], bdgs1, Set(conds1))) {
                   // TODO: Annoté en dropvc?
@@ -578,8 +590,8 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
                     val (labSubPat, newBdgs, newConds) = processPattern(newScrut, fld.getType, subpat)
                     (labSubPatAcc :+ labSubPat, bdgsAcc ++ newBdgs, condsAcc ++ newConds)
                 }
-                (LabelledPattern.ADT(id, tps, labSubPats), bdgs2, conds2)
-              case LiteralPattern(_, lit) => (LabelledPattern.Lit(lit), bdgs1, Set.empty)
+                (LabelledPattern.ADT(subScrut, id, tps, labSubPats), bdgs2, conds2)
+              case LiteralPattern(_, lit) => (LabelledPattern.Lit(subScrut ,lit), bdgs1, Set.empty)
               case UnapplyPattern(_, recs, id, tps, subps) =>
                 // TODO: !!!! Si on utilise codeOf, ne pas oublier d'utiliser le subst approprié !!!
                 sys.error(s"Does not know how to handle $pat")
@@ -601,6 +613,9 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
 
             val cRhs = codeOf(mc.rhs)(using subst2)
 //            // TODO: Non non non, les bdgs ne seront pas "visible" pour les guard???
+//            // TODO: Non non non, les bdgs ne seront pas "visible" pour les guard???
+//            // TODO: Non non non, les bdgs ne seront pas "visible" pour les guard???
+//            // TODO: Non non non, les bdgs ne seront pas "visible" pour les guard???
 //            val cRhs1 = letBind(bdgs.map(_._2))(cRhs0, mc.rhs.getType)
 
             if (pScrut.isPure) {
@@ -610,7 +625,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
                 // TODO: A-t-on besoin de faire qqchose pour ces bindings?
 //                val subst3: Subst = ???
 //                val cRhs = codeOf(mc.rhs)(using subst2)
-                return Some(LabMatchCase(LabelledPattern.Wildcard, trueCode, cRhs), Set(trueCode), true)
+                return Some(LabMatchCase(LabelledPattern.Wildcard(cScrut), trueCode, cRhs), Set(trueCode), true)
               } else if (implied(falseCode)(using subst2)) {
                 // Unreachable
                 return None
@@ -685,6 +700,9 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
           val adt @ ADTType(_, _) = e.getType
           simplifySigTopLvl(mkIsCtor(codeOf(e), adt, id), tpe)
 
+        // TODO: Let of ADT???
+        // TODO: Let of ADT???
+        // TODO: Let of ADT???
         case Let(vd, e, body) =>
           val cE = codeOf(e)
           // TODO: Ok par rapport à la pureté et ces subst?
@@ -1030,6 +1048,10 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
 //        case Signature(Label.MatchExpr(patterns), scrut +: cases) =>
 //          ???
 
+        // TODO: Let of ADT???
+        // TODO: Let of ADT???
+        // TODO: Let of ADT???
+        // TODO: Let of ADT???
         case Signature(Label.Let, Seq(e, body)) =>
           // TODO: Peut-on faire autre chose???
           // TODO: Cette histoire de vd dans lambda???
@@ -1277,51 +1299,26 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       }
     }
 
-    /*
-    private val nbOccurrencesCache = mutable.Map.empty[(Code, Code), Int]
-
-    // TODO: Et pour les indexed vars???
-    def nbOccurrences(hay: Code, needle: Code): Int = {
-      if (hay == needle) 1 // How can a stack of hay be a needle? Hmm...
-      else nbOccurrencesCache.getOrElseUpdate((hay, needle), {
-        val Signature(_, children) = code2sig(hay)
-        children.map(nbOccurrences(_, needle)).sum
-      })
+    case class RevEnv(letDefs: Map[Int, Code],
+                      revLetDefs: Map[Code, Int],
+                      nestingLevel: Int,
+                      inLambda: Boolean,
+                      noPC: Boolean) {
+      def withLetBound(df: Code): RevEnv = withLetBounds(Seq(df))
+//        RevEnv(letDefs + (nestingLevel -> df),
+//          revLetDefs + (df -> nestingLevel),
+//          nestingLevel + 1,
+//          inLambda,
+//          noPC && codePurity(df).isPure)
+      def withLetBounds(dfs: Seq[Code]): RevEnv =
+        RevEnv(
+          letDefs ++ dfs.zipWithIndex.map((c, i) => (nestingLevel + i) -> c).toMap,
+          revLetDefs ++ dfs.zipWithIndex.map((c, i) => c -> (nestingLevel + i)).toMap,
+          nestingLevel + dfs.size,
+          inLambda,
+          noPC && dfs.forall(codePurity(_).isPure))
     }
 
-    private val substCodeCache = mutable.Map.empty[(Code, Map[Code, Code]), Code]
-
-    // TODO: !!!! Et les indexed var ??? On ne voudra pas toutes les subst ou bien ??? !!!!
-    def substCode(c: Code, subst: Map[Code, Code]): Code = {
-      subst.get(c) match {
-        case Some(newC) => return newC
-        case None => ()
-      }
-      val cached = substCodeCache.get((c, subst))
-        .orElse {
-          substCodeCache.find { case ((_, candSubst), _) => subst.keySet.subsetOf(candSubst.keySet) }
-            .map(_._2)
-        }
-      cached match {
-        case Some(c) => return c
-        case None => ()
-      }
-
-      // TODO: Un subst comme ça ne permettra pas de bénéficier d'eventuelles simplifications!!!!
-      val Signature(label, children) = code2sig(c)
-      val substedChildren = children.map(substCode(_, subst))
-      if (children == substedChildren) c
-      else {
-        // TODO: Purity ok???
-        // TODO: En gros, le codePurity de c permet de dire d'avoir une idée de la purity pour ce label là.
-        val newPurity = codePurity(c) ++ fold(substedChildren.map(codePurity))
-        val newSig = Signature(label, substedChildren)
-        updateCodesSig(newSig, newPurity)
-      }
-    }
-    */
-
-    case class RevEnv(nestingLevel: Int)
     case class Count(occurrences: Int, inLambda: Boolean, containsLambda: Boolean, noPC: Boolean) {
       def ++(other: Count): Count =
         Count(occurrences + other.occurrences,
@@ -1330,7 +1327,36 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
           noPC && other.noPC)
     }
     case class Counts(cts: Map[Int, Count]) {
-      def ++(other: Counts): Counts = ???
+      def of(ix: Int): Count = cts.getOrElse(ix, Count(0, false, false, true))
+
+      def ++(other: Counts): Counts =
+        Counts((cts.keySet ++ other.cts.keySet)
+          .map(ix => ix -> (of(ix) ++ other.of(ix)))
+          .toMap)
+
+      def -(ix: Int): Counts = Counts(cts - ix)
+
+      // TODO: Ok?
+      // Si le ix a ces counts là, le résultat de la subst par ix
+      def replaced(ix: Int, replacedCounts: Counts): Counts = {
+        assert(!replacedCounts.cts.contains(ix))
+        val ixCt = of(ix)
+        if (ixCt.occurrences == 0) return Counts(cts - ix)
+
+        def replaced(candIx: Int): Count = {
+          val currCnt = of(candIx)
+          val replCnt = replacedCounts.of(candIx)
+          if (replCnt.occurrences == 0) currCnt
+          else currCnt ++ Count(ixCt.occurrences * replCnt.occurrences,
+            ixCt.inLambda || replCnt.inLambda,
+            ixCt.containsLambda || replCnt.containsLambda,
+            ixCt.noPC && replCnt.noPC)
+        }
+
+        Counts(((cts.keySet ++ replacedCounts.cts.keySet) - ix)
+          .map(candIx => candIx -> replaced(candIx))
+          .toMap)
+      }
     }
     object Counts {
       def empty: Counts = Counts(Map.empty)
@@ -1354,79 +1380,164 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
 
       def ofOne(ix: Int): Holed = Holed.chkd(_(ix), Set(ix))
 
-      def chkd(expr: Map[Int, Expr] => Expr, holes: Set[Int]): Holed = Holed({ subst =>
-        assert(subst.keySet == holes)
-        expr(subst)
-      }, holes)
-
       def combined(holeds: Seq[Holed])(recons: Seq[Expr] => Expr): Holed =
         Holed.chkd({ subst =>
           val exprs = holeds.map(_.expr(subst))
           recons(exprs)
         }, holeds.flatMap(_.holes).toSet)
-    }
-    case class RevRes(holed: Holed, counts: Counts) {
-      def ++(other: RevRes): RevRes = ???
 
-      def countOf(ix: Int): Count = counts.cts.getOrElse(ix, Count(0, false, false, true))
+      def chkd(expr: Map[Int, Expr] => Expr, holes: Set[Int]): Holed = Holed({ subst =>
+        assert(subst.keySet == holes)
+        expr(subst)
+      }, holes)
+    }
+
+    object RevRes {
+      def combined(res: Seq[RevRes])(recons: Seq[Expr] => Expr): RevRes =
+        RevRes(Holed.combined(res.map(_.holed))(recons), res.foldLeft(Counts.empty)(_ ++ _.counts)) // TODO: Ok?
+      def combined(r1: RevRes, r2: RevRes)(recons: (Expr, Expr) => Expr): RevRes =
+        combined(Seq(r1, r2)) { case Seq(e1, e2) => recons(e1, e2) }
+    }
+
+    case class RevRes(holed: Holed, counts: Counts) {
+      def countOf(ix: Int): Count = counts.of(ix)
+
+      def plugged(ix: Int, e: Expr): RevRes = RevRes(holed.plugged(ix, e), counts - ix)
+
+      def plugged(es: Map[Int, Expr]): RevRes = ???
+
+      def plugged(ix: Int, other: RevRes): RevRes = {
+        assert(!other.holed.holes.contains(ix))
+        assert(!other.counts.cts.contains(ix))
+        RevRes(holed.plugged(ix, other.holed), counts.replaced(ix, other.counts))
+      }
     }
 
     def recHelper(args: Seq[Code])(recons: Seq[Expr] => Expr)(using RevEnv): RevRes = {
-      val revRes = args.map(uncodeOf)
-      val holed = Holed.combined(revRes.map(_.holed))(recons) // ((substs: Map[Int, Expr]) => recons(revRes.map(_.holed.expr(substs))))
-      RevRes(holed, revRes.foldLeft(Counts.empty)(_ ++ _.counts))
+      RevRes.combined(args.map(uncodeOf))(recons)
+//      val holed = Holed.combined(revRes.map(_.holed))(recons) // ((substs: Map[Int, Expr]) => recons(revRes.map(_.holed.expr(substs))))
+//      RevRes(holed, revRes.foldLeft(Counts.empty)(_ ++ _.counts))
     }
 
+    def recHelper(c1: Code)(recons: Expr => Expr)(using RevEnv): RevRes =
+      recHelper(Seq(c1)) { case Seq(e1) => recons(e1) }
+    def recHelper(c1: Code, c2: Code)(recons: (Expr, Expr) => Expr)(using RevEnv): RevRes =
+      recHelper(Seq(c1, c2)) { case Seq(e1, e2) => recons(e1, e2) }
+
     def uncodeOf(c: Code)(using renv: RevEnv): RevRes = {
+      renv.revLetDefs.get(c) match {
+        case Some(ix) =>
+          // TODO: Dire pk
+          val sig = Signature(Label.IndexedVar(renv.nestingLevel - ix), Seq.empty)
+          return uncodeOf(updateCodesSig(sig, Pure, codeTpe(c)))
+        case None => ()
+      }
+
       code2sig(c) match {
         case Signature(Label.Var(v), Seq()) => RevRes(Holed.const(v), Counts.empty)
         case Signature(Label.IndexedVar(v), Seq()) =>
           val ix = v + renv.nestingLevel
-          RevRes(Holed.ofOne(ix), Counts(Map(ix -> Count(1, false, false, true))))
+          RevRes(Holed.ofOne(ix), Counts(Map(ix -> Count(1, renv.inLambda, false, renv.noPC))))
 
         case Signature(Label.Let, Seq(cE, cBody)) =>
           val ix = renv.nestingLevel
           val resE = uncodeOf(cE)
-          val resBody = uncodeOf(cBody)(using RevEnv(renv.nestingLevel + 1))
-          val cntsInBody = resBody.countOf(???)
+          val resBody = uncodeOf(cBody)(using renv.withLetBound(cE))
+          val cntsInBody = resBody.countOf(ix)
           val canSubstPure = codePurity(cE).isPure &&
             cntsInBody.occurrences <= 1 &&
             (!cntsInBody.inLambda || !cntsInBody.containsLambda)
           lazy val canSubstImpure = !cntsInBody.inLambda && cntsInBody.noPC && cntsInBody.occurrences == 1
-          // TODO: !!!! Pas vrai le totCounts va dépendre de comment on subst !!!!
-          // TODO: !!!! On n'utilise pas forcément les IndexedVar, car on fait une subst explicite dans la plupart des cas !!!!
-          val totCounts: Counts = ??? // resE.counts ++ resBody.counts
-          val letHoled = {
-            if (canSubstPure || canSubstImpure) resBody.holed.plugged(ix, resE.holed)
-            else {
-              val vd = ValDef.fresh("tmp", codeTpe(cE))
-              val bodyPlugged = resBody.holed.plugged(ix, vd.toVariable: Expr)
-              Holed.combined(Seq(resE.holed, bodyPlugged)) { case Seq(e, b) => Let(vd, e, b) }
+          // TODO: Et quid du "noPC"??? Devrait-on l'update???
+          if (canSubstPure || canSubstImpure) resBody.plugged(ix, resE)
+          else {
+            val vd = ValDef.fresh("tmp", codeTpe(cE))
+            val bodyPlugged = resBody.plugged(ix, vd.toVariable: Expr)
+            // TODO: Counts ok?
+            RevRes.combined(resE, bodyPlugged)(Let(vd, _, _))
+//            Holed.combined(Seq(resE.holed, bodyPlugged)) { case Seq(e, b) => Let(vd, e, b) }
 //              Holed({ subst =>
 //                Let(vd, resE.holed.expr(subst), bodyPlugged.expr(subst))
 //              }, (resE.holed.holes ++ resBody.holed.holes) - ix)
-            }
           }
-          RevRes(letHoled, totCounts)
 
-        case Signature(Label.Tuple, args) =>
-          recHelper(args)(Tuple.apply)
+        case Signature(Label.MatchExpr(pats), cScrut +: cGuardRhs) =>
+          assert(2 * pats.size == cGuardRhs.size)
 
-        /*
-        case Signature(Label.Var(v), Seq()) => v
-        case Signature(Label.IndexedVar(i), Seq()) =>
-          // TODO: Il faudra "l'inverse" d'une subst
+          def convertPattern(pat: LabelledPattern, vds: Seq[(Int, ValDef)]): Pattern = {
+            // TODO: Bouark, yes, hide this monstrosity in this local fn...
+
+            var currIx = renv.nestingLevel
+            var currVds = vds
+
+            def nextBinder(): Option[ValDef] = {
+              if (currVds.isEmpty) None
+              else {
+                val (ix, vd) = vds.head
+                if (ix == currIx) {
+                  currIx += 1
+                  currVds = currVds.tail
+                  Some(vd)
+                } else None
+              }
+            }
+
+            def rec(pat: LabelledPattern): Pattern = {
+              val bdg = nextBinder()
+              pat match {
+                case LabelledPattern.Wildcard(_) => Wildcard(bdg)
+                case LabelledPattern.ADT(_, id, tps, sub) => ADTPattern(bdg, id, tps, sub.map(rec))
+                case LabelledPattern.TuplePattern(_, sub) => TuplePattern(bdg, sub.map(rec))
+                case LabelledPattern.Lit(_, lit) => LiteralPattern(bdg, lit)
+                case LabelledPattern.Unapply(_, recs, id, tps, sub) => ???
+              }
+            }
+
+            rec(pat)
+          }
+
+          def processCase(pat: LabelledPattern, cGuard: Code, cRhs: Code): (Pattern, RevRes, RevRes) = {
+            val allPats = pat.allPatterns
+            // TODO: Ne pas oublier "noPC = false"
+            // TODO: noPC peut ne pas etre modifie si guard = true et si pattern n'introduit pas de cond supp.
+            val newRenv = renv.withLetBounds(allPats.map(_.scrut)).copy(noPC = false)
+
+//            val revScrutsIxs: Map[Code, Int] = newRenv.revLetDefs.filter((c, _) => allPats.exists(_.scrut == c))
+            val guard = uncodeOf(cGuard)(using newRenv)
+            val rhs = uncodeOf(cRhs)(using newRenv)
+            val revScrutsIxs = newRenv.letDefs.filter { case (_, c) => allPats.exists(_.scrut == c) }
+            val usedScrutsIxs = (guard.counts ++ rhs.counts).cts
+              .filter { case (ix, cnt) => cnt.occurrences != 0 && revScrutsIxs.contains(ix) }
+              .keys.toSeq.sorted
+            val vds = usedScrutsIxs.map(ix => ix -> ValDef.fresh(s"bdg$ix", codeTpe(revScrutsIxs(ix))))
+            val substs = vds.map { case (ix, vd) => ix -> vd.toVariable }.toMap
+            (convertPattern(pat, vds), guard.plugged(substs), rhs.plugged(substs))
+          }
+
+//          // TODO: S'assurer qu'on crée les bdgs dans le meme ordre que dans processPattern
+//          def genBinders(cScrut: Code, pat: LabelledPattern): Seq[(ValDef, Code)] = {
+//            pat match {
+//              case LabelledPattern.Wildcard =>
+//                Seq((ValDef.fresh("bdg", ???), cScrut))
+//              case LabelledPattern.ADT(id, tps, sub) => ???
+//              case LabelledPattern.TuplePattern(sub) => ???
+//              case LabelledPattern.Lit(_) => Seq.empty
+//              case LabelledPattern.Unapply(_, _, _, _) => ???
+//            }
+//          }
+          // TODO: Ne pas oublier "noPC = false"
+          val (guards, rhss) = cGuardRhs.grouped(2).map { case Seq(guard, rhs) => (guard, rhs) }.toSeq.unzip
+
+
           ???
-        case Signature(Label.Let, Seq(cE, cBody)) =>
-          val e = uncodeOf(cE)
-          ???
 
-        case Signature(Label.Tuple, args) => Tuple(args.map(uncodeOf))
-        case Signature(Label.ADT(id, tps), args) => ADT(id, tps, args.map(uncodeOf))
-        case Signature(Label.ADTSelector(_, _, sel), Seq(recv)) => ADTSelector(uncodeOf(recv), sel)
-        case Signature(Label.FunctionInvocation(id, tps), args) => FunctionInvocation(id, tps, args.map(uncodeOf))
-        case Signature(Label.Annotated(flags), Seq(e)) => Annotated(uncodeOf(e), flags)
-        case Signature(Label.IsConstructor(_, id), Seq(e)) => IsConstructor(uncodeOf(e), id)
+        case Signature(Label.Tuple, args) => recHelper(args)(Tuple.apply)
+        case Signature(Label.ADT(id, tps), args) => recHelper(args)(ADT(id, tps, _))
+        case Signature(Label.ADTSelector(_, _, sel), Seq(recv)) => recHelper(recv)(ADTSelector(_, sel))
+        case Signature(Label.FunctionInvocation(id, tps), args) => recHelper(args)(FunctionInvocation(id, tps, _))
+        case Signature(Label.Annotated(flags), Seq(e)) => recHelper(e)(Annotated(_, flags))
+        case Signature(Label.IsConstructor(_, id), Seq(e)) => recHelper(e)(IsConstructor(_, id))
+      /*
         case Signature(Label.Assume, Seq(pred, body)) => Assume(uncodeOf(pred), uncodeOf(body))
         case Signature(Label.Assert, Seq(pred, body)) => Assert(uncodeOf(pred), None, uncodeOf(body))
         case Signature(Label.Require, Seq(pred, body)) => Require(uncodeOf(pred), uncodeOf(body))
