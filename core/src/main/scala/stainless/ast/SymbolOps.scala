@@ -30,7 +30,9 @@ trait SymbolOps extends inox.ast.SymbolOps with TypeOps { self =>
                                override val t: self.trees.type)
                               (using override val opts: inox.solvers.PurityOptions)
       extends transformers.OCBSLSimplifierWithPC
-        with SimplifierWithPC
+        with SimplifierWithPC with inox.transformers.SimplifierWithPath {
+      override val pp = Env
+    }
     new SimplifierWithPCImpl(self.trees, self.symbols, self.trees, self.trees)(using popts)
     /*
     if (verification.optFullOCBSLSimp) {
