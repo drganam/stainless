@@ -14,13 +14,20 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
   private def ocbsl = ocbslTL.get()
 
   override protected def simplify(e: Expr, path: Env): (Expr, Boolean) = {
+    println("")
+    println("SIMPLIFY:")
+    println(e)
     assert(path.bound.isEmpty) // TODO: Pr le moment
     val subst = path.mkSubst
     assert(subst.nestingLevel == 0) // TODO: Pr le moment
     val oc = ocbsl
     val code = oc.codeOf(e)(using subst)
     val res0 = oc.uncodeOf(code)(using oc.RevEnv.empty)
-    assert(res0.holed.holes.isEmpty) // TODO: Ce n'est p-e pas vrai en raison de path!!! (-> il suffira de mettre des vds dummy)
+    println(s"I haz $path")
+    println(s"I haz ${res0.holed.holes}")
+//    val tayst = res0.holed.expr(Map(2 -> Variable.fresh("AAAAAA", Untyped)))
+//    println(tayst)
+    assert(res0.holed.holes.isEmpty, s"Result has holes: ${res0.holed.holes.toSeq.sorted}") // TODO: Ce n'est p-e pas vrai en raison de path!!! (-> il suffira de mettre des vds dummy)
     val res = res0.holed.expr(Map.empty).copiedFrom(e)
     (res, oc.codePurity(code).isPure)
   }
@@ -295,17 +302,17 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
     private val sizeCache = mutable.Map.empty[Expr, Int]
     private val codeTpe = mutable.Map.empty[Code, Type]
 
-    private val falseSig = Signature(Label.Lit(BooleanLiteral(false)), Seq.empty)
-    private val trueSig = Signature(Label.Lit(BooleanLiteral(true)), Seq.empty)
-    private val falseCode = updateCodesSig(falseSig, Pure, BooleanType())
-    private val trueCode = updateCodesSig(trueSig, Pure, BooleanType())
-
     private val purityCache = mutable.Map.empty[Identifier, Boolean]
     private val codePurityCache = mutable.Map.empty[Code, Boolean]
     private val fnBlockedBy = mutable.Map.empty[Identifier, Set[Identifier]] // K = fn qui est bloqué par les fn dans V
     private val codeBlockedBy = mutable.Map.empty[Code, Set[Identifier]] // K = code qui est bloqué par les fn dans V
     private val blocking = mutable.Map.empty[Identifier, (Set[Identifier], Set[Code])] // K = fn qui bloque les fn et les codes dans V
     private val visiting = mutable.Set.empty[Identifier]
+
+    private val falseSig = Signature(Label.Lit(BooleanLiteral(false)), Seq.empty)
+    private val trueSig = Signature(Label.Lit(BooleanLiteral(true)), Seq.empty)
+    private val falseCode = updateCodesSig(falseSig, Pure, BooleanType())
+    private val trueCode = updateCodesSig(trueSig, Pure, BooleanType())
 
     def codePurity(c: Code): Purity = {
       assert(code2sig.contains(c))
@@ -314,15 +321,21 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
         .getOrElse(Delayed(codeBlockedBy(c)))
     }
 
-    def codeOf(e: Expr)(using subst: Subst): Code = simplifiedDisjunction(pDisj(e).toSet)
+    def codeOf(e: Expr)(using subst: Subst): Code = {
+      if (e.getType == BooleanType()) simplifiedDisjunction(pDisj(e).toSet)
+      else {
+        val (sig, p) = computeSignature(e)
+        updateCodesSig(sig, p, e.getType)
+      }
+    }
 
     def negCodeOf(c: Code)(using Subst): Code = updateCodesSig(pNegNormal(c), codePurity(c), BooleanType())
 
     def fnPurity(fn: Identifier)(using subst: Subst): Purity = {
       def resolvedPurity(isPure: Boolean): Unit = {
+        purityCache += fn -> isPure
         if (blocking.contains(fn)) {
           val (blockedFns, blockedCodes) = blocking.remove(fn).get
-          purityCache += fn -> isPure
           for (blockedFn <- blockedFns) {
             assert(fnBlockedBy.contains(blockedFn))
             assert(fnBlockedBy(blockedFn) == Set(fn))
@@ -889,7 +902,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
     // TODO: Ok?
     // TODO: Cache?
     def pDisj(e: Expr)(using Subst): Seq[Code] = {
-      assert(e.getType == BooleanType())
+      assert(e.getType == BooleanType(), s"Got ${e.getType}")
       computeSignature(e) match {
         case (Signature(Label.Or, children), _) => children
         case (sig, p) => Seq(updateCodesSig(sig, p, BooleanType()))
@@ -1403,7 +1416,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
         }, holeds.flatMap(_.holes).toSet)
 
       def chkd(expr: Map[Int, Expr] => Expr, holes: Set[Int]): Holed = Holed({ subst =>
-        assert(subst.keySet == holes)
+        assert(holes.subsetOf(subst.keySet), s"${holes.toSeq.sorted} not a subset of ${subst.keys.toSeq.sorted}")
         expr(subst)
       }, holes)
     }
@@ -1469,7 +1482,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
       code2sig(c) match {
         case Signature(Label.Var(v), Seq()) => RevRes(Holed.const(v), Counts.empty)
         case Signature(Label.IndexedVar(v), Seq()) =>
-          val ix = v + renv.nestingLevel
+          val ix = renv.nestingLevel - v
           RevRes(Holed.ofOne(ix), Counts(Map(ix -> Count(1, renv.inLambda, false, renv.noPC))))
 
         case Signature(Label.Let, Seq(cE, cBody)) =>
@@ -1481,7 +1494,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
           val canSubstPure = codePurity(cE).isPure &&
             cntsInBody.occurrences <= 1 &&
             (!cntsInBody.inLambda || !cntsInBody.containsLambda)
-          lazy val canSubstImpure = !cntsInBody.inLambda && cntsInBody.noPC && cntsInBody.occurrences == 1
+          /*lazy */val canSubstImpure = !cntsInBody.inLambda && cntsInBody.noPC && cntsInBody.occurrences == 1
           if (canSubstPure || canSubstImpure) resBody.plugged(ix, resE)
           else {
             val vd = ValDef.fresh("tmp", codeTpe(cE))
@@ -1599,6 +1612,7 @@ trait OCBSLSimplifierWithPC extends Transformer with stainless.transformers.Simp
           // Note: due to short-circuiting, the negation of the disjunct are added as we "move" towards the right.
           // So, in `rest`, we have at least the PC `not(fst)` (also see inox.transforms.TransformerWithPC).
           RevRes.combined(uncodeOf(fst) +: rest.map(uncodeOf(_)(using renv.withPC)))(Or.apply)
+        // TODO: Pour un Not(Or(...)), transformer en And(...)
         case Signature(Label.Not, Seq(c)) => recHelper(c)(Not.apply)
         case Signature(Label.Equals, Seq(c1, c2)) => recHelper(c1, c2)(Equals.apply)
         case Signature(Label.LessThan, Seq(c1, c2)) => recHelper(c1, c2)(LessThan.apply)
