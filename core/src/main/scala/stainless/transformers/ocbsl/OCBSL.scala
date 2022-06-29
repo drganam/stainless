@@ -5,6 +5,7 @@ package ocbsl
 import inox.solvers
 
 // TODO: Certains Or ne semble pas correctement être flattened
+// TODO: Inline les lambda (surtout pour les equations)
 // TODO: Not(Or(..)) => And dans uncodeOf
 // TODO: Non!!!! L'ordre des disjunction a de l'importance
 // TODO: Non!!!! L'ordre des disjunction a de l'importance
@@ -329,8 +330,8 @@ trait OCBSL extends Definitions {
       case ArrayLength(array) =>
         simplifySigTopLvl(mkArrayLength(codeOf(array)), tpe)
 
-      case Error(ofTpe, descr) =>
-        simplifySigTopLvl(mkError(ofTpe, descr), tpe)
+      case Error(ofTpe, descr) => simplifySigTopLvl(mkError(ofTpe, descr), tpe)
+      case NoTree(ofTpe) => simplifySigTopLvl(mkNoTree(ofTpe), tpe)
 
       // TODO: Passer en revue la pureté: p.ex. si on est pas exhaustif, devrait-on retourner "assumeChecked"?
       // Yes, go down right there, you are painful to deal with!!!
@@ -612,15 +613,15 @@ trait OCBSL extends Definitions {
         // Note: on check la purity de `else` parce que c'est elle qu'on va dropper
         // TODO: On peut faire des trucs comme ifExpr
         if (pCond.isPure) {
-          if (pElse.isPure && cond == trueCode) (code2sig(thenn), pThen)
-          else if (pThen.isPure && cond == falseCode) (code2sig(elze), pElse)
+          if (pElse.isPure && cond == trueCode) return (code2sig(thenn), pThen)
+          else if (pThen.isPure && cond == falseCode) return (code2sig(elze), pElse)
           else if (thenn == elze) {
             assert(pThen == pElse)
-            (code2sig(thenn), pThen)
+            return (code2sig(thenn), pThen)
           }
-          else (sig, purity)
         }
-        else (code2sig(thenn), code2sig(elze)) match {
+
+        (code2sig(thenn), code2sig(elze)) match {
           case (Signature(Label.IfExpr, Seq(cond2, thenn2, elze2)), _) if elze == elze2 =>
             val combinedCond = conjunct(Set(cond, cond2))
             val sig2 = Signature(Label.IfExpr, Seq(combinedCond, thenn2, elze2))
@@ -753,7 +754,7 @@ trait OCBSL extends Definitions {
       case Signature(Label.UMinus, Seq(e)) =>
         code2sig(e) match {
           case Signature(Label.UMinus, Seq(e2)) => (code2sig(e2), codePurity(e2))
-          case sig => (sig, codePurity(e))
+          case _ => (sig, codePurity(e))
         }
 
       case Signature(Label.Plus, Seq(e1, e2)) =>
@@ -787,7 +788,7 @@ trait OCBSL extends Definitions {
       case Signature(Label.BVNot, Seq(e)) =>
         code2sig(e) match {
           case Signature(Label.BVNot, Seq(e2)) => (code2sig(e2), codePurity(e2))
-          case sig => (sig, codePurity(e))
+          case _ => (sig, codePurity(e))
         }
 
       case Signature(Label.BVAnd, Seq(e1, e2)) =>
@@ -819,13 +820,18 @@ trait OCBSL extends Definitions {
         if (e2 == zero) {assert(p2.isPure); (code2sig(e1), p1) }
         else (sig, p1 ++ p2)
 
-      case Signature(Label.FiniteSet(_) | Label.SetAdd | Label.ElementOfSet | Label.SubsetOf | Label.SetIntersection | Label.SetUnion | Label.SetDifference, children) =>
+      case Signature(Label.BVNarrowingCast(_) | Label.BVWideningCast(_) | Label.BVUnsignedToSigned | Label.BVSignedToUnsigned, Seq(e)) =>
+        (sig, codePurity(e))
+
+      case Signature(Label.FiniteSet(_) | Label.SetAdd | Label.ElementOfSet | Label.SubsetOf | Label.SetIntersection | Label.SetUnion | Label.SetDifference
+                   | Label.FiniteArray(_) | Label.LargeArray(_, _) | Label.ArraySelect | Label.ArrayUpdated | Label.ArrayLength, children) =>
         // TODO: On peut faire mieux (voir si cela en faut la peine)
         (sig, fold(children.map(codePurity)))
 
       case Signature(Label.Annotated(_), Seq(e)) => (sig, codePurity(e))
 
       case Signature(Label.Error(_, _), Seq()) => (sig, assmChkPurity) // TODO: Pureté ok? Car dans SWP et isImpure, aucune mention de Error...
+      case Signature(Label.NoTree(_), Seq()) => (sig, assmChkPurity) // TODO: Ditto...
 
       case sig =>
         println("simplifySigTopLevel: What is this: "+sig)
@@ -1320,6 +1326,7 @@ trait OCBSL extends Definitions {
       case Signature(Label.ArrayLength, Seq(arr)) => recHelper(arr)(ArrayLength.apply)
 
       case Signature(Label.Error(tpe, descr), Seq()) => RevRes(Holed.const(Error(tpe, descr)), Counts.empty)
+      case Signature(Label.NoTree(tpe), Seq()) => RevRes(Holed.const(NoTree(tpe)), Counts.empty)
 
       case sig =>
         sys.error(s"uncodeOf: what is this: $sig")

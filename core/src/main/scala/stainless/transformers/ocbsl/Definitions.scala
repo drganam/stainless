@@ -110,6 +110,10 @@ trait Definitions {
 
     case TupleSelect(index: Int)
 
+    case StringConcat
+    case SubString
+    case StringLength
+
     case FiniteSet(base: Type)
     case SetAdd
     case ElementOfSet
@@ -118,8 +122,17 @@ trait Definitions {
     case SetUnion
     case SetDifference
 
+    case FiniteBag(base: Type)
+    case BagAdd
+    case MultiplicityInBag
+    case BagIntersection
+    case BagUnion
+    case BagDifference
 
-    // TODO: Bag, etc.
+    case FiniteMap(keyTpe: Type, valueTpe: Type)
+    case MapApply
+    case MapUpdated
+    case MapMerge
 
     case FiniteArray(base: Type)
     // TODO: Comme args, il y a elems.values ++ Seq(default, size)
@@ -130,6 +143,7 @@ trait Definitions {
     case ArrayLength
 
     case Error(tpe: Type, description: String)
+    case NoTree(tpe: Type)
   }
 
   case class Signature(label: Label, children: Seq[Code])
@@ -248,6 +262,7 @@ trait Definitions {
   def mkSetIntersection(lhs: Code, rhs: Code): Signature = Signature(Label.SetIntersection, Seq(lhs, rhs))
   def mkSetUnion(lhs: Code, rhs: Code): Signature = Signature(Label.SetUnion, Seq(lhs, rhs))
   def mkSetDifference(lhs: Code, rhs: Code): Signature = Signature(Label.SetDifference, Seq(lhs, rhs))
+
   def mkFiniteArray(elems: Seq[Code], base: Type): Signature = Signature(Label.FiniteArray(base), elems)
   def mkLargeArray(elems: Map[Int, Code], default: Code, size: Code, base: Type): Signature = {
     val (elemsIndices, elemsCodes) = elems.toSeq.sortBy(_._1).unzip
@@ -256,5 +271,26 @@ trait Definitions {
   def mkArraySelect(arr: Code, i: Code): Signature = Signature(Label.ArraySelect, Seq(arr, i))
   def mkArrayUpdated(arr: Code, i: Code, v: Code): Signature = Signature(Label.ArrayUpdated, Seq(arr, i, v))
   def mkArrayLength(arr: Code): Signature = Signature(Label.ArrayLength, Seq(arr))
+
+  def mkStringConcat(lhs: Code, rhs: Code): Signature = Signature(Label.StringConcat, Seq(lhs, rhs))
+  def mkSubString(expr: Code, start: Code, end: Code): Signature = Signature(Label.SubString, Seq(expr, start, end))
+  def mkStringLength(expr: Code): Signature = Signature(Label.StringLength, Seq(expr))
+
+  def mkFiniteBag(elems: Seq[(Code, Code)], base: Type): Signature =
+    Signature(Label.FiniteBag(base), elems.flatMap { case (c1, c2) => Seq(c1, c2) })
+  def mkBagAdd(bag: Code, elem: Code): Signature = Signature(Label.BagAdd, Seq(bag, elem))
+  def mkMultiplicityInBag(elem: Code, bag: Code): Signature = Signature(Label.MultiplicityInBag, Seq(elem, bag))
+  def mkBagIntersection(lhs: Code, rhs: Code): Signature = Signature(Label.BagIntersection, Seq(lhs, rhs))
+  def mkBagUnion(lhs: Code, rhs: Code): Signature = Signature(Label.BagUnion, Seq(lhs, rhs))
+  def mkBagDifference(lhs: Code, rhs: Code): Signature = Signature(Label.BagDifference, Seq(lhs, rhs))
+
+  def mkFiniteMap(elems: Seq[(Code, Code)], default: Code, keyTpe: Type, valueTpe: Type): Signature =
+    Signature(Label.FiniteMap(keyTpe, valueTpe),
+      elems.flatMap { case (c1, c2) => Seq(c1, c2) } :+ default)
+  def mkMapApply(map: Code, key: Code): Signature = Signature(Label.MapApply, Seq(map, key))
+  def mkMapUpdated(map: Code, elem: Code, value: Code): Signature = Signature(Label.MapUpdated, Seq(map, elem, value))
+  def mkMapMerge(mask: Code, map1: Code, map2: Code): Signature = Signature(Label.MapMerge, Seq(mask, map1, map2))
+
   def mkError(tpe: Type, description: String): Signature = Signature(Label.Error(tpe, description), Seq.empty)
+  def mkNoTree(tpe: Type): Signature = Signature(Label.NoTree(tpe), Seq.empty)
 }
