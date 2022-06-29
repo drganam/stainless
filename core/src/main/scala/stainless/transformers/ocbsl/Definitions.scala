@@ -117,7 +117,7 @@ trait Definitions {
     case SetIntersection
     case SetUnion
     case SetDifference
-    // TODO: SetOps
+
 
     // TODO: Bag, etc.
 
@@ -128,6 +128,8 @@ trait Definitions {
     case ArraySelect
     case ArrayUpdated
     case ArrayLength
+
+    case Error(tpe: Type, description: String)
   }
 
   case class Signature(label: Label, children: Seq[Code])
@@ -254,4 +256,5 @@ trait Definitions {
   def mkArraySelect(arr: Code, i: Code): Signature = Signature(Label.ArraySelect, Seq(arr, i))
   def mkArrayUpdated(arr: Code, i: Code, v: Code): Signature = Signature(Label.ArrayUpdated, Seq(arr, i, v))
   def mkArrayLength(arr: Code): Signature = Signature(Label.ArrayLength, Seq(arr))
+  def mkError(tpe: Type, description: String): Signature = Signature(Label.Error(tpe, description), Seq.empty)
 }

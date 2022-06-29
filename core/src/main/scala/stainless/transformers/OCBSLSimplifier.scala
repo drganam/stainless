@@ -18,9 +18,9 @@ trait OCBSLSimplifier { self =>
   private var vcNum: Int = 1
 
   def simplify(e: Expr): Expr = {
-    if (vcNum >= 10) {
-      ???
-    }
+//    if (vcNum >= 10) {
+//      ???
+//    }
 //    println("")
 //    println("SIMPLIFY:")
 //    println(e)

@@ -4,6 +4,21 @@ package ocbsl
 
 import inox.solvers
 
+// TODO: Certains Or ne semble pas correctement être flattened
+// TODO: Not(Or(..)) => And dans uncodeOf
+// TODO: Non!!!! L'ordre des disjunction a de l'importance
+// TODO: Non!!!! L'ordre des disjunction a de l'importance
+// TODO: Non!!!! L'ordre des disjunction a de l'importance
+// TODO: Non!!!! L'ordre des disjunction a de l'importance
+// TODO: Non!!!! L'ordre des disjunction a de l'importance
+// TODO: Non!!!! L'ordre des disjunction a de l'importance
+// TODO: Non!!!! L'ordre des disjunction a de l'importance
+// TODO: Non!!!! L'ordre des disjunction a de l'importance
+// TODO: Non!!!! L'ordre des disjunction a de l'importance
+// TODO: Non!!!! L'ordre des disjunction a de l'importance
+// TODO: Non!!!! L'ordre des disjunction a de l'importance
+// TODO: Non!!!! L'ordre des disjunction a de l'importance
+// TODO: Non!!!! L'ordre des disjunction a de l'importance
 trait OCBSL extends Definitions {
   val opts: solvers.PurityOptions
 
@@ -313,6 +328,10 @@ trait OCBSL extends Definitions {
         simplifySigTopLvl(mkArrayUpdated(codeOf(array), codeOf(index), codeOf(value)), tpe)
       case ArrayLength(array) =>
         simplifySigTopLvl(mkArrayLength(codeOf(array)), tpe)
+
+      case Error(ofTpe, descr) =>
+        simplifySigTopLvl(mkError(ofTpe, descr), tpe)
+
       // TODO: Passer en revue la pureté: p.ex. si on est pas exhaustif, devrait-on retourner "assumeChecked"?
       // Yes, go down right there, you are painful to deal with!!!
       case MatchExpr(scrut, cases) =>
@@ -328,8 +347,12 @@ trait OCBSL extends Definitions {
               val adt = ADTType(id, tps)
               val tcons = getConstructor(id, tps)
               assert(tcons.fields.size == subps.size)
-              // TODO: Opti: pas besoin de mkIsCtor comme cond si unique ctor <-- Non, pas nécessaire? C'est juste pr le body
-              val conds1 = updateCodesSig(mkIsCtor(subScrut, adt, id), pSubScrut, BooleanType())
+
+              val conds1 = {
+                // Using `simplifySigTopLvl` here as it can reduce to `true` if this ADT is the only ctor
+                val (isCtorSig, _) = simplifySigTopLvl(mkIsCtor(subScrut, adt, id), BooleanType())(using env) // TODO: Default env ok?
+                updateCodesSig(isCtorSig, pSubScrut, BooleanType())
+              }
               val (labSubPats, bdgs2, conds2) = tcons.fields.zip(subps).foldLeft((Seq.empty[LabelledPattern], bdgs1, Set(conds1))) {
                 // TODO: Annoté en dropvc?
                 case ((labSubPatAcc, bdgsAcc, condsAcc), (fld, subpat)) =>
@@ -341,6 +364,18 @@ trait OCBSL extends Definitions {
                   (labSubPatAcc :+ labSubPat, bdgsAcc ++ newBdgs, condsAcc ++ newConds)
               }
               (LabelledPattern.ADT(subScrut, id, tps, labSubPats), bdgs2, conds2)
+            case TuplePattern(_, subps) =>
+              val TupleType(bases) = scrutTpe
+              assert(bases.size == subps.size)
+              val (labSubPats, bdgs2, conds) = subps.zipWithIndex.foldLeft((Seq.empty[LabelledPattern], bdgs1, Set.empty[Code])) {
+                case ((labSubPatAcc, bdgsAcc, condsAcc), (subpat, i)) =>
+                  // TODO: Purity de toussa??? devrait on inclure purity scrut???
+                  val newScrutTpe = bases(i)
+                  val newScrut = updateCodesSig(mkTupleSelect(subScrut, i + 1), pSubScrut, newScrutTpe)
+                  val (labSubPat, newBdgs, newConds) = processPattern(newScrut, newScrutTpe, subpat)
+                  (labSubPatAcc :+ labSubPat, bdgsAcc ++ newBdgs, condsAcc ++ newConds)
+              }
+              (LabelledPattern.TuplePattern(subScrut, labSubPats), bdgs2, conds)
             case LiteralPattern(_, lit) => (LabelledPattern.Lit(subScrut ,lit), bdgs1, Set.empty)
             case UnapplyPattern(_, recs, id, tps, subps) =>
               // TODO: !!!! Si on utilise codeOf, ne pas oublier d'utiliser le subst approprié !!!
@@ -401,13 +436,16 @@ trait OCBSL extends Definitions {
             ???
           case (Seq(matchCase), true) =>
             // Remarque: si allCovered = true, alors on a forcément un wildcard pattern (et aucune subst n'est nécessaire)
-            assert(matchCase.pattern == LabelledPattern.Wildcard)
+            assert(matchCase.pattern.isInstanceOf[LabelledPattern.Wildcard])
             // TODO: Et simplifySigTopLvl ???
             // TODO: Autre chose pour les bdgs?
-            (code2sig(matchCase.rhs), pScrut)
+            (code2sig(matchCase.rhs), pScrut ++ codePurity(matchCase.guard) ++ codePurity(matchCase.rhs))
           case (matchCases, _) =>
             // TODO: Et simplifySigTopLvl ???
-            (mkMatchExpr(cScrut, matchCases), pScrut)
+            val purity = matchCases.foldLeft(pScrut) {
+              case (p, LabMatchCase(_, guard, rhs)) => p ++ codePurity(guard) ++ codePurity(rhs)
+            }
+            (mkMatchExpr(cScrut, matchCases), purity)
         }
 
       case e =>
@@ -672,7 +710,8 @@ trait OCBSL extends Definitions {
         (newAdt, argsPurity ++ consingPurity)
 
       case Signature(Label.Tuple, args) => (sig, fold(args.map(codePurity)))
-      case Signature(Label.TupleSelect(i), Seq(e)) =>
+      case Signature(Label.TupleSelect(ii), Seq(e)) =>
+        val i = ii - 1
         (code2sig(e), codePurity(e)) match {
           case (Signature(Label.Tuple, args), p) =>
             // Comme pour ADTSelector, les args qui ne sont pas pures doivent être let-bound
@@ -786,6 +825,8 @@ trait OCBSL extends Definitions {
 
       case Signature(Label.Annotated(_), Seq(e)) => (sig, codePurity(e))
 
+      case Signature(Label.Error(_, _), Seq()) => (sig, assmChkPurity) // TODO: Pureté ok? Car dans SWP et isImpure, aucune mention de Error...
+
       case sig =>
         println("simplifySigTopLevel: What is this: "+sig)
         ???
@@ -849,8 +890,8 @@ trait OCBSL extends Definitions {
         if (implied(codeIsCtor(id))) Some(true)
         else if (implied(codeNotCtor(id))) Some(false)
         else {
-          val sort = adt.getSort
           val cons = getConstructor(id, adt.tps)
+          val sort = cons.sort
           // All other constructors (excluding `id`) for the ADT
           val alts = (sort.constructors.toSet - cons).map(_.id)
 
@@ -1075,6 +1116,13 @@ trait OCBSL extends Definitions {
       combined(Seq(r1, r2, r3)) { case Seq(e1, e2, e3) => recons(e1, e2, e3) }
   }
 
+  // TODO: Est-ce que le noPC est correct??? Parce que dans lhs + rhs, si lhs a des PC ("non locaux"), alors rhs en aura aussi!!!!
+  // TODO: Est-ce que le noPC est correct??? Parce que dans lhs + rhs, si lhs a des PC ("non locaux"), alors rhs en aura aussi!!!!
+  // TODO: Est-ce que le noPC est correct??? Parce que dans lhs + rhs, si lhs a des PC ("non locaux"), alors rhs en aura aussi!!!!
+  // TODO: Est-ce que le noPC est correct??? Parce que dans lhs + rhs, si lhs a des PC ("non locaux"), alors rhs en aura aussi!!!!
+  // TODO: Est-ce que le noPC est correct??? Parce que dans lhs + rhs, si lhs a des PC ("non locaux"), alors rhs en aura aussi!!!!
+  // TODO: Est-ce que le noPC est correct??? Parce que dans lhs + rhs, si lhs a des PC ("non locaux"), alors rhs en aura aussi!!!!
+  // TODO: Est-ce que le noPC est correct??? Parce que dans lhs + rhs, si lhs a des PC ("non locaux"), alors rhs en aura aussi!!!!
   def uncodeOf(c: Code)(using renv: RevEnv): RevRes = {
     renv.revLetDefs.get(c) match {
       case Some(bIx) =>
@@ -1094,6 +1142,7 @@ trait OCBSL extends Definitions {
       case Signature(Label.Let, Seq(cE, cBody)) =>
         val bIx = BinderIx.fromScopeLevel(renv.scopeLevel)
         val resE = uncodeOf(cE)
+        // TODO: noPC même pour cE? C'est un peu contraingnant, cela empeche d'inline des impure...
         val noPC = renv.noPC && codePurity(cE).isPure
         val resBody = uncodeOf(cBody)(using renv.withLetBound(cE).copy(noPC = noPC))
         val cntsInBody = resBody.countOf(bIx)
@@ -1269,6 +1318,8 @@ trait OCBSL extends Definitions {
       case Signature(Label.ArraySelect, Seq(arr, i)) => recHelper(arr, i)(ArraySelect.apply)
       case Signature(Label.ArrayUpdated, Seq(arr, i, v)) => recHelper(arr, i, v)(ArrayUpdated.apply)
       case Signature(Label.ArrayLength, Seq(arr)) => recHelper(arr)(ArrayLength.apply)
+
+      case Signature(Label.Error(tpe, descr), Seq()) => RevRes(Holed.const(Error(tpe, descr)), Counts.empty)
 
       case sig =>
         sys.error(s"uncodeOf: what is this: $sig")
