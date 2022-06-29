@@ -4,8 +4,10 @@ package ocbsl
 
 import inox.solvers
 
-trait Definitions(val trees: ast.Trees,
-                  val symbols: trees.Symbols) {
+trait Definitions {
+  val trees: ast.Trees
+  val symbols: trees.Symbols
+
   import trees._
   import symbols.{given, _}
 
@@ -52,7 +54,7 @@ trait Definitions(val trees: ast.Trees,
   // TODO: S'assurer que les position ou autre info n'influence pas == sur Label
   enum Label {
     case Var(v: Variable)
-    case IndexedVar(i: VarIx)
+    case IndexedVar(i: VarIx, tpe: Type)
     case Let // Indexed
     case Tuple
     case ADT(id: Identifier, tps: Seq[Type])
@@ -61,10 +63,13 @@ trait Definitions(val trees: ast.Trees,
     case FunctionInvocation(id: Identifier, tps: Seq[Type])
     case Annotated(flags: Seq[Flag])
     case IsConstructor(adt: ADTType, id: Identifier)
+
     case Assume
     case Assert
     case Require
     case Ensuring
+    case Decreases
+
     case MatchExpr(patterns: Seq[LabelledPattern])
     case IfExpr
     case Application
@@ -106,6 +111,12 @@ trait Definitions(val trees: ast.Trees,
     case TupleSelect(index: Int)
 
     case FiniteSet(base: Type)
+    case SetAdd
+    case ElementOfSet
+    case SubsetOf
+    case SetIntersection
+    case SetUnion
+    case SetDifference
     // TODO: SetOps
 
     // TODO: Bag, etc.
@@ -175,7 +186,7 @@ trait Definitions(val trees: ast.Trees,
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
   def mkFreeVar(v: Variable): Signature = Signature(Label.Var(v), Seq.empty)
-  def mkIxVar(i: VarIx): Signature = Signature(Label.IndexedVar(i), Seq.empty)
+  def mkIxVar(i: VarIx, tpe: Type): Signature = Signature(Label.IndexedVar(i, tpe), Seq.empty)
   def mkLet(e: Code, body: Code): Signature = Signature(Label.Let, Seq(e, body))
   def mkTuple(args: Seq[Code]): Signature = {
     assert(args.size >= 2)
@@ -190,6 +201,7 @@ trait Definitions(val trees: ast.Trees,
   def mkAssert(pred: Code, body: Code): Signature = Signature(Label.Assert, Seq(pred, body))
   def mkRequire(pred: Code, body: Code): Signature = Signature(Label.Require, Seq(pred, body))
   def mkEnsuring(body: Code, pred: Code): Signature = Signature(Label.Ensuring, Seq(body, pred))
+  def mkDecreases(measure: Code, body: Code): Signature = Signature(Label.Decreases, Seq(measure, body))
   def mkMatchExpr(scrut: Code, cases: Seq[LabMatchCase]): Signature = {
     assert(cases.nonEmpty)
     val (pats, guards, rhs) = cases.map(mc => (mc.pattern, mc.guard, mc.rhs)).unzip3
@@ -228,6 +240,12 @@ trait Definitions(val trees: ast.Trees,
   def mkLit[T](l: Literal[T]): Signature = Signature(Label.Lit(l), Seq.empty)
   def mkTupleSelect(recv: Code, i: Int): Signature = Signature(Label.TupleSelect(i), Seq(recv))
   def mkFiniteSet(elems: Seq[Code], base: Type): Signature = Signature(Label.FiniteSet(base), elems)
+  def mkSetAdd(set: Code, elem: Code): Signature = Signature(Label.SetAdd, Seq(set, elem))
+  def mkElementOfSet(elem: Code, set: Code): Signature = Signature(Label.ElementOfSet, Seq(elem, set))
+  def mkSubsetOf(lhs: Code, rhs: Code): Signature = Signature(Label.SubsetOf, Seq(lhs, rhs))
+  def mkSetIntersection(lhs: Code, rhs: Code): Signature = Signature(Label.SetIntersection, Seq(lhs, rhs))
+  def mkSetUnion(lhs: Code, rhs: Code): Signature = Signature(Label.SetUnion, Seq(lhs, rhs))
+  def mkSetDifference(lhs: Code, rhs: Code): Signature = Signature(Label.SetDifference, Seq(lhs, rhs))
   def mkFiniteArray(elems: Seq[Code], base: Type): Signature = Signature(Label.FiniteArray(base), elems)
   def mkLargeArray(elems: Map[Int, Code], default: Code, size: Code, base: Type): Signature = {
     val (elemsIndices, elemsCodes) = elems.toSeq.sortBy(_._1).unzip

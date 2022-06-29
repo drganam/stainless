@@ -5,15 +5,17 @@ package verification
 
 import inox.Options
 import inox.solvers._
+import stainless.transformers.OCBSLSimplifier
 
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
-import scala.util.{ Success, Failure }
+import scala.util.{Failure, Success}
 import scala.concurrent.Future
 import scala.collection.mutable
 
 object optFailEarly extends inox.FlagOptionDef("fail-early", false)
 object optFailInvalid extends inox.FlagOptionDef("fail-invalid", false)
 object optVCCache extends inox.FlagOptionDef("vc-cache", true)
+object optFullOCBSLSimp extends inox.FlagOptionDef("full-ocbsl", true) // TODO: Set default to false once done
 
 object DebugSectionVerification extends inox.DebugSection("verification")
 object DebugSectionFullVC extends inox.DebugSection("full-vc")
@@ -98,11 +100,26 @@ trait VerificationChecker { self =>
 
     import MainHelpers._
 
+    val simplifyVC: Expr => Expr = {
+      if (context.options.findOptionOrDefault(optFullOCBSLSimp)) {
+        // Note: the class instance is outside of the closure scope to avoid repeated creation instances
+        // (so that computation can be preserved across VCs)
+        val ocbslSimp = OCBSLSimplifier(trees, symbols, PurityOptions.assumeChecked)
+        (e: Expr) => ocbslSimp.simplify(
+          simplifyLets(removeAssertions(e)))
+      } else {
+        (e: Expr) => simplifyExpr(
+          simplifyLets(removeAssertions(e))
+        )(using PurityOptions.assumeChecked)
+      }
+    }
+
     def processVC(vc: VC): Option[(VC, VCResult)] = {
       if (stop) None else {
-        val simplifiedCondition = simplifyExpr(
+        val simplifiedCondition = simplifyVC(vc.condition)
+        /*simplifyExpr(
           simplifyLets(removeAssertions(vc.condition))
-        )(using PurityOptions.assumeChecked)
+        )(using PurityOptions.assumeChecked)*/
 
         // For some reasons, the synthesized copy method lacks default parameters...
         val simplifiedVC = (vc.copy()(condition = simplifiedCondition, fid = vc.fid, kind = vc.kind, satisfiability = vc.satisfiability): VC).setPos(vc)
@@ -356,6 +373,12 @@ trait VerificationChecker { self =>
           debug(s"")
           debug(s" - Simplified VC:")
           debug(indent(prettify(simplifiedVC.condition).asString, 3))
+          debug(s"")
+          debug(s" - Vanilla Simplified VC:")
+          val simp = simplifyExpr(
+            simplifyLets(removeAssertions(origVC.condition))
+          )(using PurityOptions.assumeChecked)
+          debug(indent(prettify(simp).asString, 3))
           debug(s"")
         }
       }

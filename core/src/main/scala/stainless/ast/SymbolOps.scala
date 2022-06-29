@@ -12,40 +12,17 @@ trait SymbolOps extends inox.ast.SymbolOps with TypeOps { self =>
   import symbols.{given, _}
 
   override protected def simplifierWithPC(popts: inox.solvers.PurityOptions): SimplifierWithPC = {
-    //    class SimplifierWithPCImpl(override val trees: self.trees.type,
-    //                               override val symbols: self.symbols.type,
-    //                               override val s: self.trees.type,
-    //                               override val t: self.trees.type)
-    //                              (using override val opts: inox.solvers.PurityOptions)
-    //      extends transformers.SimplifierWithPC
-    //         with SimplifierWithPC
-    //         with inox.transformers.SimplifierWithPath {
-    //      override val pp = Env
-    //    }
-    //    new SimplifierWithPCImpl(self.trees, self.symbols, self.trees, self.trees)(using popts)
-
     class SimplifierWithPCImpl(override val trees: self.trees.type,
                                override val symbols: self.symbols.type,
                                override val s: self.trees.type,
                                override val t: self.trees.type)
                               (using override val opts: inox.solvers.PurityOptions)
-      extends transformers.OCBSLSimplifierWithPC
-        with SimplifierWithPC with inox.transformers.SimplifierWithPath {
+      extends transformers.SimplifierWithPC
+         with SimplifierWithPC
+         with inox.transformers.SimplifierWithPath {
       override val pp = Env
     }
     new SimplifierWithPCImpl(self.trees, self.symbols, self.trees, self.trees)(using popts)
-    /*
-    if (verification.optFullOCBSLSimp) {
-      new SimplifierWithPCImpl(self.trees, self.symbols, self.trees, self.trees)(using popts)
-        with transformers.OCBSLSimplifierWithPC
-    } else {
-      new SimplifierWithPCImpl(self.trees, self.symbols, self.trees, self.trees)(using popts)
-          with transformers.SimplifierWithPC
-          with inox.transformers.SimplifierWithPath {
-        override val pp = Env
-      }
-    }
-    */
   }
 
   protected class StainlessTransformerWithPC[P <: PathLike[P]](

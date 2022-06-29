@@ -4,17 +4,18 @@ package ocbsl
 
 import inox.solvers
 
-class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
-            val opts: solvers.PurityOptions)
-  extends Definitions(trees, symbols) {
+trait OCBSL extends Definitions {
+  val opts: solvers.PurityOptions
+
   import trees._
   import symbols.{given, _}
   import Opaques.{given, _}
   import Purity._
-  import scala.collection.mutable
+  import scala.collection.mutable // A bit ironic that we import mutable stuff right after "Purity"...
+
+  /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
   case class OEnv(conditions: Set[Code],
-                  free: Map[Variable, Code],
                   bound: Map[Variable, BinderIx],
                   scopeLevel: Int,
                   // variable -> code de la *definition* pas de le code de l'indexed var
@@ -30,10 +31,9 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
     def withLetBounds(vds: Seq[(ValDef, Code)], canSubst: Boolean): OEnv = {
       // Note: params may be empty, which is fine (the nesting level will not increase)
 
-      assert(letDef.values.map(_._1).toSet.intersect(vds.map(_._2).toSet).isEmpty)
       assert(letDef.keySet.intersect(vds.map(_._1.toVariable).toSet).isEmpty)
 
-      OEnv(conditions, free,
+      OEnv(conditions,
         bound ++ vds.zipWithIndex.map { case ((vd, _), i) => vd.toVariable -> BinderIx.fromScopeLevel(scopeLevel + i) }.toMap,
         scopeLevel + vds.size,
         letDef ++ vds.map((vd, c) => vd.toVariable -> (c, canSubst)))
@@ -43,16 +43,21 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
 
     def withOpenBounds(params: Seq[ValDef]): OEnv = {
       // Note: params may be empty, which is fine (the nesting level will not increase)
-      OEnv(conditions, free,
+      OEnv(conditions,
         bound ++ params.zipWithIndex.map((vd, i) => vd.toVariable -> BinderIx.fromScopeLevel(scopeLevel + i)).toMap,
         scopeLevel + params.size, letDef)
     }
   }
   object OEnv {
-    def empty: OEnv = OEnv(Set.empty, Map.empty, Map.empty, 0, Map.empty)
+    def empty: OEnv = OEnv(Set.empty, Map.empty, 0, Map.empty)
   }
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+  // TODO: Et les assms???
+  // TODO: Et les assms???
+  // TODO: Et les assms???
+  // TODO: Et les assms???
 
   // TODO: On pourrait simplifier les trucs du genre !isInstanceOf[A] && isInstanceOf[B] en isInstanceOf[B] pour les patmat?
 
@@ -100,7 +105,9 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
   def negCodeOf(c: Code)(using OEnv): Code = updateCodesSig(pNegNormal(c), codePurity(c), BooleanType())
 
   // TODO: Pk ce truc est fait dans codeOf mais pas dans pDisj?
+  // TODO: Et les assms???
   def simplifiedDisjunction(disj: Set[Code]): Code = {
+    assert(disj.forall(c => codeTpe(c) == BooleanType()))
     // TODO: Caching?
     val purity = fold(disj.map(codePurity).toSeq)
     val disj1 = disj.filter(_ != falseCode)
@@ -116,8 +123,8 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
   def computeSignature(e: Expr)(using env: OEnv): (Signature, Purity) = {
     val tpe = e.getType
     val (sig, purity) = e match {
-      case v: Variable =>
-        (sigOfVariable(v), Pure) // TODO
+      case v: Variable => sigOfVariable(v)
+      case l: Literal[_] => (mkLit(l), Pure)
 
       case Assume(pred, body) =>
         val cPred = codeOf(pred)
@@ -135,9 +142,10 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
         simplifySigTopLvl(mkRequire(cPred, cBody), tpe)
 
       case Ensuring(body, pred) =>
-        val cBody = codeOf(body)
-        val cPred = codeOf(pred)
-        simplifySigTopLvl(mkEnsuring(cBody, cPred), tpe)
+        simplifySigTopLvl(mkEnsuring(codeOf(body), codeOf(pred)), tpe)
+
+      case Decreases(measure, body) =>
+        simplifySigTopLvl(mkDecreases(codeOf(measure), codeOf(body)), tpe)
 
       case Tuple(args) =>
         simplifySigTopLvl(mkTuple(args.map(codeOf)), tpe)
@@ -145,117 +153,14 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
       case ADT(id, tps, args) =>
         simplifySigTopLvl(mkADT(id, tps, args.map(codeOf)), tpe)
 
-      case MatchExpr(scrut, cases) =>
-        def processPattern(subScrut: Code, scrutTpe: Type, pat: Pattern): (LabelledPattern, Seq[(ValDef, Code)], Set[Code]) = {
-          // On doit être vigilent avec les env implicites qu'on utilise!!!
-          given dontDefaultUseOuterEnv: OEnv = sys.error("Carefully consider the appropriate env to use")
-          val pSubScrut = codePurity(subScrut)
-          val vdBinder: ValDef = pat.binder.getOrElse(ValDef.fresh("dummyBinder", scrutTpe))
-          val bdgs1 = Seq((vdBinder, subScrut))
-          pat match {
-            case WildcardPattern(_) => (LabelledPattern.Wildcard(subScrut), bdgs1, Set.empty)
-            case ADTPattern(_, id, tps, subps) =>
-              val adt = ADTType(id, tps)
-              val tcons = getConstructor(id, tps)
-              assert(tcons.fields.size == subps.size)
-              // TODO: Opti: pas besoin de mkIsCtor comme cond si unique ctor
-              val conds1 = updateCodesSig(mkIsCtor(subScrut, adt, id), pSubScrut, BooleanType())
-              val (labSubPats, bdgs2, conds2) = tcons.fields.zip(subps).foldLeft((Seq.empty[LabelledPattern], bdgs1, Set(conds1))) {
-                // TODO: Annoté en dropvc?
-                case ((labSubPatAcc, bdgsAcc, condsAcc), (fld, subpat)) =>
-                  // TODO: Il nous faut un adt selector
-                  // TODO: Ok????
-                  // TODO: Purity de toussa??? devrait on inclure purity scrut???
-                  val newScrut = updateCodesSig(mkADTSelector(subScrut, adt, tcons, fld.id), pSubScrut, fld.getType)
-                  val (labSubPat, newBdgs, newConds) = processPattern(newScrut, fld.getType, subpat)
-                  (labSubPatAcc :+ labSubPat, bdgsAcc ++ newBdgs, condsAcc ++ newConds)
-              }
-              (LabelledPattern.ADT(subScrut, id, tps, labSubPats), bdgs2, conds2)
-            case LiteralPattern(_, lit) => (LabelledPattern.Lit(subScrut ,lit), bdgs1, Set.empty)
-            case UnapplyPattern(_, recs, id, tps, subps) =>
-              // TODO: !!!! Si on utilise codeOf, ne pas oublier d'utiliser le subst approprié !!!
-              sys.error(s"Does not know how to handle $pat")
-          }
-        }
-
-        val cScrut = codeOf(scrut)
-        val pScrut = codePurity(cScrut)
-
-        // accumulatedConds: la negation des conds des cases antérieures
-        def processCase(mc: MatchCase, accumulatedConds: Set[Code]): Option[(LabMatchCase, Set[Code], Boolean)] = {
-          given dontDefaultUseOuterEnv: OEnv = sys.error("Carefully consider the appropriate env to use")
-          // patConds: SANS le guard!!!
-          val (labPat, bdgs, patConds) = processPattern(cScrut, scrut.getType, mc.pattern)
-          // TODO: canSubst?
-          val env1 = env.withLetBounds(bdgs, canSubst = true).withConds(accumulatedConds ++ patConds)
-          val cGuard = mc.optGuard.map(codeOf(_)(using env1)).getOrElse(trueCode)
-          val env2 = env1.withCond(cGuard)
-
-          val cRhs = codeOf(mc.rhs)(using env2)
-          if (pScrut.isPure) {
-            // TODO: Ok par rapport à la pureté?
-
-            if (implied(trueCode)(using env2)) {
-              // TODO: A-t-on besoin de faire qqchose pour ces bindings?
-              return Some(LabMatchCase(LabelledPattern.Wildcard(cScrut), trueCode, cRhs), Set(trueCode), true)
-            } else if (implied(falseCode)(using env2)) {
-              // Unreachable
-              return None
-            }
-          }
-
-          Some(LabMatchCase(labPat, cGuard, cRhs), patConds + cGuard, false)
-        }
-
-        def processCases(cases: Seq[MatchCase], accumulatedConds: Set[Code], acc: Seq[LabMatchCase]): (Seq[LabMatchCase], Boolean) = {
-          given dontDefaultUseOuterEnv: OEnv = sys.error("Carefully consider the appropriate env to use")
-          if (cases.isEmpty) (acc, false)
-          else {
-            processCase(cases.head, accumulatedConds) match {
-              case Some((labMatchCase, caseConds, allCovered)) =>
-                if (allCovered) (acc :+ labMatchCase, true)
-                else {
-                  val negCaseConds = negatedConjunction(caseConds)(using env)
-                  processCases(cases.tail, accumulatedConds + negCaseConds, acc :+ labMatchCase)
-                }
-              case None =>
-                processCases(cases.tail, accumulatedConds, acc)
-            }
-          }
-        }
-
-        // TODO: Quid pureté???? Et celle des guard+rhs????
-        processCases(cases, Set.empty, Seq.empty) match {
-          // TODO: Et simplifySigTopLvl ???
-          case (Seq(), _) =>
-            ???
-          case (Seq(matchCase), true) =>
-            // Remarque: si allCovered = true, alors on a forcément un wildcard pattern (et aucune subst n'est nécessaire)
-            assert(matchCase.pattern == LabelledPattern.Wildcard)
-            // TODO: Et simplifySigTopLvl ???
-            // TODO: Autre chose pour les bdgs?
-            (code2sig(matchCase.rhs), pScrut)
-          case (matchCases, _) =>
-            // TODO: Et simplifySigTopLvl ???
-            (mkMatchExpr(cScrut, matchCases), pScrut)
-        }
-
       case s @ ADTSelector(e, selector) =>
         val adt @ ADTType(_, _) = e.getType
         simplifySigTopLvl(mkADTSelector(codeOf(e), adt, s.constructor, selector), tpe)
 
       case FunctionInvocation(id, tps, args) =>
         val cs = args.map(codeOf)
-        lazy val callPurity = {
-          // TODO: A bouger dans fnPurity?
-          if (visiting.contains(id)) {
-            if (!opts.assumeChecked) Impure
-            else Delayed(Set(id))
-          }
-          else fnPurity(id)
-        }
         // TODO: Pk ne pousse-t-on pas cela dans simplifyTopLvlSig??
-        val purity = fold(cs.map(codePurity)) ++ callPurity
+        val purity = fold(cs.map(codePurity)) ++ fnPurity(id)
         (mkFunInvoc(id, tps, cs), purity) // TODO
 
       case Application(callee, args) =>
@@ -383,6 +288,21 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
       case TupleSelect(e, index) =>
         simplifySigTopLvl(mkTupleSelect(codeOf(e), index), tpe)
 
+      case FiniteSet(elems, base) =>
+        simplifySigTopLvl(mkFiniteSet(elems.map(codeOf), base), tpe)
+      case SetAdd(set, elem) =>
+        simplifySigTopLvl(mkSetAdd(codeOf(set), codeOf(elem)), tpe)
+      case ElementOfSet(elem, set) =>
+        simplifySigTopLvl(mkElementOfSet(codeOf(elem), codeOf(set)), tpe)
+      case SubsetOf(lhs, rhs) =>
+        simplifySigTopLvl(mkSubsetOf(codeOf(lhs), codeOf(rhs)), tpe)
+      case SetIntersection(lhs, rhs) =>
+        simplifySigTopLvl(mkSetIntersection(codeOf(lhs), codeOf(rhs)), tpe)
+      case SetUnion(lhs, rhs) =>
+        simplifySigTopLvl(mkSetUnion(codeOf(lhs), codeOf(rhs)), tpe)
+      case SetDifference(lhs, rhs) =>
+        simplifySigTopLvl(mkSetDifference(codeOf(lhs), codeOf(rhs)), tpe)
+
       case FiniteArray(elems, base) =>
         simplifySigTopLvl(mkFiniteArray(elems.map(codeOf), base), tpe)
       case LargeArray(elems, default, size, base) =>
@@ -393,12 +313,105 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
         simplifySigTopLvl(mkArrayUpdated(codeOf(array), codeOf(index), codeOf(value)), tpe)
       case ArrayLength(array) =>
         simplifySigTopLvl(mkArrayLength(codeOf(array)), tpe)
+      // TODO: Passer en revue la pureté: p.ex. si on est pas exhaustif, devrait-on retourner "assumeChecked"?
+      // Yes, go down right there, you are painful to deal with!!!
+      case MatchExpr(scrut, cases) =>
+        def processPattern(subScrut: Code, scrutTpe: Type, pat: Pattern): (LabelledPattern, Seq[(ValDef, Code)], Set[Code]) = {
+          // On doit être vigilent avec les env implicites qu'on utilise!!!
+          given dontDefaultUseOuterEnv: OEnv = sys.error("Carefully consider the appropriate env to use")
+          val pSubScrut = codePurity(subScrut)
+          val vdBinder: ValDef = pat.binder.getOrElse(ValDef.fresh("dummyBinder", scrutTpe))
+          val bdgs1 = Seq((vdBinder, subScrut))
+          pat match {
+            case WildcardPattern(_) => (LabelledPattern.Wildcard(subScrut), bdgs1, Set.empty)
+            case ADTPattern(_, id, tps, subps) =>
+              val adt = ADTType(id, tps)
+              val tcons = getConstructor(id, tps)
+              assert(tcons.fields.size == subps.size)
+              // TODO: Opti: pas besoin de mkIsCtor comme cond si unique ctor <-- Non, pas nécessaire? C'est juste pr le body
+              val conds1 = updateCodesSig(mkIsCtor(subScrut, adt, id), pSubScrut, BooleanType())
+              val (labSubPats, bdgs2, conds2) = tcons.fields.zip(subps).foldLeft((Seq.empty[LabelledPattern], bdgs1, Set(conds1))) {
+                // TODO: Annoté en dropvc?
+                case ((labSubPatAcc, bdgsAcc, condsAcc), (fld, subpat)) =>
+                  // TODO: Il nous faut un adt selector
+                  // TODO: Ok????
+                  // TODO: Purity de toussa??? devrait on inclure purity scrut???
+                  val newScrut = updateCodesSig(mkADTSelector(subScrut, adt, tcons, fld.id), pSubScrut, fld.getType)
+                  val (labSubPat, newBdgs, newConds) = processPattern(newScrut, fld.getType, subpat)
+                  (labSubPatAcc :+ labSubPat, bdgsAcc ++ newBdgs, condsAcc ++ newConds)
+              }
+              (LabelledPattern.ADT(subScrut, id, tps, labSubPats), bdgs2, conds2)
+            case LiteralPattern(_, lit) => (LabelledPattern.Lit(subScrut ,lit), bdgs1, Set.empty)
+            case UnapplyPattern(_, recs, id, tps, subps) =>
+              // TODO: !!!! Si on utilise codeOf, ne pas oublier d'utiliser le subst approprié !!!
+              sys.error(s"Does not know how to handle $pat")
+          }
+        }
 
-      case l: Literal[_] =>
-        (mkLit(l), Pure)
+        val cScrut = codeOf(scrut)
+        val pScrut = codePurity(cScrut)
+
+        // accumulatedConds: la negation des conds des cases antérieures
+        def processCase(mc: MatchCase, accumulatedConds: Set[Code]): Option[(LabMatchCase, Set[Code], Boolean)] = {
+          given dontDefaultUseOuterEnv: OEnv = sys.error("Carefully consider the appropriate env to use")
+          // patConds: SANS le guard!!!
+          val (labPat, bdgs, patConds) = processPattern(cScrut, scrut.getType, mc.pattern)
+          // TODO: canSubst?
+          val env1 = env.withLetBounds(bdgs, canSubst = true).withConds(accumulatedConds ++ patConds)
+          val cGuard = mc.optGuard.map(codeOf(_)(using env1)).getOrElse(trueCode)
+          val env2 = env1.withCond(cGuard)
+
+          val cRhs = codeOf(mc.rhs)(using env2)
+          if (pScrut.isPure) {
+            // TODO: Ok par rapport à la pureté?
+
+            if (implied(trueCode)(using env2)) {
+              // TODO: A-t-on besoin de faire qqchose pour ces bindings?
+              return Some(LabMatchCase(LabelledPattern.Wildcard(cScrut), trueCode, cRhs), Set(trueCode), true)
+            } else if (implied(falseCode)(using env2)) {
+              // Unreachable
+              return None
+            }
+          }
+
+          Some(LabMatchCase(labPat, cGuard, cRhs), patConds + cGuard, false)
+        }
+
+        def processCases(cases: Seq[MatchCase], accumulatedConds: Set[Code], acc: Seq[LabMatchCase]): (Seq[LabMatchCase], Boolean) = {
+          given dontDefaultUseOuterEnv: OEnv = sys.error("Carefully consider the appropriate env to use")
+          if (cases.isEmpty) (acc, false)
+          else {
+            processCase(cases.head, accumulatedConds) match {
+              case Some((labMatchCase, caseConds, allCovered)) =>
+                if (allCovered) (acc :+ labMatchCase, true)
+                else {
+                  val negCaseConds = negatedConjunction(caseConds)(using env)
+                  processCases(cases.tail, accumulatedConds + negCaseConds, acc :+ labMatchCase)
+                }
+              case None =>
+                processCases(cases.tail, accumulatedConds, acc)
+            }
+          }
+        }
+
+        // TODO: Quid pureté (surtout si pas exhaustif)???? Et celle des guard+rhs????
+        processCases(cases, Set.empty, Seq.empty) match {
+          // TODO: Et simplifySigTopLvl ???
+          case (Seq(), _) =>
+            ???
+          case (Seq(matchCase), true) =>
+            // Remarque: si allCovered = true, alors on a forcément un wildcard pattern (et aucune subst n'est nécessaire)
+            assert(matchCase.pattern == LabelledPattern.Wildcard)
+            // TODO: Et simplifySigTopLvl ???
+            // TODO: Autre chose pour les bdgs?
+            (code2sig(matchCase.rhs), pScrut)
+          case (matchCases, _) =>
+            // TODO: Et simplifySigTopLvl ???
+            (mkMatchExpr(cScrut, matchCases), pScrut)
+        }
 
       case e =>
-        println("Do not know how to handle "+e)
+        println("computeSignature: Do not know how to handle "+e)
         ???
     }
 
@@ -437,17 +450,17 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
     }
   }
 
-  // TODO: Cela suppose que c'est une disjunction, mais c'est p-e pas le cas??? Ca peut etre une expr d'un autre type!!!
   // TODO: Ok?
-  // TODO: Cache?
   def pDisj(e: Expr)(using OEnv): Seq[Code] = {
     assert(e.getType == BooleanType(), s"Got ${e.getType}")
     computeSignature(e) match {
       case (Signature(Label.Or, children), _) => children // TODO: Flatten more?
+      case (Signature(Label.Not, Seq(c)), p) => Seq(updateCodesSig(pNegNormal(c), p, BooleanType())) // TODO: Ok?
       case (sig, p) => Seq(updateCodesSig(sig, p, BooleanType()))
     }
   }
 
+  // TODO: Voir si on peut pas faire qqchose pr eviter code dup avec pNegNormal
   // Signature de Not(child)
   def pNeg(child: Expr)(using OEnv): (Signature, Purity) = {
 
@@ -455,6 +468,7 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
 
     child match {
       case Not(e) => computeSignature(e) // TODO: Orig fait pDisj, mais pDisj et un computeSignature pour nous (du moins, pour le moment)
+      // TODO: Les <= en > etc.
       case or @ Or(_) =>
         // Note: ors cannot be empty (by Or `require`)
         val ors0 = unOr(or)
@@ -501,8 +515,6 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
     }
   }
 
-  // TODO: Pour les cas ou on a besoin d'une réponse "tout de suite" pr la purity pour procéder à des simplification, comment s'y prendre???
-  // TODO: Il y a des simpl. en plus que Stainless fait
   def simplifySigTopLvl(sig: Signature, tpe: Type)(using OEnv): (Signature, Purity) = {
     lazy val zero = codeOfIntLit(0, tpe)
     lazy val one = codeOfIntLit(1, tpe)
@@ -510,6 +522,7 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
     lazy val oneSig = code2sig(one)
 
     sig match {
+      case Signature(Label.Var(_) | Label.IndexedVar(_, _) | Label.Lit(_), Seq()) => (sig, Pure)
       case Signature(Label.Assume, Seq(pred, body)) =>
         if (pred == trueCode) (code2sig(body), codePurity(body))
         else if (pred == falseCode) (Signature(Label.Assume, Seq(falseCode, body)), Impure)
@@ -531,6 +544,10 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
           case Signature(Label.Lambda(Seq(_)), Seq(`trueCode`)) => (code2sig(body), codePurity(body))
           case _ => (sig, Impure)
         }
+
+      case Signature(Label.Decreases, Seq(measure, body)) =>
+        // TODO: Pureté?
+        (sig, codePurity(measure) ++ codePurity(body))
 
       // TODO: Voir ce qu'on peut faire de plus?
       //        case Signature(Label.MatchExpr(patterns), scrut +: cases) =>
@@ -654,6 +671,7 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
         }
         (newAdt, argsPurity ++ consingPurity)
 
+      case Signature(Label.Tuple, args) => (sig, fold(args.map(codePurity)))
       case Signature(Label.TupleSelect(i), Seq(e)) =>
         (code2sig(e), codePurity(e)) match {
           case (Signature(Label.Tuple, args), p) =>
@@ -668,6 +686,8 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
             (code2sig(resWithBdgs), p)
           case (_, p) => (sig, p)
         }
+
+      case Signature(Label.Lambda(_), Seq(_)) => (sig, Pure)
 
       case Signature(Label.Application, callee +: args) =>
         // TODO: On suppose que si callee est originellement let-bound, alors son occurence est de 1 (pr éviter explosion d'inlining)
@@ -760,8 +780,14 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
         if (e2 == zero) {assert(p2.isPure); (code2sig(e1), p1) }
         else (sig, p1 ++ p2)
 
+      case Signature(Label.FiniteSet(_) | Label.SetAdd | Label.ElementOfSet | Label.SubsetOf | Label.SetIntersection | Label.SetUnion | Label.SetDifference, children) =>
+        // TODO: On peut faire mieux (voir si cela en faut la peine)
+        (sig, fold(children.map(codePurity)))
+
+      case Signature(Label.Annotated(_), Seq(e)) => (sig, codePurity(e))
+
       case sig =>
-        println("What is this: "+sig)
+        println("simplifySigTopLevel: What is this: "+sig)
         ???
     }
   }
@@ -769,7 +795,8 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
   def updateCodesSig(sig: Signature, purity: Purity, tpe: Type): Code = {
     sig2code.get(sig) match {
       case Some(c) =>
-        // TODO: Quid purity et type coherence????
+        assert(codePurity(c) == purity, s"${codePurity(c)} != $purity")
+        assert(codeTpe(c) == tpe, s"${codeTpe(c)} != $tpe")
         c
       case None =>
         val newCode = Code.fromInt(sig2code.size)
@@ -796,8 +823,8 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
   def implied(rhs: Code)(using env: OEnv): Boolean = {
     if (env.conditions.isEmpty) rhs == trueCode
     else {
-      // TODO: Quid purité de rhs???
-      // TODO: Pourrait-on envisager de cache subst.condition?
+      // TODO: Quid pureté de rhs???
+      // TODO: Pourrait-on envisager de cache env.condition?
       // a ==> b === a && b = a
       val lhsConj = conjunct(env.conditions)
       val rhsLhsConj = conjunct(Set(lhsConj, rhs))
@@ -834,20 +861,16 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
     }
   }
 
-  def sigOfIndexedVar(bIx: BinderIx)(using env: OEnv): Signature = mkIxVar(bIx.toVarIx(env.scopeLevel))
+  def sigOfIndexedVar(bIx: BinderIx, tpe: Type)(using env: OEnv): Signature = mkIxVar(bIx.toVarIx(env.scopeLevel), tpe)
 
-  def codeOfIndexedVar(bIx: BinderIx, tpe: Type)(using OEnv): Code = updateCodesSig(sigOfIndexedVar(bIx), Pure, tpe)
-
-  def sigOfVariable(v: Variable)(using env: OEnv): Signature = {
-    env.free.get(v).map(code2sig) // Check if `v` is a "free" variable (free w.r.t. OCBSL, but bound w.r.t. Env)
-      // Check if `v` is let-bound *and* that we can use the signature/code of the definition of v
-      .orElse(env.letDef.get(v).filter(_._2).map((c, _) => code2sig(c)))
+  // TODO: Peut-on subst des let-bound à leur définition même si ces defs sont impures?
+  def sigOfVariable(v: Variable)(using env: OEnv): (Signature, Purity) = {
+    // Check if `v` is let-bound *and* that we can use the signature/code of the definition of v
+    env.letDef.get(v).filter(_._2).map((c, _) => (code2sig(c), codePurity(c)))
       // Check if `v` is bound to a lambda, choose forall or let (for which the substitution was forbidden)
-      .orElse(env.bound.get(v).map(sigOfIndexedVar))
-      .getOrElse(mkFreeVar(v))
+      .orElse(env.bound.get(v).map(bIx => (sigOfIndexedVar(bIx, v.getType), Pure)))
+      .getOrElse((mkFreeVar(v), Pure))
   }
-
-  def codeOfVariable(v: Variable)(using OEnv): Code = updateCodesSig(sigOfVariable(v), Pure, v.getType)
 
   def conjunct(conj: Set[Code])(using OEnv): Code = negCodeOf(negatedConjunction(conj))
 
@@ -926,7 +949,9 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
     def withOpenBounds(nbBounds: Int): RevEnv = withOpenBoundsAndIndices(nbBounds)._1
 
     def withPC: RevEnv = copy(noPC = false)
+    def withinLambda: RevEnv = copy(inLambda = true)
   }
+
   object RevEnv {
     def empty: RevEnv = RevEnv(Map.empty, Map.empty, 0, false, true)
   }
@@ -938,6 +963,7 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
         containsLambda || other.containsLambda,
         noPC && other.noPC)
   }
+
   case class Counts(cts: Map[BinderIx, Count]) {
     def of(ix: BinderIx): Count = cts.getOrElse(ix, Count(0, false, false, true))
 
@@ -947,6 +973,7 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
         .toMap)
 
     def -(ix: BinderIx): Counts = Counts(cts - ix)
+    def --(ixs: Set[BinderIx]): Counts = Counts(cts -- ixs)
 
     // TODO: Ok?
     // Si le ix a ces counts là, le résultat de la subst par ix
@@ -970,24 +997,37 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
         .toMap)
     }
   }
+
   object Counts {
     def empty: Counts = Counts(Map.empty)
   }
 
   case class Holed(expr: Map[BinderIx, Expr] => Expr, holes: Set[BinderIx]) {
     def plugged(ix: BinderIx, e: Expr): Holed = {
-      assert(holes.contains(ix))
+      // TODO: Dire que les non-holes sont ignoré
+      // TODO: Devrait-on qd même supprimer les es qui ne sont pas des trous (pour eviter interference avec plus bas que soi)?
+      // assert(holes.contains(ix), s"$ix not contained in ${holes.toSeq.sorted}")
       // TODO: Hmmm, ça n'a pas de sens? Ou bien?
-      Holed.chkd({ subst => expr(subst.updated(ix, e)) }, holes - ix)
+      Holed.chkd(subst => expr(subst.updated(ix, e)), holes - ix)
     }
+
+    def plugged(es: Map[BinderIx, Expr]): Holed = {
+      // TODO: Dire que les non-holes sont ignoré
+      // TODO: Devrait-on qd même supprimer les es qui ne sont pas des trous (pour eviter interference avec plus bas que soi)?
+      // assert(es.keySet.subsetOf(holes), s"${es.keySet.toSeq.sorted} not a subset of ${holes.toSeq.sorted}")
+      // TODO: Ok?
+      Holed.chkd(subst => expr(subst ++ es), holes -- es.keySet)
+    }
+
     def plugged(ix: BinderIx, other: Holed): Holed = {
-      assert(!other.holes.contains(ix))
+      assert(!other.holes.contains(ix), s"Other ${other.holes.toSeq.sorted} contains $ix")
       Holed.chkd({ subst =>
         // TODO: Ok?
         expr(subst.updated(ix, other.expr(subst)))
       }, (holes ++ other.holes) - ix)
     }
   }
+
   object Holed {
     def const(e: Expr): Holed = Holed.chkd(_ => e, Set.empty)
 
@@ -1005,6 +1045,22 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
     }, holes)
   }
 
+  case class RevRes(holed: Holed, counts: Counts) {
+    def countOf(ix: BinderIx): Count = counts.of(ix)
+
+    def plugged(ix: BinderIx, e: Expr): RevRes = RevRes(holed.plugged(ix, e), counts - ix)
+
+    def plugged(es: Map[BinderIx, Expr]): RevRes = RevRes(holed.plugged(es), counts -- es.keySet)
+
+//    def pluggedTrimmed(es: Map[BinderIx, Expr]): RevRes = RevRes(holed.plugged(es), counts -- es.keySet)
+
+    def plugged(ix: BinderIx, other: RevRes): RevRes = {
+      assert(!other.holed.holes.contains(ix))
+      assert(!other.counts.cts.contains(ix))
+      RevRes(holed.plugged(ix, other.holed), counts.replaced(ix, other.counts))
+    }
+  }
+
   object RevRes {
     def combined(res: Seq[RevRes])(recons: Seq[Expr] => Expr): RevRes =
       RevRes(Holed.combined(res.map(_.holed))(recons), res.foldLeft(Counts.empty)(_ ++ _.counts)) // TODO: Ok?
@@ -1019,51 +1075,19 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
       combined(Seq(r1, r2, r3)) { case Seq(e1, e2, e3) => recons(e1, e2, e3) }
   }
 
-  case class RevRes(holed: Holed, counts: Counts) {
-    def countOf(ix: BinderIx): Count = counts.of(ix)
-
-    def plugged(ix: BinderIx, e: Expr): RevRes = RevRes(holed.plugged(ix, e), counts - ix)
-
-    def plugged(es: Map[BinderIx, Expr]): RevRes = ???
-
-    def plugged(ix: BinderIx, other: RevRes): RevRes = {
-      assert(!other.holed.holes.contains(ix))
-      assert(!other.counts.cts.contains(ix))
-      RevRes(holed.plugged(ix, other.holed), counts.replaced(ix, other.counts))
-    }
-  }
-
-  def recHelper(args: Seq[Code])(recons: Seq[Expr] => Expr)(using RevEnv): RevRes = {
-    RevRes.combined(args.map(uncodeOf))(recons)
-  }
-
-  def recHelper(c1: Code)(recons: Expr => Expr)(using RevEnv): RevRes =
-    recHelper(Seq(c1)) { case Seq(e1) => recons(e1) }
-  def recHelper(c1: Code, c2: Code)(recons: (Expr, Expr) => Expr)(using RevEnv): RevRes =
-    recHelper(Seq(c1, c2)) { case Seq(e1, e2) => recons(e1, e2) }
-  def recHelper(c1: Code, c2: Code, c3: Code)(recons: (Expr, Expr, Expr) => Expr)(using RevEnv): RevRes =
-    recHelper(Seq(c1, c2, c3)) { case Seq(e1, e2, e3) => recons(e1, e2, e3) }
-
-  def recHelperOpenBinders(paramTps: Seq[Type], cBody: Code)(recons: (Seq[ValDef], Expr) => Expr)(using renv: RevEnv): RevRes = {
-    val (newRenv, indices) = renv.withOpenBoundsAndIndices(paramTps.size)
-    val vds = indices.zip(paramTps).map { case (ix, tpe) => ix -> ValDef.fresh(s"bdg$ix", tpe) }
-    val body = uncodeOf(cBody)(using newRenv)
-      .plugged(vds.map { case (ix, vd) => ix -> vd.toVariable }.toMap)
-    RevRes.combined(body)(recons(vds.map(_._2), _))
-  }
-
   def uncodeOf(c: Code)(using renv: RevEnv): RevRes = {
     renv.revLetDefs.get(c) match {
       case Some(bIx) =>
         // TODO: Dire pk
-        val sig = Signature(Label.IndexedVar(bIx.toVarIx(renv.scopeLevel)), Seq.empty)
-        return uncodeOf(updateCodesSig(sig, Pure, codeTpe(c)))
+        val tpe = codeTpe(c)
+        val sig = Signature(Label.IndexedVar(bIx.toVarIx(renv.scopeLevel), tpe), Seq.empty)
+        return uncodeOf(updateCodesSig(sig, Pure, tpe))
       case None => ()
     }
 
     code2sig(c) match {
       case Signature(Label.Var(v), Seq()) => RevRes(Holed.const(v), Counts.empty)
-      case Signature(Label.IndexedVar(v), Seq()) =>
+      case Signature(Label.IndexedVar(v, _), Seq()) =>
         val bIx = v.toBinderIx(renv.scopeLevel)
         RevRes(Holed.ofOne(bIx), Counts(Map(bIx -> Count(1, renv.inLambda, false, renv.noPC))))
 
@@ -1098,12 +1122,15 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
           def nextBinder(): Option[ValDef] = {
             if (currVds.isEmpty) None
             else {
-              val (ix, vd) = vds.head
+              val (ix, vd) = currVds.head
               if (ix == BinderIx.fromScopeLevel(currIx)) {
                 currIx += 1
                 currVds = currVds.tail
                 Some(vd)
-              } else None
+              } else {
+                currIx += 1
+                None
+              }
             }
           }
 
@@ -1170,6 +1197,7 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
       case Signature(Label.FunctionInvocation(id, tps), args) => recHelper(args)(FunctionInvocation(id, tps, _))
       case Signature(Label.Annotated(flags), Seq(e)) => recHelper(e)(Annotated(_, flags))
       case Signature(Label.IsConstructor(_, id), Seq(e)) => recHelper(e)(IsConstructor(_, id))
+
       case Signature(Label.Assume, Seq(pred, body)) =>
         RevRes.combined(uncodeOf(pred), uncodeOf(body)(using renv.withPC))(Assume.apply)
       case Signature(Label.Assert, Seq(pred, body)) =>
@@ -1178,13 +1206,16 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
         RevRes.combined(uncodeOf(pred), uncodeOf(body)(using renv.withPC))(Require.apply)
       case Signature(Label.Ensuring, Seq(body, pred)) =>
         recHelper(body, pred) { case (body, pred: Lambda) => Ensuring(body, pred) }
+      case Signature(Label.Decreases, Seq(measure, body)) =>
+        RevRes.combined(uncodeOf(measure), uncodeOf(body)(using renv.withPC))(Decreases.apply)
+
       case Signature(Label.IfExpr, Seq(cond, thn, els)) =>
         RevRes.combined(uncodeOf(cond), uncodeOf(thn)(using renv.withPC), uncodeOf(els)(using renv.withPC))(IfExpr.apply)
       // TODO: Ok?
       case Signature(Label.Application, all@(callee +: args)) =>
         recHelper(all) { case callee +: args => Application(callee, args) }
       case Signature(Label.Lambda(paramTps), Seq(cBody)) =>
-        recHelperOpenBinders(paramTps, cBody)(Lambda.apply)
+        recHelperOpenBinders(paramTps, cBody)(Lambda.apply)(using renv.withinLambda)
       case Signature(Label.Choose(tpe), Seq(cPred)) =>
         recHelperOpenBinders(Seq(tpe), cPred) { case (Seq(vd), pred) => Choose(vd, pred) }
       case Signature(Label.Forall(paramTps), Seq(cPred)) =>
@@ -1221,7 +1252,15 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
       case Signature(Label.BVSignedToUnsigned, Seq(c)) => recHelper(c)(BVSignedToUnsigned.apply)
       case Signature(Label.Lit(lit), Seq()) => RevRes(Holed.const(lit), Counts.empty)
       case Signature(Label.TupleSelect(index), Seq(c)) => recHelper(c)(TupleSelect(_, index))
+
       case Signature(Label.FiniteSet(base), args) => recHelper(args)(FiniteSet(_, base))
+      case Signature(Label.SetAdd, Seq(set, elem)) => recHelper(set, elem)(SetAdd.apply)
+      case Signature(Label.ElementOfSet, Seq(elem, set)) => recHelper(elem, set)(ElementOfSet.apply)
+      case Signature(Label.SubsetOf, Seq(lhs, rhs)) => recHelper(lhs, rhs)(SubsetOf.apply)
+      case Signature(Label.SetIntersection, Seq(lhs, rhs)) => recHelper(lhs, rhs)(SetIntersection.apply)
+      case Signature(Label.SetUnion, Seq(lhs, rhs)) => recHelper(lhs, rhs)(SetUnion.apply)
+      case Signature(Label.SetDifference, Seq(lhs, rhs)) => recHelper(lhs, rhs)(SetDifference.apply)
+
       case Signature(Label.FiniteArray(base), args) => recHelper(args)(FiniteArray(_, base))
       case Signature(Label.LargeArray(elemsIndices, base), all@(elems :+ default :+ size)) =>
         recHelper(all) { case elems :+ default :+ size =>
@@ -1232,8 +1271,27 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
       case Signature(Label.ArrayLength, Seq(arr)) => recHelper(arr)(ArrayLength.apply)
 
       case sig =>
-        sys.error(s"What is this: $sig")
+        sys.error(s"uncodeOf: what is this: $sig")
     }
+  }
+
+  def recHelper(args: Seq[Code])(recons: Seq[Expr] => Expr)(using RevEnv): RevRes = {
+    RevRes.combined(args.map(uncodeOf))(recons)
+  }
+
+  def recHelper(c1: Code)(recons: Expr => Expr)(using RevEnv): RevRes =
+    recHelper(Seq(c1)) { case Seq(e1) => recons(e1) }
+  def recHelper(c1: Code, c2: Code)(recons: (Expr, Expr) => Expr)(using RevEnv): RevRes =
+    recHelper(Seq(c1, c2)) { case Seq(e1, e2) => recons(e1, e2) }
+  def recHelper(c1: Code, c2: Code, c3: Code)(recons: (Expr, Expr, Expr) => Expr)(using RevEnv): RevRes =
+    recHelper(Seq(c1, c2, c3)) { case Seq(e1, e2, e3) => recons(e1, e2, e3) }
+
+  def recHelperOpenBinders(paramTps: Seq[Type], cBody: Code)(recons: (Seq[ValDef], Expr) => Expr)(using renv: RevEnv): RevRes = {
+    val (newRenv, indices) = renv.withOpenBoundsAndIndices(paramTps.size)
+    val vds = indices.zip(paramTps).map { case (ix, tpe) => ix -> ValDef.fresh(s"bdg$ix", tpe) }
+    val body = uncodeOf(cBody)(using newRenv)
+      .plugged(vds.map { case (ix, vd) => ix -> vd.toVariable }.toMap)
+    RevRes.combined(body)(recons(vds.map(_._2), _))
   }
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1313,50 +1371,77 @@ class OCBSL(override val trees: ast.Trees, override val symbols: trees.Symbols,
         codeBlockedBy += blockedCode -> upd
       }
     }
+    if (visiting.contains(fn)) {
+      if (!opts.assumeChecked) Impure
+      else Delayed(Set(fn))
+    } else {
+      purityCache.get(fn) match {
+        case Some(true) => Pure
+        case Some(false) => Impure
+        case None =>
+          // TODO: Quid condition venant du simplifier (s'il y en as???)?
+          // TODO: Différencier:
+          //    -outer assms et local assms
+          //    -outer open bound et local open bound
+          given OEnv = OEnv(Set.empty, Map.empty, 0, Map.empty)
+          assert(!visiting.contains(fn))
+          assert(!fnBlockedBy.contains(fn))
+          assert(!blocking.contains(fn))
+          visiting += fn
+          val res = codePurity(codeOf(getFunction(fn).fullBody))
+          visiting -= fn
+          res match {
+            case Pure =>
+              resolvedPurity(isPure = true)
+              Pure
+            case Impure =>
+              resolvedPurity(isPure = false)
+              Impure
+            case Delayed(blockers0) =>
+              assert(blockers0.nonEmpty)
+              assert(opts.assumeChecked)
+              assert(!fnBlockedBy.contains(fn))
+              val blockersWoCurr = blockers0 - fn
 
-    purityCache.get(fn) match {
-      case Some(true) => Pure
-      case Some(false) => Impure
-      case None =>
-        // TODO: Quid condition venant du simplifier (s'il y en as???)?
-        // TODO: Différencier:
-        //    -outer assms et local assms
-        //    -outer open bound et local open bound
-        given OEnv = OEnv(Set.empty, env.free, Map.empty, 0, Map.empty)
-        assert(!visiting.contains(fn))
-        assert(!fnBlockedBy.contains(fn))
-        assert(!blocking.contains(fn))
-        visiting += fn
-        val res = codePurity(codeOf(getFunction(fn).fullBody))
-        visiting -= fn
-        res match {
-          case Pure =>
-            resolvedPurity(isPure = true)
-            Pure
-          case Impure =>
-            resolvedPurity(isPure = false)
-            Impure
-          case Delayed(blockers0) =>
-            assert(blockers0.nonEmpty)
-            assert(opts.assumeChecked)
-            assert(!fnBlockedBy.contains(fn))
-            val blockersWoCurr = blockers0 - fn
-
-            if (blockers0.contains(fn)) {
-              assert(blocking.contains(fn))
-              if (blockersWoCurr.isEmpty) {
-                resolvedPurity(isPure = true)
-                Pure
+              if (blockers0.contains(fn)) {
+                assert(blocking.contains(fn))
+                if (blockersWoCurr.isEmpty) {
+                  resolvedPurity(isPure = true)
+                  Pure
+                } else {
+                  addToBlocked(blockersWoCurr)
+                  Delayed(blockersWoCurr)
+                }
               } else {
-                addToBlocked(blockersWoCurr)
-                Delayed(blockersWoCurr)
+                assert(!blocking.contains(fn))
+                addToBlocked(blockers0)
+                Delayed(blockers0)
               }
-            } else {
-              assert(!blocking.contains(fn))
-              addToBlocked(blockers0)
-              Delayed(blockers0)
-            }
-        }
+          }
+      }
     }
+  }
+
+  /////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+  // Map all codes to their corresponding signatures (for debugging purposes)
+
+  case class ExplicitSig(label: Label, children: Seq[ExplicitSig]) {
+    override def toString: String = {
+      if (children.isEmpty) label.toString
+      else s"($label, ${children.mkString(", ")})"
+    }
+  }
+
+  def asExplicitSig(c: Code): ExplicitSig = {
+    val sig = code2sig(c)
+    ExplicitSig(sig.label, sig.children.map(asExplicitSig))
+  }
+}
+
+object OCBSL {
+  def apply(t: ast.Trees, s: t.Symbols, opts: solvers.PurityOptions): OCBSL{val trees: t.type; val symbols: s.type} = {
+    class Impl(override val trees: t.type, override val symbols: s.type, override val opts: solvers.PurityOptions) extends OCBSL
+    new Impl(t, s, opts)
   }
 }
