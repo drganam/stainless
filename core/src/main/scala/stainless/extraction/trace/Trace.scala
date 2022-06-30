@@ -43,14 +43,6 @@ class Trace(override val s: Trees, override val t: termination.Trees)
     import symbols.{given, _}
     import exprOps._
 
-    def checkArgsNorm(model: Identifier, norm: Identifier) = {
-      val m = symbols.functions(model)
-      val n = symbols.functions(norm)
-
-      //TODO
-      n.params.size >= 1 && n.params.init.size == m.params.size && n.tparams.size == m.tparams.size &&
-      n.params.init.zip(m.params).forall(arg => arg._1.tpe == arg._2.tpe)
-    }
 
     if (Trace.getModels.isEmpty) {
       val models = symbols.functions.values.toList.filter(elem => !elem.flags.exists(_.name == "library") &&
@@ -66,6 +58,15 @@ class Trace(override val s: Trees, override val t: termination.Trees)
       Trace.nextFunction
     }
 
+    def checkArgsNorm(model: Identifier, norm: Identifier) = {
+      val m = symbols.functions(model)
+      val n = symbols.functions(norm)
+
+      //TODO
+      n.params.size >= 1 && n.params.init.size == m.params.size && n.tparams.size == m.tparams.size &&
+      n.params.init.zip(m.params).forall(arg => arg._1.tpe == arg._2.tpe)
+    }
+
     if (Trace.getNorm.isEmpty) {
       val normOpt = symbols.functions.values.toList.find(elem => isNorm(elem.id)).map(elem => elem.id)
 
@@ -76,8 +77,7 @@ class Trace(override val s: Trees, override val t: termination.Trees)
       }
     }
 
-    symbols.functions.values.toList.foreach(fd => if (fd.flags.exists(elem => elem.name == "mkTest"))
-      Trace.setMkTest(fd.id))
+    symbols.functions.values.toList.foreach(fd => if (fd.flags.exists(elem => elem.name == "mkTest")) Trace.setMkTest(fd.id))
 
     def generateEqLemma: List[s.FunDef] = {
 
@@ -634,7 +634,7 @@ object Trace {
       tmpFunctions match {
         //TODO skip if x is model
       case x::xs => {
-        val n = 3 //TODO change
+        val n = 3
         tmpModels = allModels.toList.sortBy(m => -m._2).map(_._1).filterNot(state(x).prevModels.contains).take(n)
 
         //case without priorities
@@ -696,10 +696,8 @@ object Trace {
   // TODO cleaning + check validity of sublemmas
   def nextIteration[T <: AbstractReport[T]](report: AbstractReport[T])(implicit context: inox.Context): Boolean = {
     counter = counter + 1
-    if(counter % 10 == 0) printEverything
+    //if(counter % 10 == 0) printEverything
 
-     println("lemma form nextIteration loop lemma form nextIteration loop lemma form nextIteration loop")
-     println(trace)
      //println("sublemmas validity: sublemmas and then if there are no errors nor unknowns")
      //println(sublemmas(t))
 
@@ -860,12 +858,12 @@ object Trace {
       }
 
       allFunctions.foreach(f => {
-        val c = state(f).counterexample match {
+        state(f).counterexample match {
           case None => None
-          case Some(co) => (co.counterexample, co.fromEval)
+          case Some(c) => 
+            val m = CheckFilter.fixedFullName(f)
+            reporter.info(s"Counterexample for the function $m: $c")
         }
-        val m = CheckFilter.fixedFullName(f)
-        reporter.info(s"Counterexample for the function $m: $c")
       })
 
     }
