@@ -194,6 +194,7 @@ trait OCBSL extends Definitions {
         val adt @ ADTType(_, _) = e.getType
         simplifySigTopLvl(mkIsCtor(codeOf(e), adt, id), tpe)
 
+      // TODO: Les lets de ref. à des variables bound ne peuvent etre "shared"!!!
       // TODO: Let of ADT???
       // TODO: Let of ADT???
       // TODO: Let of ADT???
@@ -1003,16 +1004,15 @@ trait OCBSL extends Definitions {
     def empty: RevEnv = RevEnv(Map.empty, Map.empty, 0, false, true)
   }
 
-  case class Count(occurrences: Int, inLambda: Boolean, containsLambda: Boolean, noPC: Boolean) {
+  case class Count(occurrences: Int, inLambda: Boolean, noPC: Boolean) {
     def ++(other: Count): Count =
       Count(occurrences + other.occurrences,
         inLambda || other.inLambda,
-        containsLambda || other.containsLambda,
         noPC && other.noPC)
   }
 
   case class Counts(cts: Map[BinderIx, Count]) {
-    def of(ix: BinderIx): Count = cts.getOrElse(ix, Count(0, false, false, true))
+    def of(ix: BinderIx): Count = cts.getOrElse(ix, Count(0, false, true))
 
     def ++(other: Counts): Counts =
       Counts((cts.keySet ++ other.cts.keySet)
@@ -1035,7 +1035,6 @@ trait OCBSL extends Definitions {
         if (replCnt.occurrences == 0) currCnt
         else currCnt ++ Count(ixCt.occurrences * replCnt.occurrences,
           ixCt.inLambda || replCnt.inLambda,
-          ixCt.containsLambda || replCnt.containsLambda,
           ixCt.noPC && replCnt.noPC)
       }
 
@@ -1049,12 +1048,12 @@ trait OCBSL extends Definitions {
     def empty: Counts = Counts(Map.empty)
   }
 
-  case class Holed(expr: Map[BinderIx, Expr] => Expr, holes: Set[BinderIx]) {
+  case class Holed(expr: Map[BinderIx, Expr] => Expr, holes: Map[BinderIx, Type]) {
     def plugged(ix: BinderIx, e: Expr): Holed = {
       // TODO: Dire que les non-holes sont ignoré
       // TODO: Devrait-on qd même supprimer les es qui ne sont pas des trous (pour eviter interference avec plus bas que soi)?
       // assert(holes.contains(ix), s"$ix not contained in ${holes.toSeq.sorted}")
-      // TODO: Hmmm, ça n'a pas de sens? Ou bien?
+      assert(holes.get(ix).forall(_ == e.getType), s"Type of hole ${holes(ix)} not equal to type of expr ${e.getType}")
       Holed.chkd(subst => expr(subst.updated(ix, e)), holes - ix)
     }
 
@@ -1063,54 +1062,75 @@ trait OCBSL extends Definitions {
       // TODO: Devrait-on qd même supprimer les es qui ne sont pas des trous (pour eviter interference avec plus bas que soi)?
       // assert(es.keySet.subsetOf(holes), s"${es.keySet.toSeq.sorted} not a subset of ${holes.toSeq.sorted}")
       // TODO: Ok?
+      assert(es.forall { case (ix, e) => holes.get(ix).forall(_ == e.getType) }, s"Mismatch types between holes ${holes.toSeq.sortBy(_._1)} and given map ${es.toSeq.sortBy(_._1)}")
       Holed.chkd(subst => expr(subst ++ es), holes -- es.keySet)
     }
 
     def plugged(ix: BinderIx, other: Holed): Holed = {
-      assert(!other.holes.contains(ix), s"Other ${other.holes.toSeq.sorted} contains $ix")
+      assert(!other.holes.contains(ix), s"Other ${other.holes.toSeq.sortBy(_._1)} contains $ix")
+      val inCommon = holes.keySet.intersect(other.holes.keySet)
+      assert(inCommon.forall(ix => holes(ix) == other.holes(ix)), s"Mismatch of hole type for ${holes.toSeq.sortBy(_._1)} and ${other.holes.toSeq.sortBy(_._1)}")
       Holed.chkd({ subst =>
         // TODO: Ok?
         expr(subst.updated(ix, other.expr(subst)))
       }, (holes ++ other.holes) - ix)
     }
+
+    def pluggedWithOpenBounds(ixs: Set[BinderIx]): (Holed, Map[BinderIx, ValDef]) = {
+      val vds = holes.filter { case (ix, _) => ixs.contains(ix) }
+        .map { case (ix, tpe) => ix -> ValDef.fresh(s"bdg_$ix", tpe) }
+      (plugged(vds.map { case (ix, vd) => ix -> vd.toVariable }), vds)
+    }
+
+    def allPluggedWithOpenBounds: (Expr, Map[BinderIx, ValDef]) = {
+      val (holed, vds) = pluggedWithOpenBounds(holes.keySet)
+      assert(holed.holes.isEmpty)
+      (holed.expr(Map.empty), vds)
+    }
   }
 
   object Holed {
-    def const(e: Expr): Holed = Holed.chkd(_ => e, Set.empty)
+    def const(e: Expr): Holed = Holed.chkd(_ => e, Map.empty)
 
-    def ofOne(ix: BinderIx): Holed = Holed.chkd(_(ix), Set(ix))
+    def ofOne(ix: BinderIx, tpe: Type): Holed = Holed.chkd(_(ix), Map(ix -> tpe))
 
-    def combined(holeds: Seq[Holed])(recons: Seq[Expr] => Expr): Holed =
+    def combined(holeds: Seq[Holed])(recons: Seq[Expr] => Expr): Holed = {
+      val allHoles = holeds.flatMap(_.holes).groupBy(_._1)
+      assert(allHoles.forall(_._2.distinct.size == 1), s"Type mismatch for holes: $allHoles")
       Holed.chkd({ subst =>
         val exprs = holeds.map(_.expr(subst))
         recons(exprs)
-      }, holeds.flatMap(_.holes).toSet)
+      }, allHoles.map { case (ix, ixTps) => ix -> ixTps.head._2 })
+    }
 
-    def chkd(expr: Map[BinderIx, Expr] => Expr, holes: Set[BinderIx]): Holed = Holed({ subst =>
-      assert(holes.subsetOf(subst.keySet), s"${holes.toSeq.sorted} not a subset of ${subst.keys.toSeq.sorted}")
+    def chkd(expr: Map[BinderIx, Expr] => Expr, holes: Map[BinderIx, Type]): Holed = Holed({ subst =>
+      assert(holes.keySet.subsetOf(subst.keySet), s"Holes ${holes.keySet.toSeq.sorted} not a subset of given subst ${subst.keys.toSeq.sorted}")
+      assert(holes.forall((ix, tpe) => subst(ix).getType == tpe),
+        s"Mismatch types between holes ${holes.toSeq.sortBy(_._1)}" +
+          s" and given subst ${subst.toSeq.sortBy(_._1).map { case (ix, e) => (ix, e, e.getType) }}")
       expr(subst)
     }, holes)
   }
 
-  case class RevRes(holed: Holed, counts: Counts) {
+  case class RevRes(holed: Holed, counts: Counts, containsLambda: Boolean) {
     def countOf(ix: BinderIx): Count = counts.of(ix)
 
-    def plugged(ix: BinderIx, e: Expr): RevRes = RevRes(holed.plugged(ix, e), counts - ix)
+    def plugged(ix: BinderIx, e: Expr): RevRes = RevRes(holed.plugged(ix, e), counts - ix, containsLambda)
 
-    def plugged(es: Map[BinderIx, Expr]): RevRes = RevRes(holed.plugged(es), counts -- es.keySet)
+    def plugged(es: Map[BinderIx, Expr]): RevRes = RevRes(holed.plugged(es), counts -- es.keySet, containsLambda)
 
 //    def pluggedTrimmed(es: Map[BinderIx, Expr]): RevRes = RevRes(holed.plugged(es), counts -- es.keySet)
 
     def plugged(ix: BinderIx, other: RevRes): RevRes = {
       assert(!other.holed.holes.contains(ix))
       assert(!other.counts.cts.contains(ix))
-      RevRes(holed.plugged(ix, other.holed), counts.replaced(ix, other.counts))
+      RevRes(holed.plugged(ix, other.holed), counts.replaced(ix, other.counts), containsLambda || other.containsLambda)
     }
   }
 
   object RevRes {
     def combined(res: Seq[RevRes])(recons: Seq[Expr] => Expr): RevRes =
-      RevRes(Holed.combined(res.map(_.holed))(recons), res.foldLeft(Counts.empty)(_ ++ _.counts)) // TODO: Ok?
+      RevRes(Holed.combined(res.map(_.holed))(recons), res.foldLeft(Counts.empty)(_ ++ _.counts), res.exists(_.containsLambda)) // TODO: Ok?
 
     def combined(r1: RevRes)(recons: Expr => Expr): RevRes =
       combined(Seq(r1)) { case Seq(e1) => recons(e1) }
@@ -1139,22 +1159,24 @@ trait OCBSL extends Definitions {
       case None => ()
     }
 
-    code2sig(c) match {
-      case Signature(Label.Var(v), Seq()) => RevRes(Holed.const(v), Counts.empty)
+    val allSig = asExplicitSig(c)
+    val result = code2sig(c) match {
+      case Signature(Label.Var(v), Seq()) => RevRes(Holed.const(v), Counts.empty, containsLambda = false)
       case Signature(Label.IndexedVar(v, _), Seq()) =>
         val bIx = v.toBinderIx(renv.scopeLevel)
-        RevRes(Holed.ofOne(bIx), Counts(Map(bIx -> Count(1, renv.inLambda, false, renv.noPC))))
+        RevRes(Holed.ofOne(bIx, codeTpe(c)), Counts(Map(bIx -> Count(1, renv.inLambda, renv.noPC))), containsLambda = false)
 
       case Signature(Label.Let, Seq(cE, cBody)) =>
         val bIx = BinderIx.fromScopeLevel(renv.scopeLevel)
         val resE = uncodeOf(cE)
-        // TODO: noPC même pour cE? C'est un peu contraingnant, cela empeche d'inline des impure...
+        // TODO: noPC même pour cE? C'est un peu contraignant, cela empeche d'inline des impure...
         val noPC = renv.noPC && codePurity(cE).isPure
+        // TODO: Remplacer ce "noPC" par qqchose d'autre? Au fond on est interessé à savoir si cE apparait en "premier position" dans cBody
         val resBody = uncodeOf(cBody)(using renv.withLetBound(cE).copy(noPC = noPC))
         val cntsInBody = resBody.countOf(bIx)
         val canSubstPure = codePurity(cE).isPure &&
           cntsInBody.occurrences <= 1 &&
-          (!cntsInBody.inLambda || !cntsInBody.containsLambda)
+          (!cntsInBody.inLambda || !resE.containsLambda) // TODO: S'assurer que ce truc soit ok.
         /*lazy */val canSubstImpure = !cntsInBody.inLambda && cntsInBody.noPC && cntsInBody.occurrences == 1
         if (canSubstPure || canSubstImpure) resBody.plugged(bIx, resE)
         else {
@@ -1233,10 +1255,10 @@ trait OCBSL extends Definitions {
         val holes = scrut.holed.holes ++ cases.flatMap { case (_, guard, rhs) => guard.holed.holes ++ rhs.holed.holes }.toSet
         // TODO: Ok??? !!! quid des holes introduit pr les bindings qui sont ensuite plugged ??? !!!
         val counts = scrut.counts ++ cases.foldLeft(Counts.empty) { case (acc, (_, guard, rhs)) => acc ++ guard.counts ++ rhs.counts }
-
+        val containsLambda = scrut.containsLambda || cases.exists { case (_, guard, rhs) => guard.containsLambda || rhs.containsLambda }
         // TODO: Ok???
         RevRes(Holed.chkd({ subst =>
-          val scrutExpr = scrut.holed.expr(subst) // TODO: Et s'il y a des trous holes qui ne sont pas dans scrut/case???
+          val scrutExpr = scrut.holed.expr(subst) // TODO: Et s'il y a des trous qui ne sont pas dans scrut/case???
           val casesExpr = cases.map {
             case (pat, guard, rhs) =>
               val guardExpr = guard.holed.expr(subst)
@@ -1244,7 +1266,7 @@ trait OCBSL extends Definitions {
               MatchCase(pat, if (guardExpr == BooleanLiteral(true)) None else Some(guardExpr), rhsExpr)
           }
           MatchExpr(scrutExpr, casesExpr)
-        }, holes), counts)
+        }, holes), counts, containsLambda)
 
       case Signature(Label.Tuple, args) => recHelper(args)(Tuple.apply)
       case Signature(Label.ADT(id, tps), args) => recHelper(args)(ADT(id, tps, _))
@@ -1271,6 +1293,7 @@ trait OCBSL extends Definitions {
         recHelper(all) { case callee +: args => Application(callee, args) }
       case Signature(Label.Lambda(paramTps), Seq(cBody)) =>
         recHelperOpenBinders(paramTps, cBody)(Lambda.apply)(using renv.withinLambda)
+          .copy(containsLambda = true)
       case Signature(Label.Choose(tpe), Seq(cPred)) =>
         recHelperOpenBinders(Seq(tpe), cPred) { case (Seq(vd), pred) => Choose(vd, pred) }
       case Signature(Label.Forall(paramTps), Seq(cPred)) =>
@@ -1305,7 +1328,7 @@ trait OCBSL extends Definitions {
       case Signature(Label.BVWideningCast(newType), Seq(c)) => recHelper(c)(BVWideningCast(_, newType))
       case Signature(Label.BVUnsignedToSigned, Seq(c)) => recHelper(c)(BVUnsignedToSigned.apply)
       case Signature(Label.BVSignedToUnsigned, Seq(c)) => recHelper(c)(BVSignedToUnsigned.apply)
-      case Signature(Label.Lit(lit), Seq()) => RevRes(Holed.const(lit), Counts.empty)
+      case Signature(Label.Lit(lit), Seq()) => RevRes(Holed.const(lit), Counts.empty, containsLambda = false)
       case Signature(Label.TupleSelect(index), Seq(c)) => recHelper(c)(TupleSelect(_, index))
 
       case Signature(Label.FiniteSet(base), args) => recHelper(args)(FiniteSet(_, base))
@@ -1325,12 +1348,15 @@ trait OCBSL extends Definitions {
       case Signature(Label.ArrayUpdated, Seq(arr, i, v)) => recHelper(arr, i, v)(ArrayUpdated.apply)
       case Signature(Label.ArrayLength, Seq(arr)) => recHelper(arr)(ArrayLength.apply)
 
-      case Signature(Label.Error(tpe, descr), Seq()) => RevRes(Holed.const(Error(tpe, descr)), Counts.empty)
-      case Signature(Label.NoTree(tpe), Seq()) => RevRes(Holed.const(NoTree(tpe)), Counts.empty)
+      case Signature(Label.Error(tpe, descr), Seq()) => RevRes(Holed.const(Error(tpe, descr)), Counts.empty, containsLambda = false)
+      case Signature(Label.NoTree(tpe), Seq()) => RevRes(Holed.const(NoTree(tpe)), Counts.empty, containsLambda = false)
 
       case sig =>
         sys.error(s"uncodeOf: what is this: $sig")
     }
+    val gotExpr = result.holed.allPluggedWithOpenBounds._1
+    assert(codeTpe(c) == gotExpr.getType, s"${codeTpe(c)} != ${gotExpr.getType}")
+    result
   }
 
   def recHelper(args: Seq[Code])(recons: Seq[Expr] => Expr)(using RevEnv): RevRes = {

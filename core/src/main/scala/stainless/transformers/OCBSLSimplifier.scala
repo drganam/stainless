@@ -29,7 +29,7 @@ trait OCBSLSimplifier { self =>
 //    println("Got code:")
 //    println(oc.asExplicitSig(code))
     val res0 = oc.uncodeOf(code)(using oc.RevEnv.empty)
-    assert(res0.holed.holes.isEmpty, s"Result has holes: ${res0.holed.holes.toSeq.sorted}")
+    assert(res0.holed.holes.isEmpty, s"Result has holes: ${res0.holed.holes.toSeq.sortBy(_._1)}")
     val res = res0.holed.expr(Map.empty).copiedFrom(e)
     vcNum += 1
     res
