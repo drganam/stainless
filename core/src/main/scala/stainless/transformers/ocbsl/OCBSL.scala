@@ -8,18 +8,6 @@ import inox.solvers
 // TODO: Inline les lambda (surtout pour les equations)
 // TODO: Not(Or(..)) => And dans uncodeOf
 // TODO: Non!!!! L'ordre des disjunction a de l'importance
-// TODO: Non!!!! L'ordre des disjunction a de l'importance
-// TODO: Non!!!! L'ordre des disjunction a de l'importance
-// TODO: Non!!!! L'ordre des disjunction a de l'importance
-// TODO: Non!!!! L'ordre des disjunction a de l'importance
-// TODO: Non!!!! L'ordre des disjunction a de l'importance
-// TODO: Non!!!! L'ordre des disjunction a de l'importance
-// TODO: Non!!!! L'ordre des disjunction a de l'importance
-// TODO: Non!!!! L'ordre des disjunction a de l'importance
-// TODO: Non!!!! L'ordre des disjunction a de l'importance
-// TODO: Non!!!! L'ordre des disjunction a de l'importance
-// TODO: Non!!!! L'ordre des disjunction a de l'importance
-// TODO: Non!!!! L'ordre des disjunction a de l'importance
 trait OCBSL extends Definitions {
   val opts: solvers.PurityOptions
 
@@ -32,8 +20,8 @@ trait OCBSL extends Definitions {
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
   case class OEnv(conditions: Set[Code],
-                  bound: Map[Variable, BinderIx],
-                  scopeLevel: Int,
+//                  bound: Map[Variable, BinderIx],
+//                  scopeLevel: Int,
                   // variable -> code de la *definition* pas de le code de l'indexed var
                   // et si on peut utiliser ce code là au lieu de l'indexed var.
                   // "true" en général, sauf pour les lambdas dans la var apparait plsrs fois.
@@ -50,22 +38,22 @@ trait OCBSL extends Definitions {
       assert(letDef.keySet.intersect(vds.map(_._1.toVariable).toSet).isEmpty)
 
       OEnv(conditions,
-        bound ++ vds.zipWithIndex.map { case ((vd, _), i) => vd.toVariable -> BinderIx.fromScopeLevel(scopeLevel + i) }.toMap,
-        scopeLevel + vds.size,
+//        bound ++ vds.zipWithIndex.map { case ((vd, _), i) => vd.toVariable -> BinderIx.fromScopeLevel(scopeLevel + i) }.toMap,
+//        scopeLevel + vds.size,
         letDef ++ vds.map((vd, c) => vd.toVariable -> (c, canSubst)))
     }
 
-    def withOpenBound(param: ValDef): OEnv = withOpenBounds(Seq(param))
-
-    def withOpenBounds(params: Seq[ValDef]): OEnv = {
-      // Note: params may be empty, which is fine (the nesting level will not increase)
-      OEnv(conditions,
-        bound ++ params.zipWithIndex.map((vd, i) => vd.toVariable -> BinderIx.fromScopeLevel(scopeLevel + i)).toMap,
-        scopeLevel + params.size, letDef)
-    }
+//    def withOpenBound(param: ValDef): OEnv = withOpenBounds(Seq(param))
+//
+//    def withOpenBounds(params: Seq[ValDef]): OEnv = {
+//      // Note: params may be empty, which is fine (the nesting level will not increase)
+//      OEnv(conditions,
+//        bound ++ params.zipWithIndex.map((vd, i) => vd.toVariable -> BinderIx.fromScopeLevel(scopeLevel + i)).toMap,
+//        scopeLevel + params.size, letDef)
+//    }
   }
   object OEnv {
-    def empty: OEnv = OEnv(Set.empty, Map.empty, 0, Map.empty)
+    def empty: OEnv = OEnv(Set.empty, Map.empty)
   }
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -87,6 +75,10 @@ trait OCBSL extends Definitions {
   //      - Attention au gag avec les lambdas!! On risquera de tout inliner dans le truc de simplification...
   //        Sauf si: On arrive a flairer le truc et qu'on arrive a voir combien il y a de references a cette lambda
   //        si cest let-bound etc.
+  //    - Pour le cache, il faudra qu'on serialize les mapping signature -> code
+  //    Il faudra aussi que ce mapping soit le même pr ts les threads!!!
+  //      -sig2code: on ajoute 1 indirection par ordinal de label pour diminuer les contention
+  //      -code2sig: un simple atomicref d'array fera amplement l'affaire (faudra faire attention pr ne pas faire des allocs concurrentes...)
 
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -97,6 +89,10 @@ trait OCBSL extends Definitions {
   private val code2sig = mutable.Map.empty[Code, Signature]
   private val sizeCache = mutable.Map.empty[Expr, Int]
   private val codeTpe = mutable.Map.empty[Code, Type]
+
+  private var varIdCounter: Int = 0
+  private val varId2Var = mutable.Map.empty[VarId, Variable]
+  private val var2VarId = mutable.Map.empty[Variable, VarId]
 
   private val purityCache = mutable.Map.empty[Identifier, Boolean]
   private val codePurityCache = mutable.Map.empty[Code, Boolean]
@@ -139,7 +135,7 @@ trait OCBSL extends Definitions {
   def computeSignature(e: Expr)(using env: OEnv): (Signature, Purity) = {
     val tpe = e.getType
     val (sig, purity) = e match {
-      case v: Variable => sigOfVariable(v)
+      case v: Variable => sigOfVariableWithSubst(v)
       case l: Literal[_] => (mkLit(l), Pure)
 
       case Assume(pred, body) =>
@@ -174,10 +170,7 @@ trait OCBSL extends Definitions {
         simplifySigTopLvl(mkADTSelector(codeOf(e), adt, s.constructor, selector), tpe)
 
       case FunctionInvocation(id, tps, args) =>
-        val cs = args.map(codeOf)
-        // TODO: Pk ne pousse-t-on pas cela dans simplifyTopLvlSig??
-        val purity = fold(cs.map(codePurity)) ++ fnPurity(id)
-        (mkFunInvoc(id, tps, cs), purity) // TODO
+        simplifySigTopLvl(mkFunInvoc(id, tps, args.map(codeOf)), tpe)
 
       case Application(callee, args) =>
         simplifySigTopLvl(mkApp(codeOf(callee), args.map(codeOf)), tpe)
@@ -199,32 +192,34 @@ trait OCBSL extends Definitions {
       // TODO: Let of ADT???
       // TODO: Let of ADT???
       case Let(vd, e, body) =>
+        val vId = idOfVariable(vd.toVariable)
         val cE = codeOf(e)
         // TODO: Ok par rapport à la pureté et ces subst?
         val canSubst = code2sig(cE) match {
           case Signature(Label.Lambda(_), _) =>
             val v = vd.toVariable
-            // TODO: Par rapport à orig body, et pas simplified body --'
+            // TODO: ça c'est rapport à orig body, et pas simplified body --'
+            // TODO: ça c'est rapport à orig body, et pas simplified body --'
+            // TODO: ça c'est rapport à orig body, et pas simplified body --'
+            // TODO: ça c'est rapport à orig body, et pas simplified body --'
             // TODO: !!!! ??? immediateCall + inLambda ??? !!!!
             //    pour le "immediateCall": ? p-e par rapport au path condition supplémentaire résultant de stmts intermediaire avant le call?
             //    pour le "inLambda": pour eviter explosion en cas d'inling lambda (~> à gérer dans "uncodeOf"?)
-            exprOps.count { case `v` => 1 case _ => 0 } (body) <= 1
+            val cnt = exprOps.count { case `v` => 1 case _ => 0 } (body)
+            cnt <= 1
           case _ => true
         }
         val cB = codeOf(body)(using env.withLetBound(vd, cE, canSubst))
-        simplifySigTopLvl(mkLet(cE, cB), tpe)
+        simplifySigTopLvl(mkLet(vId, cE, cB), tpe)
 
       case Lambda(params, body) =>
-        val c = codeOf(body)(using env.withOpenBounds(params))
-        simplifySigTopLvl(mkLambda(params.map(_.getType), c), tpe)
+        simplifySigTopLvl(mkLambda(params.map(vd => idOfVariable(vd.toVariable)), codeOf(body)), tpe)
 
       case Choose(res, pred) =>
-        val c = codeOf(pred)(using env.withOpenBound(res))
-        simplifySigTopLvl(mkWickedChoose(res.getType, c), tpe)
+        simplifySigTopLvl(mkWickedChoose(idOfVariable(res.toVariable), codeOf(pred)), tpe)
 
       case Forall(params, body) =>
-        val c = codeOf(body)(using env.withOpenBounds(params))
-        simplifySigTopLvl(mkForall(params.map(_.getType), c), tpe)
+        simplifySigTopLvl(mkForall(params.map(vd => idOfVariable(vd.toVariable)), codeOf(body)), tpe)
 
       // TODO: Annotated peut empecher certaines simplif. non? Voir la PR de Georg.
       // TODO: On pourrait p-e ignorer Annotated? De toute façon, si c'est pour avoir des DropVCs, cela ne change rien dans notre cas de figure?
@@ -394,6 +389,7 @@ trait OCBSL extends Definitions {
           // patConds: SANS le guard!!!
           val (labPat, bdgs, patConds) = processPattern(cScrut, scrut.getType, mc.pattern)
           // TODO: canSubst?
+          // TODO: !!! Si canSubst = false, il faudra faire un freshen d'identifiant p.ex. dans inlineLambda !!!
           val env1 = env.withLetBounds(bdgs, canSubst = true).withConds(accumulatedConds ++ patConds)
           val cGuard = mc.optGuard.map(codeOf(_)(using env1)).getOrElse(trueCode)
           val env2 = env1.withCond(cGuard)
@@ -441,6 +437,7 @@ trait OCBSL extends Definitions {
             assert(matchCase.pattern.isInstanceOf[LabelledPattern.Wildcard])
             // TODO: Et simplifySigTopLvl ???
             // TODO: Autre chose pour les bdgs?
+            // TODO: Purity ok???
             (code2sig(matchCase.rhs), pScrut ++ codePurity(matchCase.guard) ++ codePurity(matchCase.rhs))
           case (matchCases, _) =>
             // TODO: Et simplifySigTopLvl ???
@@ -555,6 +552,177 @@ trait OCBSL extends Definitions {
     }
   }
 
+  def freshened(v: VarId): VarId = idOfVariable(varId2Var(v).freshen)
+
+  // TODO: Cette histoire de assume(...) en début de lambda???
+  // TODO: Cette histoire de assume(...) en début de lambda???
+  // TODO: Cette histoire de assume(...) en début de lambda???
+  def inlineLambda(subst: Seq[(VarId, Code)], body: Code)(using env: OEnv): Code = {
+    // TODO: Pourrait être factorisé
+    def rec(c: Code, varSubst: Map[VarId, VarId])(using env: OEnv): Code = {
+      val tpe = codeTpe(c)
+      code2sig(c) match {
+        case Signature(Label.Var(v), Seq()) =>
+          val newV = varSubst.getOrElse(v, v)
+          updateCodesSig(mkVar(newV), Pure, tpe)
+
+        case Signature(Label.Let(v), Seq(e, b)) =>
+          val re = rec(e, varSubst)
+          val freshV = freshened(v)
+          // TODO: canSubst
+          val rb = rec(b, varSubst + (v -> freshV))(using env.withLetBound(new ValDef(varId2Var(freshV)), re, canSubst = false))
+          val (sig, p) = simplifySigTopLvl(mkLet(freshV, re, rb), tpe)
+          updateCodesSig(sig, p, tpe)
+
+        case Signature(Label.Lambda(params), Seq(body)) =>
+          val freshParams = params.map(v => v -> freshened(v))
+          val rbody = rec(body, varSubst ++ freshParams.toMap)
+          val (sig, p) = simplifySigTopLvl(mkLambda(freshParams.map(_._2), rbody), tpe)
+          updateCodesSig(sig, p, tpe)
+
+        case Signature(Label.Forall(params), Seq(pred)) =>
+          val freshParams = params.map(v => v -> freshened(v))
+          val rpred = rec(pred, varSubst ++ freshParams.toMap)
+          val (sig, p) = simplifySigTopLvl(mkForall(freshParams.map(_._2), rpred), tpe)
+          updateCodesSig(sig, p, tpe)
+
+        case Signature(Label.Choose(v), Seq(pred)) =>
+          val freshV = freshened(v)
+          val rpred = rec(pred, varSubst + (v -> freshV))
+          val (sig, p) = simplifySigTopLvl(mkWickedChoose(freshV, rpred), tpe)
+          updateCodesSig(sig, p, tpe)
+
+        case Signature(Label.Assert, Seq(pred, body)) =>
+          val rpred = rec(pred, varSubst)
+          val rbody = rec(body, varSubst)(using env.withCond(rpred))
+          val (sig, p) = simplifySigTopLvl(mkAssert(rpred, rbody), tpe)
+          updateCodesSig(sig, p, tpe)
+
+        case Signature(Label.Assume, Seq(pred, body)) =>
+          val rpred = rec(pred, varSubst)
+          val rbody = rec(body, varSubst)(using env.withCond(rpred))
+          val (sig, p) = simplifySigTopLvl(mkAssume(rpred, rbody), tpe)
+          updateCodesSig(sig, p, tpe)
+
+        case Signature(Label.IfExpr, Seq(c, thn, els)) =>
+          val rc = rec(c, varSubst)
+          val rthn = rec(thn, varSubst)(using env.withCond(rc))
+          val rels = rec(els, varSubst)(using env.withCond(negCodeOf(rc)))
+          val (sig, p) = simplifySigTopLvl(mkIfExpr(rc, rthn, rels), tpe)
+          updateCodesSig(sig, p, tpe)
+
+        case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
+          // TODO: Il faudra supposer que scrut est let-bound?
+          assert(2 * pats.size == guardRhs.size)
+          val (guards, rhss) = guardRhs.grouped(2).map { case Seq(guard, rhs) => (guard, rhs) }.toSeq.unzip
+          val cases = pats.zip(guards).zip(rhss).map {
+            case ((pat, guard), rhs) => LabMatchCase(pat, guard, rhs)
+          }
+          val rscrut = rec(scrut, varSubst)
+          // TODO: Quid pureté (surtout si pas exhaustif)???? Et celle des guard+rhs????
+          processCases(rscrut, cases, Set.empty, varSubst, Seq.empty) match {
+            case (Seq(), _) =>
+              ???
+            case (Seq(matchCase), true) =>
+              // Remarque: si allCovered = true, alors on a forcément un wildcard pattern (et aucune subst n'est nécessaire)
+              assert(matchCase.pattern.isInstanceOf[LabelledPattern.Wildcard])
+              // TODO: Et simplifySigTopLvl ???
+              // TODO: Autre chose pour les bdgs?
+              // TODO: PURITY????
+              // TODO: Idée: slmt si accumulated conds est pure (à faire dans processCase)
+              // TODO: Faire de meme pour computeSignature
+              matchCase.rhs
+            case (newCases, _) =>
+              val purity = newCases.foldLeft(codePurity(rscrut)) {
+                case (p, LabMatchCase(_, guard, rhs)) => p ++ codePurity(guard) ++ codePurity(rhs)
+              }
+              updateCodesSig(mkMatchExpr(rscrut, newCases), purity, tpe)
+          }
+
+        // TODO: Suppose que lab pas besoin d'avoir des sous parties transformées. P.ex. pour MatchExpr, cela ne jouera pas (en raison des recs?)
+        case Signature(lab, children) =>
+          val rchildren = children.map(rec(_, varSubst))
+          val (sig, p) = simplifySigTopLvl(Signature(lab, rchildren), tpe)
+          updateCodesSig(sig, p, tpe)
+      }
+    }
+
+    // TODO: Ditto, d'ailleurs cela devrait être intégré dans simplifySigTopLvl...
+    def collectConds(pat: LabelledPattern): Set[Code] = pat match {
+      case LabelledPattern.Wildcard(_) => Set.empty
+      case LabelledPattern.ADT(scrut, id, tps, subps) =>
+        val adt = ADTType(id, tps)
+        val tcons = getConstructor(id, tps)
+        assert(tcons.fields.size == subps.size)
+        // Using `simplifySigTopLvl` here as it can reduce to `true` if this ADT is the only ctor
+        val (isCtorSig, _) = simplifySigTopLvl(mkIsCtor(scrut, adt, id), BooleanType())(using env) // TODO: Default env ok?
+        val cond = updateCodesSig(isCtorSig, codePurity(scrut), BooleanType())
+        val subconds = subps.flatMap(collectConds).toSet
+        subconds + cond
+      case LabelledPattern.TuplePattern(_, subps) => subps.flatMap(collectConds).toSet
+      case LabelledPattern.Lit(_, _) => Set.empty
+      case LabelledPattern.Unapply(_, recs, id, tps, subps) =>
+        sys.error(s"Does not know how to handle $pat")
+    }
+
+    // TODO: Ditto, d'ailleurs cela devrait être intégré dans simplifySigTopLvl...
+    def processCase(scrut: Code, matchCase: LabMatchCase, accumulatedConds: Set[Code], varSubst: Map[VarId, VarId])(using env: OEnv): Option[(LabMatchCase, Set[Code], Boolean)] = {
+      // Remarque: comme il n'y pas de binder explicit, il n'y a rien a freshen.
+      val rguard = rec(matchCase.guard, varSubst)
+      val caseConds = collectConds(matchCase.pattern) + rguard
+      val newEnv = env.withConds(accumulatedConds)
+      val rrhs = rec(matchCase.rhs, varSubst)(using newEnv)
+
+      if (codePurity(scrut).isPure) {
+        // TODO: Ok par rapport à la pureté?
+        if (implied(trueCode)(using newEnv)) {
+          // TODO: A-t-on besoin de faire qqchose pour ces bindings?
+          return Some(LabMatchCase(LabelledPattern.Wildcard(scrut), trueCode, rrhs), Set(trueCode), true)
+        } else if (implied(falseCode)(using newEnv)) {
+          // Unreachable
+          return None
+        }
+      }
+
+      Some(LabMatchCase(matchCase.pattern, rguard, rrhs), caseConds, false)
+    }
+
+    def processCases(scrut: Code, cases: Seq[LabMatchCase], accumulatedConds: Set[Code], varSubst: Map[VarId, VarId], acc: Seq[LabMatchCase])(using env: OEnv): (Seq[LabMatchCase], Boolean) = {
+      given dontDefaultUseOuterEnv: OEnv = sys.error("Carefully consider the appropriate env to use")
+      if (cases.isEmpty) (acc, false)
+      else {
+        processCase(scrut, cases.head, accumulatedConds, varSubst) match {
+          case Some((newMatchCase, caseConds, allCovered)) =>
+            if (allCovered) (acc :+ newMatchCase, true)
+            else {
+              val negCaseConds = negatedConjunction(caseConds)(using env)
+              processCases(scrut, cases.tail, accumulatedConds + negCaseConds, varSubst, acc :+ newMatchCase)
+            }
+          case None =>
+            processCases(scrut, cases.tail, accumulatedConds, varSubst, acc)
+        }
+      }
+    }
+    // TODO: Remarque: inline une lambda peut donner lieu a une expr impure...
+    // TODO: Pureté?
+    // TODO: Pureté?
+    // TODO: Pureté?
+    val substMap = subst.toMap
+    val initVarSubst = subst.map { case (v, _) => v -> freshened(v) }.toMap
+    val initEnvNewBdgs = initVarSubst.map {
+      case (oldV, newV) => new ValDef(varId2Var(newV)) -> substMap(oldV)
+    }.toSeq
+    val tpe = codeTpe(body)
+    val inlined = rec(body, initVarSubst)(using env.withLetBounds(initEnvNewBdgs, canSubst = true))
+    assert(codeTpe(inlined) == tpe)
+    subst.foldRight(inlined) {
+      case ((oldV, defn), rest) =>
+        val newV = initVarSubst(oldV)
+        val purity = codePurity(defn) ++ codePurity(rest)
+        updateCodesSig(mkLet(newV, defn, rest), purity, tpe)
+    }
+  }
+
   def simplifySigTopLvl(sig: Signature, tpe: Type)(using OEnv): (Signature, Purity) = {
     lazy val zero = codeOfIntLit(0, tpe)
     lazy val one = codeOfIntLit(1, tpe)
@@ -562,7 +730,7 @@ trait OCBSL extends Definitions {
     lazy val oneSig = code2sig(one)
 
     sig match {
-      case Signature(Label.Var(_) | Label.IndexedVar(_, _) | Label.Lit(_), Seq()) => (sig, Pure)
+      case Signature(Label.Var(_) | Label.Lit(_), Seq()) => (sig, Pure)
       case Signature(Label.Assume, Seq(pred, body)) =>
         if (pred == trueCode) (code2sig(body), codePurity(body))
         else if (pred == falseCode) (Signature(Label.Assume, Seq(falseCode, body)), Impure)
@@ -597,7 +765,7 @@ trait OCBSL extends Definitions {
       // TODO: Let of ADT???
       // TODO: Let of ADT???
       // TODO: Let of ADT???
-      case Signature(Label.Let, Seq(e, body)) =>
+      case Signature(Label.Let(_), Seq(e, body)) =>
         // TODO: Peut-on faire autre chose???
         // TODO: Cette histoire de vd dans lambda???
         //  -> Ah, mais c'est peut-être pour éviter une explosion en cas de lambda inlining?
@@ -639,15 +807,21 @@ trait OCBSL extends Definitions {
         isConstructor(e, adt, id) match {
           case Some(b) if purity.isPure => (b2sig(b), Pure)
           case Some(b) =>
-            (Signature(Label.Let, Seq(e, b2c(b))), purity)
+            val v = idOfVariable(Variable.fresh("tmp", codeTpe(e)))
+            (Signature(Label.Let(v), Seq(e, b2c(b))), purity)
           case None => (sig, purity)
         }
 
-      case Signature(Label.ADTSelector(_, ctor, sel), Seq(e)) =>
+      case Signature(Label.ADTSelector(adt, ctor, sel), Seq(e)) =>
         // TODO: Cette histoire de ADT invariant?
         // TODO: Cette histoire de ADT invariant?
         // TODO: Cette histoire de ADT invariant?
         // TODO: approche un peu différente de SWP
+        def default = {
+          // TODO: Cette histoire de ADT invariant?
+          (sig, codePurity(e) ++ (if (opts.assumeChecked) Pure else Impure)) // TODO: Ok avec assumeChecked?
+        }
+
         code2sig(e) match {
           // TODO: A-t-on de toute façon id == ctor.id ?
           case Signature(Label.ADT(id, _), args) =>
@@ -657,15 +831,29 @@ trait OCBSL extends Definitions {
             val toBeBound = args.zipWithIndex.filter { case (c, i) => i != index && !codePurity(c).isPure }.map(_._1)
             // Le résultat de la selection
             val selRes = args(index)
+            // TODO: En aura-t-on besoin? Si on bind tout avant avec un let, cela devrait faire l'affaire non?
             val resWithBdgs = toBeBound.foldRight(selRes) {
               case (arg, rest) =>
                 val p = codePurity(arg) ++ codePurity(rest)
-                updateCodesSig(Signature(Label.Let, Seq(arg, rest)), p, tpe)
+                val v = idOfVariable(Variable.fresh("tmp", codeTpe(arg)))
+                updateCodesSig(Signature(Label.Let(v), Seq(arg, rest)), p, tpe)
             }
             (code2sig(resWithBdgs), codePurity(resWithBdgs))
-          case _ =>
-            // TODO: Cette histoire de ADT invariant?
-            (sig, codePurity(e) ++ (if (opts.assumeChecked) Pure else Impure)) // TODO: Ok avec assumeChecked?
+
+          // TODO: Egalement à faire dans d'autre cas
+          // TODO: Egalement à faire dans d'autre cas
+          // TODO: Egalement à faire dans d'autre cas
+          // TODO: Quid autre expression qui peuvent bénéficier de ce hoisting? P.ex. Assume? Même si un peu plus délicat...
+          // Turn a (lets vs = ... in recv).sel to a lets vs = ... in adt.sel
+          case Signature(Label.Let(v), Seq(defs, recv)) if codePurity(defs).isPure => code2sig(recv) match {
+            case Signature(Label.ADT(_, _), _) =>
+              val (selSimpedSig, purity) = simplifySigTopLvl(mkADTSelector(recv, adt, ctor, sel), tpe)
+              val selSimpedCode = updateCodesSig(selSimpedSig, purity, tpe)
+              (mkLet(v, defs, selSimpedCode), purity)
+            case _ => default
+          }
+
+          case _ => default
         }
 
       case Signature(Label.ADT(id, tps), args) =>
@@ -694,7 +882,8 @@ trait OCBSL extends Definitions {
             val resWithBdgs = toBeBound.foldRight(base) {
               case (arg, rest) =>
                 val p = codePurity(arg) ++ codePurity(rest)
-                updateCodesSig(Signature(Label.Let, Seq(arg, rest)), p, tpe)
+                val v = idOfVariable(Variable.fresh("tmp", codeTpe(arg)))
+                updateCodesSig(Signature(Label.Let(v), Seq(arg, rest)), p, tpe)
             }
             code2sig(resWithBdgs)
           case _ =>
@@ -722,7 +911,8 @@ trait OCBSL extends Definitions {
             val resWithBdgs = toBeBound.foldRight(args(i)) {
               case (arg, rest) =>
                 val p = codePurity(arg) ++ codePurity(rest)
-                updateCodesSig(Signature(Label.Let, Seq(arg, rest)), p, tpe)
+                val v = idOfVariable(Variable.fresh("tmp", codeTpe(arg)))
+                updateCodesSig(Signature(Label.Let(v), Seq(arg, rest)), p, tpe)
             }
             (code2sig(resWithBdgs), p)
           case (_, p) => (sig, p)
@@ -730,13 +920,23 @@ trait OCBSL extends Definitions {
 
       case Signature(Label.Lambda(_), Seq(_)) => (sig, Pure)
 
+      case Signature(Label.FunctionInvocation(id, _), args) =>
+        val purity = fold(args.map(codePurity)) ++ fnPurity(id)
+        (sig, purity)
+
       case Signature(Label.Application, callee +: args) =>
         // TODO: On suppose que si callee est originellement let-bound, alors son occurence est de 1 (pr éviter explosion d'inlining)
         // TODO: Opti
         // TODO: Pureté?
-        (sig, assmChkPurity ++ fold(args.map(codePurity)))
+        code2sig(callee) match {
+          case Signature(Label.Lambda(params), Seq(body)) =>
+            assert(args.size == params.size)
+            val inlined = inlineLambda(params.zip(args), body)
+            (code2sig(inlined), codePurity(inlined))
+          case _ => (sig, assmChkPurity ++ fold(args.map(codePurity)))
+        }
 
-      case Signature(Label.Choose(tpe), Seq(`trueCode`)) if hasInstance(tpe) == Some(true) => (sig, Pure)
+      case Signature(Label.Choose(v), Seq(`trueCode`)) if hasInstance(varTpe(v)) == Some(true) => (sig, Pure)
       case Signature(Label.Choose(_), Seq(_)) => (sig, Impure) // TODO: simp choose
       case Signature(Label.Forall(_), Seq(pred)) => (sig, codePurity(pred)) // TODO: simp forall
 
@@ -909,15 +1109,26 @@ trait OCBSL extends Definitions {
     }
   }
 
-  def sigOfIndexedVar(bIx: BinderIx, tpe: Type)(using env: OEnv): Signature = mkIxVar(bIx.toVarIx(env.scopeLevel), tpe)
+  def idOfVariable(v: Variable): VarId = var2VarId.get(v) match {
+    case Some(vId) => vId
+    case None =>
+      val vId = VarId.fromInt(varIdCounter)
+      varIdCounter += 1
+      var2VarId += v -> vId
+      varId2Var += vId -> v
+      vId
+  }
+  def varTpe(v: VarId): Type = varId2Var(v).tpe
 
   // TODO: Peut-on subst des let-bound à leur définition même si ces defs sont impures?
-  def sigOfVariable(v: Variable)(using env: OEnv): (Signature, Purity) = {
+  //  -> De manière générale, non, du moins pas une subst tel quel. Du moment qu'on recover le let-binding dans uncodeOf, cela devrait aller
+  def sigOfVariableWithSubst(v: Variable)(using env: OEnv): (Signature, Purity) = {
     // Check if `v` is let-bound *and* that we can use the signature/code of the definition of v
-    env.letDef.get(v).filter(_._2).map((c, _) => (code2sig(c), codePurity(c)))
-      // Check if `v` is bound to a lambda, choose forall or let (for which the substitution was forbidden)
-      .orElse(env.bound.get(v).map(bIx => (sigOfIndexedVar(bIx, v.getType), Pure)))
-      .getOrElse((mkFreeVar(v), Pure))
+    env.letDef.get(v).filter(_._2).map { case (c, _) => (code2sig(c), codePurity(c)) }
+      .getOrElse((mkVar(idOfVariable(v)), Pure))
+//      // Check if `v` is bound to a lambda, choose forall or let (for which the substitution was forbidden)
+//      .orElse(env.bound.get(v).map(bIx => (sigOfIndexedVar(bIx, v.getType), Pure)))
+//      .getOrElse((mkFreeVar(v), Pure))
   }
 
   def conjunct(conj: Set[Code])(using OEnv): Code = negCodeOf(negatedConjunction(conj))
@@ -971,37 +1182,46 @@ trait OCBSL extends Definitions {
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-  case class RevEnv(letDefs: Map[BinderIx, Code],
-                    revLetDefs: Map[Code, BinderIx],
-                    scopeLevel: Int,
+  case class RevEnv(letDefs: Map[VarId, Code],
+                    revLetDefs: Map[Code, VarId],
+                    openBounds: Set[VarId],
+//                    scopeLevel: Int,
                     inLambda: Boolean,
                     noPC: Boolean) {
-    def withLetBound(df: Code): RevEnv = withLetBounds(Seq(df))
+    def withLetBound(v: VarId, df: Code): RevEnv = withLetBounds(Seq((v, df)))
 
-    def withLetBounds(dfs: Seq[Code]): RevEnv = withLetBoundsAndIndices(dfs)._1
+    def withLetBounds(lets: Seq[(VarId, Code)]): RevEnv =
+      RevEnv(letDefs ++ lets.toMap, revLetDefs ++ lets.map((v, c) => c -> v).toMap, openBounds, inLambda, noPC)
 
-    def withLetBoundsAndIndices(dfs: Seq[Code]): (RevEnv, Seq[(BinderIx, Code)]) = {
-      val indices = dfs.zipWithIndex.map((c, i) => BinderIx.fromScopeLevel(scopeLevel + i) -> c)
-      val newRenv = RevEnv(
-        letDefs ++ indices.toMap,
-        revLetDefs ++ dfs.zipWithIndex.map((c, i) => c -> BinderIx.fromScopeLevel(scopeLevel + i)).toMap,
-        scopeLevel + dfs.size,
-        inLambda,
-        noPC && dfs.forall(codePurity(_).isPure))
-      (newRenv, indices)
-    }
+    def withOpenBound(v: VarId): RevEnv = copy(openBounds = openBounds + v)
+    def withOpenBound(vs: Set[VarId]): RevEnv = copy(openBounds = openBounds ++ vs)
 
-    def withOpenBoundsAndIndices(nbBounds: Int): (RevEnv, Seq[BinderIx]) =
-      (copy(scopeLevel = scopeLevel + nbBounds), (scopeLevel until (scopeLevel + nbBounds)).map(BinderIx.fromScopeLevel))
+    def isFree(v: VarId): Boolean = !letDefs.contains(v) && !openBounds(v)
 
-    def withOpenBounds(nbBounds: Int): RevEnv = withOpenBoundsAndIndices(nbBounds)._1
+//    def withLetBounds(dfs: Seq[Code]): RevEnv = withLetBoundsAndIndices(dfs)._1
+//
+//    def withLetBoundsAndIndices(dfs: Seq[Code]): (RevEnv, Seq[(VarId, Code)]) = {
+//      val indices = dfs.zipWithIndex.map((c, i) => BinderIx.fromScopeLevel(scopeLevel + i) -> c)
+//      val newRenv = RevEnv(
+//        letDefs ++ indices.toMap,
+//        revLetDefs ++ dfs.zipWithIndex.map((c, i) => c -> BinderIx.fromScopeLevel(scopeLevel + i)).toMap,
+//        scopeLevel + dfs.size,
+//        inLambda,
+//        noPC && dfs.forall(codePurity(_).isPure))
+//      (newRenv, indices)
+//    }
+//
+//    def withOpenBoundsAndIndices(nbBounds: Int): (RevEnv, Seq[BinderIx]) =
+//      (copy(scopeLevel = scopeLevel + nbBounds), (scopeLevel until (scopeLevel + nbBounds)).map(BinderIx.fromScopeLevel))
+//
+//    def withOpenBounds(nbBounds: Int): RevEnv = withOpenBoundsAndIndices(nbBounds)._1
 
     def withPC: RevEnv = copy(noPC = false)
     def withinLambda: RevEnv = copy(inLambda = true)
   }
 
   object RevEnv {
-    def empty: RevEnv = RevEnv(Map.empty, Map.empty, 0, false, true)
+    def empty: RevEnv = RevEnv(Map.empty, Map.empty, Set.empty, false, true)
   }
 
   case class Count(occurrences: Int, inLambda: Boolean, noPC: Boolean) {
@@ -1011,25 +1231,25 @@ trait OCBSL extends Definitions {
         noPC && other.noPC)
   }
 
-  case class Counts(cts: Map[BinderIx, Count]) {
-    def of(ix: BinderIx): Count = cts.getOrElse(ix, Count(0, false, true))
+  case class Counts(cts: Map[VarId, Count]) {
+    def of(ix: VarId): Count = cts.getOrElse(ix, Count(0, false, true))
 
     def ++(other: Counts): Counts =
       Counts((cts.keySet ++ other.cts.keySet)
         .map(ix => ix -> (of(ix) ++ other.of(ix)))
         .toMap)
 
-    def -(ix: BinderIx): Counts = Counts(cts - ix)
-    def --(ixs: Set[BinderIx]): Counts = Counts(cts -- ixs)
+    def -(ix: VarId): Counts = Counts(cts - ix)
+    def --(ixs: Set[VarId]): Counts = Counts(cts -- ixs)
 
     // TODO: Ok?
     // Si le ix a ces counts là, le résultat de la subst par ix
-    def replaced(ix: BinderIx, replacedCounts: Counts): Counts = {
+    def replaced(ix: VarId, replacedCounts: Counts): Counts = {
       assert(!replacedCounts.cts.contains(ix))
       val ixCt = of(ix)
       if (ixCt.occurrences == 0) return Counts(cts - ix)
 
-      def replaced(candIx: BinderIx): Count = {
+      def replaced(candIx: VarId): Count = {
         val currCnt = of(candIx)
         val replCnt = replacedCounts.of(candIx)
         if (replCnt.occurrences == 0) currCnt
@@ -1048,8 +1268,8 @@ trait OCBSL extends Definitions {
     def empty: Counts = Counts(Map.empty)
   }
 
-  case class Holed(expr: Map[BinderIx, Expr] => Expr, holes: Map[BinderIx, Type]) {
-    def plugged(ix: BinderIx, e: Expr): Holed = {
+  case class Holed(expr: Map[VarId, Expr] => Expr, holes: Map[VarId, Type]) {
+    def plugged(ix: VarId, e: Expr): Holed = {
       // TODO: Dire que les non-holes sont ignoré
       // TODO: Devrait-on qd même supprimer les es qui ne sont pas des trous (pour eviter interference avec plus bas que soi)?
       // assert(holes.contains(ix), s"$ix not contained in ${holes.toSeq.sorted}")
@@ -1057,7 +1277,7 @@ trait OCBSL extends Definitions {
       Holed.chkd(subst => expr(subst.updated(ix, e)), holes - ix)
     }
 
-    def plugged(es: Map[BinderIx, Expr]): Holed = {
+    def plugged(es: Map[VarId, Expr]): Holed = {
       // TODO: Dire que les non-holes sont ignoré
       // TODO: Devrait-on qd même supprimer les es qui ne sont pas des trous (pour eviter interference avec plus bas que soi)?
       // assert(es.keySet.subsetOf(holes), s"${es.keySet.toSeq.sorted} not a subset of ${holes.toSeq.sorted}")
@@ -1066,7 +1286,7 @@ trait OCBSL extends Definitions {
       Holed.chkd(subst => expr(subst ++ es), holes -- es.keySet)
     }
 
-    def plugged(ix: BinderIx, other: Holed): Holed = {
+    def plugged(ix: VarId, other: Holed): Holed = {
       assert(!other.holes.contains(ix), s"Other ${other.holes.toSeq.sortBy(_._1)} contains $ix")
       val inCommon = holes.keySet.intersect(other.holes.keySet)
       assert(inCommon.forall(ix => holes(ix) == other.holes(ix)), s"Mismatch of hole type for ${holes.toSeq.sortBy(_._1)} and ${other.holes.toSeq.sortBy(_._1)}")
@@ -1076,13 +1296,13 @@ trait OCBSL extends Definitions {
       }, (holes ++ other.holes) - ix)
     }
 
-    def pluggedWithOpenBounds(ixs: Set[BinderIx]): (Holed, Map[BinderIx, ValDef]) = {
+    def pluggedWithOpenBounds(ixs: Set[VarId]): (Holed, Map[VarId, ValDef]) = {
       val vds = holes.filter { case (ix, _) => ixs.contains(ix) }
         .map { case (ix, tpe) => ix -> ValDef.fresh(s"bdg_$ix", tpe) }
       (plugged(vds.map { case (ix, vd) => ix -> vd.toVariable }), vds)
     }
 
-    def allPluggedWithOpenBounds: (Expr, Map[BinderIx, ValDef]) = {
+    def allPluggedWithOpenBounds: (Expr, Map[VarId, ValDef]) = {
       val (holed, vds) = pluggedWithOpenBounds(holes.keySet)
       assert(holed.holes.isEmpty)
       (holed.expr(Map.empty), vds)
@@ -1092,7 +1312,7 @@ trait OCBSL extends Definitions {
   object Holed {
     def const(e: Expr): Holed = Holed.chkd(_ => e, Map.empty)
 
-    def ofOne(ix: BinderIx, tpe: Type): Holed = Holed.chkd(_(ix), Map(ix -> tpe))
+    def ofOne(ix: VarId, tpe: Type): Holed = Holed.chkd(_(ix), Map(ix -> tpe))
 
     def combined(holeds: Seq[Holed])(recons: Seq[Expr] => Expr): Holed = {
       val allHoles = holeds.flatMap(_.holes).groupBy(_._1)
@@ -1103,7 +1323,7 @@ trait OCBSL extends Definitions {
       }, allHoles.map { case (ix, ixTps) => ix -> ixTps.head._2 })
     }
 
-    def chkd(expr: Map[BinderIx, Expr] => Expr, holes: Map[BinderIx, Type]): Holed = Holed({ subst =>
+    def chkd(expr: Map[VarId, Expr] => Expr, holes: Map[VarId, Type]): Holed = Holed({ subst =>
       assert(holes.keySet.subsetOf(subst.keySet), s"Holes ${holes.keySet.toSeq.sorted} not a subset of given subst ${subst.keys.toSeq.sorted}")
       assert(holes.forall((ix, tpe) => subst(ix).getType == tpe),
         s"Mismatch types between holes ${holes.toSeq.sortBy(_._1)}" +
@@ -1113,15 +1333,15 @@ trait OCBSL extends Definitions {
   }
 
   case class RevRes(holed: Holed, counts: Counts, containsLambda: Boolean) {
-    def countOf(ix: BinderIx): Count = counts.of(ix)
+    def countOf(ix: VarId): Count = counts.of(ix)
 
-    def plugged(ix: BinderIx, e: Expr): RevRes = RevRes(holed.plugged(ix, e), counts - ix, containsLambda)
+    def plugged(ix: VarId, e: Expr): RevRes = RevRes(holed.plugged(ix, e), counts - ix, containsLambda)
 
-    def plugged(es: Map[BinderIx, Expr]): RevRes = RevRes(holed.plugged(es), counts -- es.keySet, containsLambda)
+    def plugged(es: Map[VarId, Expr]): RevRes = RevRes(holed.plugged(es), counts -- es.keySet, containsLambda)
 
 //    def pluggedTrimmed(es: Map[BinderIx, Expr]): RevRes = RevRes(holed.plugged(es), counts -- es.keySet)
 
-    def plugged(ix: BinderIx, other: RevRes): RevRes = {
+    def plugged(ix: VarId, other: RevRes): RevRes = {
       assert(!other.holed.holes.contains(ix))
       assert(!other.counts.cts.contains(ix))
       RevRes(holed.plugged(ix, other.holed), counts.replaced(ix, other.counts), containsLambda || other.containsLambda)
@@ -1151,37 +1371,37 @@ trait OCBSL extends Definitions {
   // TODO: Est-ce que le noPC est correct??? Parce que dans lhs + rhs, si lhs a des PC ("non locaux"), alors rhs en aura aussi!!!!
   def uncodeOf(c: Code)(using renv: RevEnv): RevRes = {
     renv.revLetDefs.get(c) match {
-      case Some(bIx) =>
-        // TODO: Dire pk
-        val tpe = codeTpe(c)
-        val sig = Signature(Label.IndexedVar(bIx.toVarIx(renv.scopeLevel), tpe), Seq.empty)
-        return uncodeOf(updateCodesSig(sig, Pure, tpe))
+      case Some(vIx) =>
+        // TODO: Dire pk (réintroduction des bind, qui peuvent être inline si les conditions sont réunies)
+        return uncodeOf(updateCodesSig(mkVar(vIx), Pure, codeTpe(c)))
       case None => ()
     }
 
     val allSig = asExplicitSig(c)
     val result = code2sig(c) match {
-      case Signature(Label.Var(v), Seq()) => RevRes(Holed.const(v), Counts.empty, containsLambda = false)
-      case Signature(Label.IndexedVar(v, _), Seq()) =>
-        val bIx = v.toBinderIx(renv.scopeLevel)
-        RevRes(Holed.ofOne(bIx, codeTpe(c)), Counts(Map(bIx -> Count(1, renv.inLambda, renv.noPC))), containsLambda = false)
+//      case Signature(Label.Var(v), Seq()) => RevRes(Holed.const(v), Counts.empty, containsLambda = false)
+      case Signature(Label.Var(v), Seq()) =>
+        val holed = {
+          if (renv.isFree(v)) Holed.const(varId2Var(v))
+          else Holed.ofOne(v, codeTpe(c))
+        }
+        RevRes(holed, Counts(Map(v -> Count(1, renv.inLambda, renv.noPC))), containsLambda = false)
 
-      case Signature(Label.Let, Seq(cE, cBody)) =>
-        val bIx = BinderIx.fromScopeLevel(renv.scopeLevel)
+      case Signature(Label.Let(v), Seq(cE, cBody)) =>
         val resE = uncodeOf(cE)
         // TODO: noPC même pour cE? C'est un peu contraignant, cela empeche d'inline des impure...
         val noPC = renv.noPC && codePurity(cE).isPure
         // TODO: Remplacer ce "noPC" par qqchose d'autre? Au fond on est interessé à savoir si cE apparait en "premier position" dans cBody
-        val resBody = uncodeOf(cBody)(using renv.withLetBound(cE).copy(noPC = noPC))
-        val cntsInBody = resBody.countOf(bIx)
+        val resBody = uncodeOf(cBody)(using renv.withLetBound(v, cE).copy(noPC = noPC))
+        val cntsInBody = resBody.countOf(v)
         val canSubstPure = codePurity(cE).isPure &&
           cntsInBody.occurrences <= 1 &&
           (!cntsInBody.inLambda || !resE.containsLambda) // TODO: S'assurer que ce truc soit ok.
         /*lazy */val canSubstImpure = !cntsInBody.inLambda && cntsInBody.noPC && cntsInBody.occurrences == 1
-        if (canSubstPure || canSubstImpure) resBody.plugged(bIx, resE)
+        if (canSubstPure || canSubstImpure) resBody.plugged(v, resE)
         else {
-          val vd = ValDef.fresh("tmp", codeTpe(cE))
-          val bodyPlugged = resBody.plugged(bIx, vd.toVariable: Expr)
+          val vd = new ValDef(varId2Var(v))
+          val bodyPlugged = resBody.plugged(v, vd.toVariable: Expr)
           // TODO: Counts ok?
           RevRes.combined(resE, bodyPlugged)(Let(vd, _, _))
         }
@@ -1190,57 +1410,38 @@ trait OCBSL extends Definitions {
       case Signature(Label.MatchExpr(pats), cScrut +: cGuardRhs) =>
         assert(2 * pats.size == cGuardRhs.size)
 
-        def convertPattern(pat: LabelledPattern, vds: Seq[(BinderIx, ValDef)]): Pattern = {
-          // TODO: Bouark, yes, hide this monstrosity in this fn...
-
-          var currIx = renv.scopeLevel
-          var currVds = vds
-
-          def nextBinder(): Option[ValDef] = {
-            if (currVds.isEmpty) None
-            else {
-              val (ix, vd) = currVds.head
-              if (ix == BinderIx.fromScopeLevel(currIx)) {
-                currIx += 1
-                currVds = currVds.tail
-                Some(vd)
-              } else {
-                currIx += 1
-                None
-              }
-            }
+        def convertPattern(pat: LabelledPattern, vds: Map[Code, ValDef]): Pattern = {
+          val bdg = vds.get(pat.scrut)
+          pat match {
+            case LabelledPattern.Wildcard(_) => WildcardPattern(bdg)
+            case LabelledPattern.ADT(_, id, tps, sub) => ADTPattern(bdg, id, tps, sub.map(convertPattern(_, vds)))
+            case LabelledPattern.TuplePattern(_, sub) => TuplePattern(bdg, sub.map(convertPattern(_, vds)))
+            case LabelledPattern.Lit(_, lit) => LiteralPattern(bdg, lit)
+            case LabelledPattern.Unapply(_, recs, id, tps, sub) => ???
           }
-
-          def rec(pat: LabelledPattern): Pattern = {
-            val bdg = nextBinder()
-            pat match {
-              case LabelledPattern.Wildcard(_) => WildcardPattern(bdg)
-              case LabelledPattern.ADT(_, id, tps, sub) => ADTPattern(bdg, id, tps, sub.map(rec))
-              case LabelledPattern.TuplePattern(_, sub) => TuplePattern(bdg, sub.map(rec))
-              case LabelledPattern.Lit(_, lit) => LiteralPattern(bdg, lit)
-              case LabelledPattern.Unapply(_, recs, id, tps, sub) => ???
-            }
-          }
-
-          rec(pat)
         }
 
         def processCase(pat: LabelledPattern, cGuard: Code, cRhs: Code): (Pattern, RevRes, RevRes) = {
           val allPats = pat.allPatterns
           // TODO: noPC peut ne pas etre modifie si guard = true et si pattern n'introduit pas de cond supp.
-          //            val newRenv = renv.withPC.withLetBounds(allPats.map(_.scrut))
-          val (newRenv, scrutsIxs0) = renv.withPC.withLetBoundsAndIndices(allPats.map(_.scrut))
-          val scrutsIxs = scrutsIxs0.toMap
+          // TODO: En gros, c'est comme si on fait un let defs sur les pattern: p.ex. c@ADT(b@ADT2, ...) devient bdg1 -> code de c, b -> code de c.field1
+          val scrutBdgs = allPats.zipWithIndex.map {
+            case (pat, i) =>
+              val vId = idOfVariable(Variable.fresh(s"bdg$i", codeTpe(pat.scrut)))
+              vId -> pat.scrut
+          }
+          val scrutBdgsMap = scrutBdgs.toMap
+          val scrutVars = scrutBdgsMap.keySet
+          val newRenv = renv.withLetBounds(scrutBdgs)
           val guard = uncodeOf(cGuard)(using newRenv)
           val rhs = uncodeOf(cRhs)(using newRenv)
-          //            val scrutsIxs: Map[Int, Code] = newRenv.letDefs.filter { case (_, c) => allPats.exists(_.scrut == c) }
-          val usedScrutsIxs: Seq[BinderIx] = (guard.counts ++ rhs.counts).cts
-            .filter { case (ix, cnt) => cnt.occurrences != 0 && scrutsIxs.contains(ix) }
-            .keys.toSeq.sorted
+          // On retire les scrut. binding qui sont inutiles.
+          val usedScrutVars: Set[VarId] = (guard.counts ++ rhs.counts).cts
+            .filter { case (vId, count) => count.occurrences != 0 && scrutVars(vId) }.keySet
+          val scrutVds = usedScrutVars.map(vId => scrutBdgsMap(vId) -> new ValDef(varId2Var(vId))).toMap
+          val substs = usedScrutVars.map(vId => vId -> (varId2Var(vId): Expr)).toMap
           // On remplit les trous introduits grâce à renv.withLetBounds avec les vds qui vont être utilisé comme pattern binding
-          val vds = usedScrutsIxs.map(ix => ix -> ValDef.fresh(s"bdg$ix", codeTpe(scrutsIxs(ix))))
-          val substs = vds.map { case (ix, vd) => ix -> vd.toVariable }.toMap
-          (convertPattern(pat, vds), guard.plugged(substs), rhs.plugged(substs))
+          (convertPattern(pat, scrutVds), guard.plugged(substs), rhs.plugged(substs))
         }
 
         val (guards, rhss) = cGuardRhs.grouped(2).map { case Seq(guard, rhs) => (guard, rhs) }.toSeq.unzip
@@ -1288,16 +1489,21 @@ trait OCBSL extends Definitions {
 
       case Signature(Label.IfExpr, Seq(cond, thn, els)) =>
         RevRes.combined(uncodeOf(cond), uncodeOf(thn)(using renv.withPC), uncodeOf(els)(using renv.withPC))(IfExpr.apply)
+
       // TODO: Ok?
       case Signature(Label.Application, all@(callee +: args)) =>
         recHelper(all) { case callee +: args => Application(callee, args) }
-      case Signature(Label.Lambda(paramTps), Seq(cBody)) =>
-        recHelperOpenBinders(paramTps, cBody)(Lambda.apply)(using renv.withinLambda)
+
+      case Signature(Label.Lambda(params), Seq(cBody)) =>
+        recHelperOpenBinders(params, cBody)(Lambda.apply)(using renv.withinLambda)
           .copy(containsLambda = true)
-      case Signature(Label.Choose(tpe), Seq(cPred)) =>
-        recHelperOpenBinders(Seq(tpe), cPred) { case (Seq(vd), pred) => Choose(vd, pred) }
-      case Signature(Label.Forall(paramTps), Seq(cPred)) =>
-        recHelperOpenBinders(paramTps, cPred)(Forall.apply)
+
+      case Signature(Label.Choose(v), Seq(cPred)) =>
+        recHelperOpenBinders(Seq(v), cPred) { case (Seq(vd), pred) => Choose(vd, pred) }
+
+      case Signature(Label.Forall(params), Seq(cPred)) =>
+        recHelperOpenBinders(params, cPred)(Forall.apply)
+
       case Signature(Label.Or, fst +: rest) =>
         // TODO: Pourrait-on envisager d'ajouter ces assms dans computeSignature (en + d'ocbsl)?
         // Note: due to short-circuiting, the negation of the disjunct are added as we "move" towards the right.
@@ -1370,12 +1576,17 @@ trait OCBSL extends Definitions {
   def recHelper(c1: Code, c2: Code, c3: Code)(recons: (Expr, Expr, Expr) => Expr)(using RevEnv): RevRes =
     recHelper(Seq(c1, c2, c3)) { case Seq(e1, e2, e3) => recons(e1, e2, e3) }
 
-  def recHelperOpenBinders(paramTps: Seq[Type], cBody: Code)(recons: (Seq[ValDef], Expr) => Expr)(using renv: RevEnv): RevRes = {
-    val (newRenv, indices) = renv.withOpenBoundsAndIndices(paramTps.size)
-    val vds = indices.zip(paramTps).map { case (ix, tpe) => ix -> ValDef.fresh(s"bdg$ix", tpe) }
+  def recHelperOpenBinders(params: Seq[VarId], cBody: Code)(recons: (Seq[ValDef], Expr) => Expr)(using renv: RevEnv): RevRes = {
+    val vds = params.map(vId => vId -> new ValDef(varId2Var(vId)))
+    val newRenv = renv.withOpenBound(params.toSet)
     val body = uncodeOf(cBody)(using newRenv)
       .plugged(vds.map { case (ix, vd) => ix -> vd.toVariable }.toMap)
     RevRes.combined(body)(recons(vds.map(_._2), _))
+//    val (newRenv, indices) = renv.withOpenBoundsAndIndices(paramTps.size)
+//    val vds = indices.zip(paramTps).map { case (ix, tpe) => ix -> ValDef.fresh(s"bdg$ix", tpe) }
+//    val body = uncodeOf(cBody)(using newRenv)
+//      .plugged(vds.map { case (ix, vd) => ix -> vd.toVariable }.toMap)
+//    RevRes.combined(body)(recons(vds.map(_._2), _))
   }
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1395,19 +1606,11 @@ trait OCBSL extends Definitions {
     case e => Seq(e)
   }
 
-  def sizeOf(e: Expr): Int = {
-    def rec(e: Expr): Int = {
-      sizeCache.getOrElse(e, {
-        val Operator(es, _) = e
-        1 + es.size + es.map(rec).sum
-      })
-    }
-    sizeCache.getOrElseUpdate(e, rec(e))
-  }
+  def sizeOf(e: Expr): Int = sizeCache.getOrElseUpdate(e, exprOps.formulaSize(e))
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-  def codePurity(c: Code): Purity = {
+  def codePurity(c: Code): Purity = { // TODO: Si let bound -> pure
     assert(code2sig.contains(c))
     codePurityCache.get(c)
       .map(fromBoolean)
@@ -1467,7 +1670,7 @@ trait OCBSL extends Definitions {
           // TODO: Différencier:
           //    -outer assms et local assms
           //    -outer open bound et local open bound
-          given OEnv = OEnv(Set.empty, Map.empty, 0, Map.empty)
+          given OEnv = OEnv.empty
           assert(!visiting.contains(fn))
           assert(!fnBlockedBy.contains(fn))
           assert(!blocking.contains(fn))

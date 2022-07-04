@@ -22,30 +22,34 @@ trait Definitions {
       def fromInt(i: Int): Code = i
     }
 
-    opaque type BinderIx = Int
+//    opaque type BinderIx = Int
+//
+//    object BinderIx {
+//      def fromScopeLevel(scopeLevel: Int): BinderIx = scopeLevel
+//    }
+//    extension (bIx: BinderIx) {
+//      def toVarIx(scopeLevel: Int): VarIx = {
+//        assert(bIx < scopeLevel, s"$bIx >= $scopeLevel")
+//        scopeLevel - bIx
+//      }
+//    }
 
-    object BinderIx {
-      def fromScopeLevel(scopeLevel: Int): BinderIx = scopeLevel
-    }
-    extension (bIx: BinderIx) {
-      def toVarIx(scopeLevel: Int): VarIx = {
-        assert(bIx < scopeLevel, s"$bIx >= $scopeLevel")
-        scopeLevel - bIx
-      }
+    opaque type VarId = Int
+
+    object VarId {
+      def fromInt(i: Int): VarId = i
     }
 
-    opaque type VarIx = Int
-
-    extension (vIx: VarIx) {
-      def toBinderIx(scopeLevel: Int): BinderIx = {
-        assert(vIx <= scopeLevel, s"$vIx > $scopeLevel")
-        scopeLevel - vIx
-      }
-    }
+//    extension (vIx: VarIx) {
+//      def toBinderIx(scopeLevel: Int): BinderIx = {
+//        assert(vIx <= scopeLevel, s"$vIx > $scopeLevel")
+//        scopeLevel - vIx
+//      }
+//    }
 
     given Ordering[Code] = intOrdering
-    given Ordering[BinderIx] = intOrdering
-    given Ordering[VarIx] = intOrdering
+//    given Ordering[BinderIx] = intOrdering
+    given Ordering[VarId] = intOrdering
   }
   import Opaques.{given, _}
 
@@ -53,9 +57,9 @@ trait Definitions {
 
   // TODO: S'assurer que les position ou autre info n'influence pas == sur Label
   enum Label {
-    case Var(v: Variable)
-    case IndexedVar(i: VarIx, tpe: Type)
-    case Let // Indexed
+//    case Var(v: Variable)
+    case Var(v: VarId)
+    case Let(v: VarId)
     case Tuple
     case ADT(id: Identifier, tps: Seq[Type])
     // TODO: Trimbaler ce ctor n'est pas très joli non?
@@ -73,9 +77,9 @@ trait Definitions {
     case MatchExpr(patterns: Seq[LabelledPattern])
     case IfExpr
     case Application
-    case Lambda(paramTps: Seq[Type]) // Indexed (note: paramTps not strictly necessary, as can be recovered with codeTpe)
-    case Choose(tpe: Type) // Indexed (note: tpe not strictly necessary, as can be recovered with codeTpe)
-    case Forall(paramTps: Seq[Type]) // Indexed
+    case Lambda(params: Seq[VarId])
+    case Choose(v: VarId)
+    case Forall(params: Seq[VarId])
 
     case Or
     case Not
@@ -174,6 +178,7 @@ trait Definitions {
 
   enum Purity {
     case Pure
+    // TODO: Ajouter "letBound": cela permet de drop l'expression (dont la sous-partie impure est let-bound à une var)
     case Impure
     case Delayed(blockers: Set[Identifier])
 
@@ -201,9 +206,8 @@ trait Definitions {
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-  def mkFreeVar(v: Variable): Signature = Signature(Label.Var(v), Seq.empty)
-  def mkIxVar(i: VarIx, tpe: Type): Signature = Signature(Label.IndexedVar(i, tpe), Seq.empty)
-  def mkLet(e: Code, body: Code): Signature = Signature(Label.Let, Seq(e, body))
+  def mkVar(v: VarId): Signature = Signature(Label.Var(v), Seq.empty)
+  def mkLet(v: VarId, e: Code, body: Code): Signature = Signature(Label.Let(v), Seq(e, body))
   def mkTuple(args: Seq[Code]): Signature = {
     assert(args.size >= 2)
     Signature(Label.Tuple, args)
@@ -225,27 +229,27 @@ trait Definitions {
   }
   def mkIfExpr(cond: Code, thn: Code, els: Code): Signature = Signature(Label.IfExpr, Seq(cond, thn, els))
   def mkApp(callee: Code, args: Seq[Code]): Signature = Signature(Label.Application, callee +: args)
-  def mkLambda(paramTps: Seq[Type], body: Code): Signature = Signature(Label.Lambda(paramTps), Seq(body))
-  def mkWickedChoose(tpe: Type, pred: Code): Signature = Signature(Label.Choose(tpe), Seq(pred))
-  def mkForall(paramTps: Seq[Type], pred: Code): Signature = Signature(Label.Forall(paramTps), Seq(pred))
-  def mkOr(es: Seq[Code]): Signature = Signature(Label.Or, es.sorted.distinct)
+  def mkLambda(params: Seq[VarId], body: Code): Signature = Signature(Label.Lambda(params), Seq(body))
+  def mkWickedChoose(v: VarId, pred: Code): Signature = Signature(Label.Choose(v), Seq(pred))
+  def mkForall(params: Seq[VarId], pred: Code): Signature = Signature(Label.Forall(params), Seq(pred))
+  def mkOr(es: Seq[Code]): Signature = Signature(Label.Or, es)
   def mkNot(e: Code): Signature = Signature(Label.Not, Seq(e))
-  def mkEquals(e1: Code, e2: Code): Signature = Signature(Label.Equals, Seq(e1, e2).sorted)
+  def mkEquals(e1: Code, e2: Code): Signature = Signature(Label.Equals, Seq(e1, e2))
   def mkLessThan(e1: Code, e2: Code): Signature = Signature(Label.LessThan, Seq(e1, e2))
   def mkGreaterThan(e1: Code, e2: Code): Signature = Signature(Label.GreaterThan, Seq(e1, e2))
   def mkLessEquals(e1: Code, e2: Code): Signature = Signature(Label.LessEquals, Seq(e1, e2))
   def mkGreaterEquals(e1: Code, e2: Code): Signature = Signature(Label.GreaterEquals, Seq(e1, e2))
   def mkUMinus(e: Code): Signature = Signature(Label.UMinus, Seq(e))
-  def mkPlus(e1: Code, e2: Code): Signature = Signature(Label.Plus, Seq(e1, e2).sorted)
+  def mkPlus(e1: Code, e2: Code): Signature = Signature(Label.Plus, Seq(e1, e2))
   def mkMinus(e1: Code, e2: Code): Signature = Signature(Label.Minus, Seq(e1, e2))
-  def mkTimes(e1: Code, e2: Code): Signature = Signature(Label.Times, Seq(e1, e2).sorted)
+  def mkTimes(e1: Code, e2: Code): Signature = Signature(Label.Times, Seq(e1, e2))
   def mkDivision(e1: Code, e2: Code): Signature = Signature(Label.Division, Seq(e1, e2))
   def mkRemainder(e1: Code, e2: Code): Signature = Signature(Label.Remainder, Seq(e1, e2))
   def mkModulo(e1: Code, e2: Code): Signature = Signature(Label.Modulo, Seq(e1, e2))
   def mkBVNot(e: Code): Signature = Signature(Label.BVNot, Seq(e))
-  def mkBVAnd(e1: Code, e2: Code): Signature = Signature(Label.BVAnd, Seq(e1, e2).sorted)
-  def mkBVOr(e1: Code, e2: Code): Signature = Signature(Label.BVOr, Seq(e1, e2).sorted)
-  def mkBVXor(e1: Code, e2: Code): Signature = Signature(Label.BVXor, Seq(e1, e2).sorted)
+  def mkBVAnd(e1: Code, e2: Code): Signature = Signature(Label.BVAnd, Seq(e1, e2))
+  def mkBVOr(e1: Code, e2: Code): Signature = Signature(Label.BVOr, Seq(e1, e2))
+  def mkBVXor(e1: Code, e2: Code): Signature = Signature(Label.BVXor, Seq(e1, e2))
   def mkBVShiftLeft(e1: Code, e2: Code): Signature = Signature(Label.BVShiftLeft, Seq(e1, e2))
   def mkBVAShiftRight(e1: Code, e2: Code): Signature = Signature(Label.BVAShiftRight, Seq(e1, e2))
   def mkBVLShiftRight(e1: Code, e2: Code): Signature = Signature(Label.BVLShiftRight, Seq(e1, e2))
