@@ -30,7 +30,7 @@ trait OCBSL extends Definitions {
     def withCond(c: Code): OEnv = copy(conditions = conditions + c)
     def withConds(cs: Set[Code]): OEnv = copy(conditions = conditions ++ cs)
 
-    def withLetBound(vd: ValDef, c: Code, canSubst: Boolean): OEnv = withLetBounds(Seq((vd, c)), canSubst)
+    def withLetBound(vd: ValDef, c: Code, canSubst: Boolean): OEnv = withLetBounds(Seq((vd, c)), canSubst) // TODO: On devrait plutot utiliser VarId
 
     def withLetBounds(vds: Seq[(ValDef, Code)], canSubst: Boolean): OEnv = {
       // Note: params may be empty, which is fine (the nesting level will not increase)
@@ -79,7 +79,7 @@ trait OCBSL extends Definitions {
   //    Il faudra aussi que ce mapping soit le même pr ts les threads!!!
   //      -sig2code: on ajoute 1 indirection par ordinal de label pour diminuer les contention
   //      -code2sig: un simple atomicref d'array fera amplement l'affaire (faudra faire attention pr ne pas faire des allocs concurrentes...)
-
+  //    -let binding des match, adt args, fn args, etc. (necessaire pour eviter des dupliqués dans uncodeOf)!!!!
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -648,28 +648,11 @@ trait OCBSL extends Definitions {
     }
 
     // TODO: Ditto, d'ailleurs cela devrait être intégré dans simplifySigTopLvl...
-    def collectConds(pat: LabelledPattern): Set[Code] = pat match {
-      case LabelledPattern.Wildcard(_) => Set.empty
-      case LabelledPattern.ADT(scrut, id, tps, subps) =>
-        val adt = ADTType(id, tps)
-        val tcons = getConstructor(id, tps)
-        assert(tcons.fields.size == subps.size)
-        // Using `simplifySigTopLvl` here as it can reduce to `true` if this ADT is the only ctor
-        val (isCtorSig, _) = simplifySigTopLvl(mkIsCtor(scrut, adt, id), BooleanType())(using env) // TODO: Default env ok?
-        val cond = updateCodesSig(isCtorSig, codePurity(scrut), BooleanType())
-        val subconds = subps.flatMap(collectConds).toSet
-        subconds + cond
-      case LabelledPattern.TuplePattern(_, subps) => subps.flatMap(collectConds).toSet
-      case LabelledPattern.Lit(_, _) => Set.empty
-      case LabelledPattern.Unapply(_, recs, id, tps, subps) =>
-        sys.error(s"Does not know how to handle $pat")
-    }
-
-    // TODO: Ditto, d'ailleurs cela devrait être intégré dans simplifySigTopLvl...
+    // TODO: Ne pas oublier de hoist la remarque hors du processCase une fois que l'on factorise cela en dehors
     def processCase(scrut: Code, matchCase: LabMatchCase, accumulatedConds: Set[Code], varSubst: Map[VarId, VarId])(using env: OEnv): Option[(LabMatchCase, Set[Code], Boolean)] = {
       // Remarque: comme il n'y pas de binder explicit, il n'y a rien a freshen.
       val rguard = rec(matchCase.guard, varSubst)
-      val caseConds = collectConds(matchCase.pattern) + rguard
+      val caseConds = collectPatternConds(matchCase.pattern) + rguard
       val newEnv = env.withConds(accumulatedConds)
       val rrhs = rec(matchCase.rhs, varSubst)(using newEnv)
 
@@ -679,7 +662,7 @@ trait OCBSL extends Definitions {
           // TODO: A-t-on besoin de faire qqchose pour ces bindings?
           return Some(LabMatchCase(LabelledPattern.Wildcard(scrut), trueCode, rrhs), Set(trueCode), true)
         } else if (implied(falseCode)(using newEnv)) {
-          // Unreachable
+          // This `matchCase` is unreachable
           return None
         }
       }
@@ -691,7 +674,8 @@ trait OCBSL extends Definitions {
       given dontDefaultUseOuterEnv: OEnv = sys.error("Carefully consider the appropriate env to use")
       if (cases.isEmpty) (acc, false)
       else {
-        processCase(scrut, cases.head, accumulatedConds, varSubst) match {
+        // TODO: Envs ok? Apres tout, on pourrait accumuler les accumulated conds dans env non?
+        processCase(scrut, cases.head, accumulatedConds, varSubst)(using env) match {
           case Some((newMatchCase, caseConds, allCovered)) =>
             if (allCovered) (acc :+ newMatchCase, true)
             else {
@@ -1617,7 +1601,7 @@ trait OCBSL extends Definitions {
       .getOrElse(Delayed(codeBlockedBy(c)))
   }
 
-  def fnPurity(fn: Identifier)(using env: OEnv): Purity = {
+  def fnPurity(fn: Identifier): Purity = {
     def resolvedPurity(isPure: Boolean): Unit = {
       purityCache += fn -> isPure
       if (blocking.contains(fn)) {
@@ -1706,6 +1690,230 @@ trait OCBSL extends Definitions {
               }
           }
       }
+    }
+  }
+
+  /////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+  def collectPatternConds(pat: LabelledPattern)(using env: OEnv): Set[Code] = pat match {
+    case LabelledPattern.Wildcard(_) => Set.empty
+    case LabelledPattern.ADT(scrut, id, tps, subps) =>
+      val adt = ADTType(id, tps)
+      val tcons = getConstructor(id, tps)
+      assert(tcons.fields.size == subps.size)
+      // Using `simplifySigTopLvl` here as it can reduce to `true` if this ADT is the only ctor
+      val (isCtorSig, _) = simplifySigTopLvl(mkIsCtor(scrut, adt, id), BooleanType()) // TODO: Default env ok?
+      val cond = updateCodesSig(isCtorSig, codePurity(scrut), BooleanType())
+      val subconds = subps.flatMap(collectPatternConds).toSet
+      subconds + cond
+    case LabelledPattern.TuplePattern(_, subps) => subps.flatMap(collectPatternConds).toSet
+    case LabelledPattern.Lit(_, _) => Set.empty
+    case LabelledPattern.Unapply(_, recs, id, tps, subps) =>
+      sys.error(s"Does not know how to handle $pat")
+  }
+
+  def isLambda(c: Code): Boolean = code2sig(c) match {
+    case Signature(Label.Lambda(_), _) => true
+    case _ => false
+  }
+
+  // TODO: !!!! Pureté qui dépend de env ??? !!!!
+  def sigPurity(sig: Signature): Purity = sig match {
+    case Signature(Label.Var(_) | Label.Lit(_), Seq()) => Pure
+    case Signature(Label.Assume, Seq(pred, body)) =>
+      if (pred == trueCode) codePurity(body)
+      else Impure
+
+    case Signature(Label.Assert, Seq(pred, body)) =>
+      val pBody = codePurity(body)
+      if (pred == trueCode) pBody
+      else assmChkPurity ++ pBody // Purity comme Stainless
+
+    case Signature(Label.Require, Seq(pred, body)) =>
+      val pBody = codePurity(body)
+      if (pred == trueCode) pBody
+      else assmChkPurity ++ pBody // Ditto
+
+    case Signature(Label.Ensuring, Seq(body, pred)) =>
+      code2sig(pred) match {
+        case Signature(Label.Lambda(Seq(_)), Seq(`trueCode`)) => codePurity(body)
+        case _ => Impure
+      }
+
+    // TODO: Pureté de Decreases?
+    // TODO: Pureté de Decreases?
+    // TODO: Pureté de Decreases?
+    // TODO: Pureté de Decreases?
+
+    case Signature(Label.ADTSelector(adt, ctor, _), Seq(e)) =>
+      // Remarque: on ne souhaite pas faire dépendre la pureté d'une sig en fn. de env!!!
+      if (opts.assumeChecked || isConstructor(e, adt, ctor.id)(using OEnv.empty) == Some(true)) codePurity(e)
+      else Impure
+
+    case Signature(Label.ADT(id, tps), args) =>
+      // TODO: Ok? Il y a un comme dans SWP...
+      val ctor: TypedADTConstructor = getConstructor(id, tps)
+      val consingPurity = {
+        if (opts.assumeChecked || !ctor.sort.definition.hasInvariant) Pure
+        else Impure
+      }
+      consingPurity ++ fold(args.map(codePurity))
+
+    case Signature(Label.Lambda(_), Seq(_)) => Pure
+
+    case Signature(Label.FunctionInvocation(id, _), args) =>
+      fold(args.map(codePurity)) ++ fnPurity(id)
+
+    case Signature(Label.Application, callee +: args) =>
+      // TODO: Pureté ok? Après tout, un inline de lambda peut donner lieu à impure...
+      assmChkPurity ++ fold(args.map(codePurity))
+
+    case Signature(Label.Choose(v), Seq(pred)) =>
+      if (pred == trueCode && hasInstance(varTpe(v)) == Some(true)) Pure
+      else Impure
+
+    // TODO: Pureté ok pour NoTree/Error? Car dans SWP et isImpure, aucune mention de NoTree/Error...
+    case Signature(Label.Division | Label.Remainder | Label.Modulo | Label.NoTree(_) | Label.Error(_, _), _) =>
+      assmChkPurity // TODO: Ok?
+
+    case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
+      assert(2 * pats.size == guardRhs.size)
+      // TODO: Autre chose? Quid match exhaustiveness??
+      // TODO: Ce truc devrait tjrs etre pure non?
+      // Remarque: on ne souhaite pas faire dépendre la pureté d'une sig en fn. de env!!!
+      val patsCondPurity = fold(pats.flatMap(lp => collectPatternConds(lp)(using OEnv.empty).map(codePurity)))
+      patsCondPurity ++ codePurity(scrut) ++ fold(guardRhs.map(codePurity))
+
+
+    // TODO: Array select, map select, etc.???
+    // TODO: Array select, map select, etc.???
+    // TODO: Array select, map select, etc.???
+    // TODO: Array select, map select, etc.???
+    case Signature(_, children) => fold(children.map(codePurity))
+  }
+
+  // TODO: Dire que dans le graphe, cela equivaut a update les references selon repl.
+  //  En particulier on ne duplique pas ("freshen locals") les let, lambda, forall, choose, etc.!!!
+  def replaceIn(c: Code, repl: Map[Code, Code]): Code = {
+    assert(repl.forall { case (old, nw) => codeTpe(old) == codeTpe(nw) })
+    repl.getOrElse(c, {
+      val Signature(lab, children) = code2sig(c)
+      val replChildren = children.map(replaceIn(_, repl))
+      val newSig = Signature(lab, replChildren)
+      updateCodesSig(newSig, sigPurity(newSig), codeTpe(c))
+    })
+  }
+
+  def replaceIn(pat: LabelledPattern, repl: Map[Code, Code]): LabelledPattern = {
+    val newScrut = replaceIn(pat.scrut, repl)
+    pat match {
+      case LabelledPattern.Wildcard(_) => LabelledPattern.Wildcard(newScrut)
+      case LabelledPattern.ADT(_, id, tps, subps) =>
+        LabelledPattern.ADT(newScrut, id, tps, subps.map(replaceIn(_, repl)))
+      case LabelledPattern.TuplePattern(_, subps) =>
+        LabelledPattern.TuplePattern(newScrut, subps.map(replaceIn(_, repl)))
+      case LabelledPattern.Lit(_, lit) => LabelledPattern.Lit(newScrut, lit)
+      case LabelledPattern.Unapply(_, recs, id, tps, subps) =>
+        sys.error(s"Does not know how to handle $pat")
+    }
+  }
+
+  /////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+  // TODO: Commentaire à propos de code potentiel dans les labels qui ne sont pas transform
+  // TODO: Devrait-on ajouter des let-binding après transformation là ou on s'attend à en voir????
+  //    -> on pourra juste mettre une assertion...
+
+
+  class CodeTransformer(val depthLimit: Option[Int] = None) {
+    type Extra
+    var depth = 0
+
+    final def transform(c: Code, repl: Map[Code, Code], extra: Extra)(using OEnv): Code = {
+      repl.get(c) match {
+        case Some(cc) => return cc
+        case None => ()
+      }
+
+      if (depthLimit.exists(_ <= depth)) c
+      else {
+        depth += 1
+        val res = transformImpl(c, repl, extra)
+        depth -= 1
+        res
+      }
+    }
+
+    def canSubstLet(c: Code): Boolean = !isLambda(c)
+
+    def transformImpl(c: Code, repl: Map[Code, Code], extra: Extra)(using env: OEnv): Code = {
+      val tpe = codeTpe(c)
+
+      code2sig(c) match {
+        case Signature(Label.Let(v), Seq(e, b)) =>
+          val re = transform(e, repl, extra)
+          val vd = new ValDef(varId2Var(v))
+          // TODO: Jamais utilisé!!!! -> ajouter un varix comme cas non?
+          val rb = transform(b, repl + (e -> re), extra)(using env.withLetBound(vd, re, canSubst = canSubstLet(re)))
+          val newSig = mkLet(v, re, rb)
+          updateCodesSig(newSig, sigPurity(newSig), tpe)
+
+        case Signature(Label.Assert, Seq(pred, body)) =>
+          val rpred = transform(pred, repl, extra)
+          val rbody = transform(body, repl, extra)(using env.withCond(rpred))
+          val newSig = mkAssert(rpred, rbody)
+          updateCodesSig(newSig, sigPurity(newSig), tpe)
+
+        case Signature(Label.Assume, Seq(pred, body)) =>
+          val rpred = transform(pred, repl, extra)
+          val rbody = transform(body, repl, extra)(using env.withCond(rpred))
+          val newSig = mkAssume(rpred, rbody)
+          updateCodesSig(newSig, sigPurity(newSig), tpe)
+
+        case Signature(Label.IfExpr, Seq(c, thn, els)) =>
+          val rc = transform(c, repl, extra)
+          val rthn = transform(thn, repl, extra)(using env.withCond(rc))
+          val rels = transform(els, repl, extra)(using env.withCond(negCodeOf(rc)))
+          val newSig = mkIfExpr(rc, rthn, rels)
+          updateCodesSig(newSig, sigPurity(newSig), tpe)
+
+        case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
+          assert(2 * pats.size == guardRhs.size)
+          val (guards, rhss) = guardRhs.grouped(2).map { case Seq(guard, rhs) => (guard, rhs) }.toSeq.unzip
+          val cases = pats.zip(guards).zip(rhss).map {
+            case ((pat, guard), rhs) => LabMatchCase(pat, guard, rhs)
+          }
+          // TODO: Il faudra supposer que scrut est let-bound? --> mettre assertion que transformé est let-bound!!!
+          // TODO: Il faudra supposer que scrut est let-bound? --> mettre assertion que transformé est let-bound!!!
+          // TODO: Il faudra supposer que scrut est let-bound? --> mettre assertion que transformé est let-bound!!!
+          val rscrut = transform(scrut, repl, extra)
+          val newCases = transformCases(cases, repl + (scrut -> rscrut), extra, Seq.empty)
+          val newSig = mkMatchExpr(rscrut, newCases)
+          updateCodesSig(newSig, sigPurity(newSig), tpe)
+
+        // TODO: Suppose que lab pas besoin d'avoir des sous parties transformées. P.ex. pour MatchExpr, cela ne jouera pas (en raison des recs?)
+        case Signature(lab, children) =>
+          val rchildren = children.map(transform(_, repl, extra))
+          val newSig = Signature(lab, rchildren)
+          updateCodesSig(newSig, sigPurity(newSig), tpe)
+      }
+    }
+
+    def transformCases(cases: Seq[LabMatchCase], repl: Map[Code, Code], extra: Extra, acc: Seq[LabMatchCase])(using env: OEnv): Seq[LabMatchCase] = {
+      if (cases.isEmpty) acc
+      else {
+        val (newMatchCase, caseConds) = transformCase(cases.head, repl, extra)
+        val negCaseConds = negatedConjunction(caseConds)
+        transformCases(cases.tail, repl, extra, acc :+ newMatchCase)(using env.withCond(negCaseConds))
+      }
+    }
+
+    def transformCase(matchCase: LabMatchCase, repl: Map[Code, Code], extra: Extra)(using env: OEnv): (LabMatchCase, Set[Code]) = {
+      val newPat = replaceIn(matchCase.pattern, repl)
+      val rguard = transform(matchCase.guard, repl, extra)
+      val caseConds = collectPatternConds(newPat) + rguard
+      val rrhs = transform(matchCase.rhs, repl, extra)(using env.withConds(caseConds))
+      (LabMatchCase(newPat, rguard, rrhs), caseConds)
     }
   }
 
