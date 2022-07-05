@@ -422,13 +422,13 @@ object Trace {
   def nextEqCheckState: Unit = eqCheckState = eqCheckState match {
     case EqCheckState.InitState => EqCheckState.ModelFirst
     case EqCheckState.ModelFirst => EqCheckState.FunFirst
-    case EqCheckState.FunFirst => EqCheckState.ModelFirstWithSublemmas //  skip if there are no sublemmas ?
-    case EqCheckState.ModelFirstWithSublemmas => EqCheckState.FunFirstWithSublemmas
-    case EqCheckState.FunFirstWithSublemmas => EqCheckState.InitState  //skip if there are no sublemmas ?
+    case EqCheckState.FunFirst => EqCheckState.InitState //EqCheckState.ModelFirstWithSublemmas //  skip if there are no sublemmas ?
+    //case EqCheckState.ModelFirstWithSublemmas => EqCheckState.FunFirstWithSublemmas
+    //case EqCheckState.FunFirstWithSublemmas => EqCheckState.InitState  //skip if there are no sublemmas ?
   }
 
   def resetEqCheckState = eqCheckState = EqCheckState.InitState
-  def isFinalEqCheckState = eqCheckState == EqCheckState.FunFirstWithSublemmas
+  def isFinalEqCheckState = eqCheckState == EqCheckState.FunFirst //WithSublemmas
 
   def funFirst = eqCheckState == EqCheckState.FunFirst || eqCheckState == EqCheckState.FunFirstWithSublemmas
   def withSublemmas = eqCheckState == EqCheckState.ModelFirstWithSublemmas || eqCheckState == EqCheckState.FunFirstWithSublemmas
