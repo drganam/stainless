@@ -19,30 +19,9 @@ class Trace(override val s: Trees, override val t: termination.Trees)
   private[this] class Identity(override val s: self.s.type, override val t: self.t.type) extends transformers.ConcreteTreeTransformer(s, t)
   private[this] val identity = new Identity(self.s, self.t)
 
-  private def evaluate(syms: s.Symbols, expr: Expr) = {
-    type ProgramType = inox.Program{val trees: self.s.type; val symbols: syms.type}
-    val prog: ProgramType = inox.Program(self.s)(syms)
-    val sem = new inox.Semantics {
-      val trees: self.s.type = self.s
-      val symbols: syms.type = syms
-      val program: prog.type = prog
-      def createEvaluator(ctx: inox.Context) = ???
-      def createSolver(ctx: inox.Context) = ???
-    }
-    class EvalImpl(override val program: prog.type, override val context: inox.Context)
-                  (using override val semantics: sem.type)
-      extends evaluators.RecursiveEvaluator(program, context)
-      with inox.evaluators.HasDefaultGlobalContext
-      with inox.evaluators.HasDefaultRecContext
-
-    val evaluator = new EvalImpl(prog, self.context)(using sem)
-    evaluator.eval(expr)
-  }
-
   override protected def extractSymbols(context: TransformerContext, symbols: s.Symbols): t.Symbols = {
     import symbols.{given, _}
     import exprOps._
-
 
     if (Trace.getModels.isEmpty) {
       val models = symbols.functions.values.toList.filter(elem => !elem.flags.exists(_.name == "library") &&
@@ -77,121 +56,7 @@ class Trace(override val s: Trees, override val t: termination.Trees)
       }
     }
 
-    symbols.functions.values.toList.foreach(fd => if (fd.flags.exists(elem => elem.name == "mkTest")) Trace.setMkTest(fd.id))
-
     def generateEqLemma: List[s.FunDef] = {
-
-      def evalCheck(f: FunDef, m: FunDef): Boolean = {
-
-        //improvement: there could be functions with same counterexample values; use distinct mappings;
-        val counterexamples = (Trace.state.values zip Trace.state.keys).map(elem => (elem._1.counterexample, elem._2)).filter(!_._1.isEmpty).map(elem => (elem._1.get, elem._2)).filterNot(_._1.existing).filterNot(_._1.counterexample.isEmpty).filterNot(_._1.fromEval)
-
-        def passesAllNewTests = counterexamples.forall(counterexample => {
-          val pair = counterexample._1
-          val fun = pair.prog.symbols.functions(counterexample._2)
-          val mod = pair.prog.symbols.functions(Trace.state(fun.id).directModel.get)
-          val ref = if (pair.fromFunction) fun else mod
-
-          val bval = {
-            type ProgramType = Program{val trees: pair.prog.trees.type; val symbols: pair.prog.symbols.type}
-            val prog: ProgramType = pair.prog.asInstanceOf[ProgramType]
-            val syms: prog.symbols.type = prog.symbols
-
-            val sem = new inox.Semantics {
-              val trees: prog.trees.type = prog.trees
-              val symbols: syms.type = prog.symbols
-              val program: prog.type = prog
-              def createEvaluator(ctx: inox.Context) = ???
-              def createSolver(ctx: inox.Context) = ???
-            }
-            class EvalImpl(override val program: prog.type, override val context: inox.Context)
-                          (using override val semantics: sem.type)
-              extends evaluators.RecursiveEvaluator(program, context)
-              with inox.evaluators.HasDefaultGlobalContext
-              with inox.evaluators.HasDefaultRecContext
-            val evaluator = new EvalImpl(prog, self.context)(using sem)
-
-            val expr = syms.functions(f.id).fullBody
-            val counterex = pair.counterexample
-
-            //.get breaks if parameter names are not the same
-            //fix: store the info wheter the counterexample comes from the model or the function
-            try {
-              val invocation = evaluator.program.trees.FunctionInvocation(f.id, Seq(), ref.params.map(vd =>
-                pair.counterexample.collectFirst({ case (k, v) if(k.id.name == vd.id.name) => v }).get))
-
-              val invocationM = evaluator.program.trees.FunctionInvocation(m.id, Seq(), ref.params.map(vd =>
-                pair.counterexample.collectFirst({ case (k, v) if(k.id.name == vd.id.name) => v }).get))
-
-              (evaluator.eval(invocation), evaluator.eval(invocationM)) match {
-                case (inox.evaluators.EvaluationResults.Successful(output), inox.evaluators.EvaluationResults.Successful(expected)) => {
-                  if(output != expected) Trace.storeCounterexample(Some(new Trace.Counterexample {
-                    val prog = pair.prog
-                    val counterexample = pair.counterexample.asInstanceOf[Map[this.prog.trees.ValDef,this.prog.trees.Expr]]
-                    val existing = false
-                    val fromEval = true
-                    val fromFunction = pair.fromFunction
-                  } ))
-                  output == expected
-                }
-                case _ =>  true
-              }
-            } catch {
-              case e => true
-            }
-
-          }
-          bval
-        })
-
-        def passesAllTests = Trace.getMkTest match { //todo just check for annotation here
-          case Some(t) => {
-            val test = symbols.functions(t)
-
-            val r: Range = 1 to 5  //todo fix range
-
-            r.forall(i => {
-              val bval = {
-
-                val getInput = s.TupleSelect(FunctionInvocation(test.id, test.tparams.map(_.tp), Seq(IntegerLiteral(i))), 1)
-                val getRes = s.TupleSelect(FunctionInvocation(test.id, test.tparams.map(_.tp), Seq(IntegerLiteral(i))), 2)
-
-                (evaluate(symbols, getInput), evaluate(symbols, getRes)) match {
-                  case (inox.evaluators.EvaluationResults.Successful(input), inox.evaluators.EvaluationResults.Successful(res)) => {
-                    val paramVars = input match {
-                      case Tuple(pvars) => pvars
-                      case pvar => Seq(pvar)
-                    }
-                    val evalF = s.FunctionInvocation(f.id, f.tparams.map(_.tp), paramVars)
-                    evaluate(symbols, evalF) match {
-                      case inox.evaluators.EvaluationResults.Successful(output) => {
-                        val counterexample = (f.params zip paramVars).toMap
-                        if(output != res) {
-                          val p = Trace.toCounterexample(inox.Program(self.s)(symbols))(counterexample)
-                          Trace.storeCounterexample(p)
-                        }
-                        output == res
-                      }
-                      case _ => true
-                    }
-                  }
-                  case _ => true
-                }
-
-              }
-              bval
-            })
-
-          }
-          case None => {
-            true
-          }
-        }
-
-        passesAllTests && passesAllNewTests
-
-      }
-
       // Finds all the function calls in the body of fd
       def getFunCalls(fd: FunDef): List[FunDef] = {
         var funs: List[Identifier] = List()
@@ -300,8 +165,7 @@ class Trace(override val s: Trees, override val t: termination.Trees)
 
           Trace.nextEqCheckState
 
-          if (m.params.size == f.params.size && evalCheck(f, m)) {
-          //if (m.params.size == f.params.size) {
+          if (m.params.size == f.params.size) {
             val res: List[s.FunDef] = Trace.eqCheckState match {
               case Trace.EqCheckState.ModelFirst =>
                 equivalenceCheck(m, f, false)
@@ -541,7 +405,6 @@ object Trace {
   var trace: Option[Identifier] = None
   var proof: Option[Identifier] = None
   var sublemmas: List[Identifier] = List()
-  var mkTest: Option[Identifier] = None
 
   var sublemmaGeneration: Boolean = false
 
@@ -599,7 +462,6 @@ object Trace {
   def getModel = model        // model for the current iteration
   def getFunction = function  // function to check in the current iteration
   def getNorm = norm
-  def getMkTest = mkTest
   def getTrace = trace
 
   def setTrace(t: Identifier) = {
@@ -616,7 +478,6 @@ object Trace {
 
   def setProof(p: Identifier) = proof = Some(p)
   def setNorm(n: Option[Identifier]) = norm = n
-  def setMkTest(t: Identifier) = mkTest = Some(t)
 
   // iterate model for the current function
   private def nextModel = tmpModels match {
@@ -636,9 +497,6 @@ object Trace {
       case x::xs => {
         val n = 3
         tmpModels = allModels.toList.sortBy(m => -m._2).map(_._1).filterNot(state(x).prevModels.contains).take(n)
-
-        //case without priorities
-        //tmpModels = allModels.toList.map(_._1).filterNot(state(x).prevModels.contains).take(n)
 
         if(tmpModels.isEmpty) tmpModels = allModels.keys.take(1).toList //todo skip this function
         nextModel
@@ -660,16 +518,6 @@ object Trace {
   }
 
   var tmpCounterexample: Option[Counterexample] = None
-
-  def toCounterexample(pr: inox.Program)(counterex: Map[pr.trees.ValDef, pr.trees.Expr]): Option[Counterexample] = {
-    Some(new Counterexample {
-          val prog: pr.type = pr
-          val counterexample = counterex
-          val existing = true
-          val fromEval = true
-          val fromFunction = false
-      })
-  }
 
   def reportCounterexample(pr: inox.Program)(counterex: pr.Model)(fun: Identifier): Unit = {
     def shouldVerify(fun: Identifier) = {
@@ -696,22 +544,16 @@ object Trace {
   // TODO cleaning + check validity of sublemmas
   def nextIteration[T <: AbstractReport[T]](report: AbstractReport[T])(implicit context: inox.Context): Boolean = {
     counter = counter + 1
-    //if(counter % 10 == 0) printEverything
-
-     //println("sublemmas validity: sublemmas and then if there are no errors nor unknowns")
-     //println(sublemmas(t))
+    if (counter % 20 == 0) printEverything
 
     val sublemmasAreValid = sublemmas.forall(s => !report.hasError(Some(s)) && !report.hasUnknown(Some(s)))
-    println(sublemmasAreValid)
-    println(sublemmas)
-
     val sublemmasHaveErrors = sublemmas.exists(s => report.hasError(Some(s)))
 
     (function, trace) match {
       case (Some(f), Some(t)) => {
         if (report.hasError(function) || report.hasError(proof) || report.hasError(trace)) {
           //if (!withSublemmas || sublemmasAreValid) reportError(tmpCounterexample) // only if not in the sublemma state or if they are valid
-          if (!withSublemmas) reportError(tmpCounterexample) // only if not in the sublemma state or if they are valid
+          if (!withSublemmas) reportError(tmpCounterexample) // only if not in the sublemma state
           else reportUnknown
         }
         else if (report.hasUnknown(function) || report.hasUnknown(proof) || report.hasUnknown(trace)) reportUnknown
@@ -755,10 +597,6 @@ object Trace {
     !isDone
   }
 
-  private def storeCounterexample(counterexample: Option[Counterexample]) = {
-    state(function.get).counterexample = counterexample
-  }
-
   private def reportError[T](counterexample: Option[Counterexample]) = {
     resetEqCheckState
     errors = function.get::errors // store the counter-example
@@ -794,7 +632,7 @@ object Trace {
 
       val inc = if (allModels(model.get) > 0) 20 else 100
       allModels = allModels.updated(model.get, allModels(model.get) + inc)
-      allModels = (allModels + (function.get -> 0))//.sortBy(m => -m._2)
+      allModels = (allModels + (function.get -> 0))
 
       clusters = clusters + (function.get -> List())
     }
