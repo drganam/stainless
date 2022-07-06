@@ -1814,8 +1814,15 @@ trait OCBSL extends Definitions {
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+  private val sigPurity = new SigPurity
+
+  def codePurityIn(c: Code)(using env: OEnv): Purity = sigPurity.codePurityIn(c)
+  def sigPurityIn(sig: Signature)(using env: OEnv): Purity = sigPurity.sigPurityIn(sig)
+
+  /////////////////////////////////////////////////////////////////////////////////////////////////////////
+
   class TopLevelSigSimplifier extends CodeTransformer(depthLimit = Some(1)) {
-    type Extra = Unit
+    override type Extra = Unit
 
     override def transformImpl(c: Code, repl: Map[Code, Code], extra: Unit)(using env: OEnv): Code = {
       val tpe = codeTpe(c)
@@ -2129,9 +2136,98 @@ trait OCBSL extends Definitions {
 
   }
 
+  class SigPurity extends CodeTryFolder[Unit, Purity](depthLimit = None) {
+    override type Extra = Unit
+
+    override def tryFoldImpl(sig: Signature, acc: Purity, extra: Unit)(using env: OEnv): Either[Unit, Purity] = {
+      val p = acc ++ sigPurityIn(sig) // Remarque: ++ est lazy sur sa droite, donc si acc est impure, on ne va pas calculer sigPurityIn
+      if (p == Impure) Left(())
+      else Right(p)
+    }
+
+    // TODO: Caching
+    // TODO: Ce truc avec les Delayed et les blocked by???
+    def codePurityIn(c: Code)(using env: OEnv): Purity = {
+      // TODO: On pourrait utiliser un "revLetDef" dans env
+      if (env.letDef.exists(_._2._1 == c)) Pure
+      else sigPurityIn(code2sig(c))
+    }
+
+    def sigPurityIn(sig: Signature)(using env: OEnv): Purity = sig match {
+      case Signature(Label.Var(_) | Label.Lit(_), Seq()) => Pure
+      case Signature(Label.Assume, Seq(pred, body)) =>
+        if (pred == trueCode) codePurityIn(body)
+        else Impure
+
+      case Signature(Label.Assert, Seq(pred, body)) =>
+        val pBody = codePurityIn(body)
+        if (pred == trueCode) pBody
+        else assmChkPurity ++ pBody // Pureté comme Stainless
+
+      case Signature(Label.Require, Seq(pred, body)) =>
+        val pBody = codePurityIn(body)
+        if (pred == trueCode) pBody
+        else assmChkPurity ++ pBody // Ditto
+
+      case Signature(Label.Ensuring, Seq(body, pred)) =>
+        code2sig(pred) match {
+          case Signature(Label.Lambda(Seq(_)), Seq(`trueCode`)) => codePurityIn(body)
+          case _ => Impure
+        }
+
+      case Signature(Label.ADTSelector(adt, ctor, _), Seq(e)) =>
+        // Remarque: on ne souhaite pas faire dépendre la pureté d'une sig en fn. de env!!!
+        if (opts.assumeChecked || isConstructor(e, adt, ctor.id)/*(using OEnv.empty)*/ == Some(true)) codePurityIn(e)
+        else Impure
+
+      case Signature(Label.ADT(id, tps), args) =>
+        // TODO: Ok? Il y a un commentaire dans SWP...
+        val ctor: TypedADTConstructor = getConstructor(id, tps)
+        val consingPurity = {
+          if (opts.assumeChecked || !ctor.sort.definition.hasInvariant) Pure
+          else Impure
+        }
+        consingPurity ++ fold(args.map(codePurityIn))
+
+      case Signature(Label.Lambda(_), Seq(_)) => Pure
+
+      case Signature(Label.FunctionInvocation(id, _), args) =>
+        fold(args.map(codePurityIn)) ++ fnPurity(id)
+
+      case Signature(Label.Application, callee +: args) =>
+        // TODO: Pureté ok? Après tout, un inline de lambda peut donner lieu à impure...
+        assmChkPurity ++ fold(args.map(codePurityIn))
+
+      case Signature(Label.Choose(v), Seq(pred)) =>
+        if (pred == trueCode && hasInstance(varTpe(v)) == Some(true)) Pure
+        else Impure
+
+      // TODO: Pureté ok pour NoTree/Error? Car dans SWP et isImpure, aucune mention de NoTree/Error...
+      case Signature(Label.Division | Label.Remainder | Label.Modulo | Label.NoTree(_) | Label.Error(_, _), _) =>
+        assmChkPurity // TODO: Ok?
+
+      /*
+      // TODO: Devrait être subsume par default impl
+      case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
+        assert(2 * pats.size == guardRhs.size)
+        // TODO: Autre chose? Quid match exhaustiveness??
+        // TODO: Ce truc devrait tjrs etre pure non?
+        // Remarque: on ne souhaite pas faire dépendre la pureté d'une sig en fn. de env!!!
+        val patsCondPurity = fold(pats.flatMap(lp => collectPatternConds(lp)(using OEnv.empty).map(codePurityIn)))
+        patsCondPurity ++ codePurityIn(scrut) ++ fold(guardRhs.map(codePurityIn))
+      */
+
+      case sig => super.tryFoldImpl(sig, Pure, ()).getOrElse(Impure)
+      // TODO: Pureté de Decreases?
+      // TODO: Array select, map select, etc.???
+      // case Signature(_, children) => ??? // fold(children.map(codePurityIn)) // TODO: Gag, evidemment que non, car il y a let, ifexpr, match etc. qui modifie env.!
+    }
+  }
+
   // TODO: Commentaire à propos de code potentiel dans les labels qui ne sont pas transform
   // TODO: Devrait-on ajouter des let-binding après transformation là ou on s'attend à en voir????
   //    -> on pourra juste mettre une assertion...
+  // TODO: Aussi ajouter des defs pour sig (comme codeTryFolder)?
   class CodeTransformer(val depthLimit: Option[Int] = None) {
     type Extra
     var currDepthLimit = depthLimit
@@ -2245,69 +2341,72 @@ trait OCBSL extends Definitions {
     var currDepthLimit = depthLimit
     var depth = 0
 
-    final def tryFold(c: Code, acc: T, extra: Extra)(using OEnv): Either[E, T] = {
-      if (currDepthLimit.exists(_ <= depth)) limitDepthReached(c, acc, extra)
+    final def tryFold(sig: Signature, acc: T, extra: Extra)(using OEnv): Either[E, T] = {
+      if (currDepthLimit.exists(_ <= depth)) limitDepthReached(sig, acc, extra)
       else {
         depth += 1
-        val res = tryFoldImpl(c, acc, extra)
+        val res = tryFoldImpl(sig, acc, extra)
         depth -= 1
         res
       }
     }
 
-    def limitDepthReached(c: Code, acc: T, extra: Extra)(using OEnv): Either[E, T] = Right(acc)
+    final def tryFold(c: Code, acc: T, extra: Extra)(using OEnv): Either[E, T] = tryFold(code2sig(c), acc, extra)
+
+    def limitDepthReached(sig: Signature, acc: T, extra: Extra)(using OEnv): Either[E, T] = Right(acc)
 
     def canSubstLet(c: Code): Boolean = !isLambda(c)
 
-    def tryFoldImpl(c: Code, acc: T, extra: Extra)(using env: OEnv): Either[E, T] = {
-      code2sig(c) match {
-        // TODO: Quid subst des let???? --> mettre un case ici pr les var
-        //    -> ça sert à rien non? De toute façon, on suppose qu'on utilise déjà les defs non???
-        case Signature(Label.Let(v), Seq(e, b)) =>
-          for {
-            re <- tryFold(e, acc, extra)
-            vd = new ValDef(varId2Var(v))
-            // TODO: Jamais utilisé!!!! -> ajouter un varix comme cas non?
-            rb <- tryFold(b, re, extra)(using env.withLetBound(vd, e, canSubst = canSubstLet(e)))
-          } yield rb
+    final def tryFoldImpl(c: Code, acc: T, extra: Extra)(using env: OEnv): Either[E, T] =
+      tryFoldImpl(code2sig(c), acc, extra)
 
-        case Signature(Label.Assert | Label.Assume | Label.Require, Seq(pred, body)) =>
-          for {
-            rpred <- tryFold(pred, acc, extra)
-            rbody <- tryFold(body, rpred, extra)(using env.withCond(pred))
-          } yield rbody
+    def tryFoldImpl(sig: Signature, acc: T, extra: Extra)(using env: OEnv): Either[E, T] = sig match {
+      // TODO: Quid subst des let???? --> mettre un case ici pr les var
+      //    -> ça sert à rien non? De toute façon, on suppose qu'on utilise déjà les defs non???
+      case Signature(Label.Let(v), Seq(e, b)) =>
+        for {
+          re <- tryFold(e, acc, extra)
+          vd = new ValDef(varId2Var(v))
+          // TODO: Jamais utilisé!!!! -> ajouter un varix comme cas non?
+          rb <- tryFold(b, re, extra)(using env.withLetBound(vd, e, canSubst = canSubstLet(e)))
+        } yield rb
 
-        case Signature(Label.IfExpr, Seq(cond, thn, els)) =>
-          for {
-            rcond <- tryFold(cond, acc, extra)
-            rthn <- tryFold(thn, rcond, extra)(using env.withCond(cond))
-            rels <- tryFold(els, rthn, extra)(using env.withCond(negCodeOf(cond)))
-          } yield rels
+      case Signature(Label.Assert | Label.Assume | Label.Require, Seq(pred, body)) =>
+        for {
+          rpred <- tryFold(pred, acc, extra)
+          rbody <- tryFold(body, rpred, extra)(using env.withCond(pred))
+        } yield rbody
 
-        case Signature(Label.Or, args) =>
-          tryFoldSeq(args, acc, extra) { case (disj, env) => env.withCond(negCodeOf(disj)) }
+      case Signature(Label.IfExpr, Seq(cond, thn, els)) =>
+        for {
+          rcond <- tryFold(cond, acc, extra)
+          rthn <- tryFold(thn, rcond, extra)(using env.withCond(cond))
+          rels <- tryFold(els, rthn, extra)(using env.withCond(negCodeOf(cond)))
+        } yield rels
 
-        case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
-          assert(2 * pats.size == guardRhs.size)
-          val (guards, rhss) = guardRhs.grouped(2).map { case Seq(guard, rhs) => (guard, rhs) }.toSeq.unzip
-          val rscrut = tryFold(scrut, acc, extra)
-          pats.zip(guards).zip(rhss).foldLeft(rscrut.map((_, env))) {
-            case (Right((acc, env)), ((pat, guard), rhs)) =>
-              val patConds = collectPatternConds(pat)
-              for {
-                // TODO: collectPatCond ne conserve pas l'ordre --'
-                rpat <- tryFoldSeq(patConds.toSeq, acc, extra)
-                rguard <- tryFold(guard, rpat, extra)(using env.withConds(patConds))
-                caseConds = patConds + guard
-                rrhs <- tryFold(rhs, rguard, extra)(using env.withConds(caseConds))
-                negCaseConds = negatedConjunction(caseConds)
-              } yield (rrhs, env.withCond(negCaseConds))
-            case (Left(e), _) => Left(e)
-          }.map(_._1)
+      case Signature(Label.Or, args) =>
+        tryFoldSeq(args, acc, extra) { case (disj, env) => env.withCond(negCodeOf(disj)) }
 
-        // TODO: Suppose que lab pas besoin d'avoir des sous parties transformées. P.ex. pour MatchExpr, cela ne jouera pas (en raison des recs?)
-        case Signature(_, children) => tryFoldSeq(children, acc, extra)
-      }
+      case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
+        assert(2 * pats.size == guardRhs.size)
+        val (guards, rhss) = guardRhs.grouped(2).map { case Seq(guard, rhs) => (guard, rhs) }.toSeq.unzip
+        val rscrut = tryFold(scrut, acc, extra)
+        pats.zip(guards).zip(rhss).foldLeft(rscrut.map((_, env))) {
+          case (Right((acc, env)), ((pat, guard), rhs)) =>
+            val patConds = collectPatternConds(pat)
+            for {
+              // TODO: collectPatCond ne conserve pas l'ordre --'
+              rpat <- tryFoldSeq(patConds.toSeq, acc, extra)
+              rguard <- tryFold(guard, rpat, extra)(using env.withConds(patConds))
+              caseConds = patConds + guard
+              rrhs <- tryFold(rhs, rguard, extra)(using env.withConds(caseConds))
+              negCaseConds = negatedConjunction(caseConds)
+            } yield (rrhs, env.withCond(negCaseConds))
+          case (Left(e), _) => Left(e)
+        }.map(_._1)
+
+      // TODO: Suppose que lab pas besoin d'avoir des sous parties transformées. P.ex. pour MatchExpr, cela ne jouera pas (en raison des recs?)
+      case Signature(_, children) => tryFoldSeq(children, acc, extra)
     }
 
     final def tryFoldSeq(cs: Seq[Code], acc: T, extra: Extra)(using OEnv): Either[E, T] =
