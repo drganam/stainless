@@ -1694,6 +1694,7 @@ trait OCBSL extends Definitions {
       val tcons = getConstructor(id, tps)
       assert(tcons.fields.size == subps.size)
       // Using `simplifySigTopLvl` here as it can reduce to `true` if this ADT is the only ctor
+      // TODO: Il faudra accumuler (dans l'ordre!!!) les conds et les injecter au fur et a mesure
       val (isCtorSig, _) = simplifySigTopLvl(mkIsCtor(scrut, adt, id), BooleanType()) // TODO: Default env ok?
       val cond = updateCodesSig(isCtorSig, codePurity(scrut), BooleanType())
       val subconds = subps.flatMap(collectPatternConds).toSet
@@ -1709,6 +1710,7 @@ trait OCBSL extends Definitions {
     case _ => false
   }
 
+  // TODO: !!!! Pureté des let-bounds?????? !!!!
   // TODO: !!!! Pureté qui dépend de env ??? !!!!
   def sigPurity(sig: Signature): Purity = sig match {
     case Signature(Label.Var(_) | Label.Lit(_), Seq()) => Pure
@@ -2161,9 +2163,15 @@ trait OCBSL extends Definitions {
 
     def canSubstLet(c: Code): Boolean = !isLambda(c)
 
+    // TODO: Injection assms pour Or
     def transformImpl(c: Code, repl: Map[Code, Code], extra: Extra)(using env: OEnv): Code = {
       val tpe = codeTpe(c)
       val newSig = code2sig(c) match {
+        // TODO: Quid subst des let????
+        // TODO: Quid subst des let????
+        // TODO: Quid subst des let????
+        // TODO: Quid subst des let???? --> mettre un case ici pr les var
+        //    -> ça sert à rien non? De toute façon, on suppose qu'on utilise déjà les defs non???
         case Signature(Label.Let(v), Seq(e, b)) =>
           val re = transform(e, repl, extra)
           val vd = new ValDef(varId2Var(v))
@@ -2180,6 +2188,11 @@ trait OCBSL extends Definitions {
           val rpred = transform(pred, repl, extra)
           val rbody = transform(body, repl, extra)(using env.withCond(rpred))
           mkAssume(rpred, rbody)
+
+        case Signature(Label.Require, Seq(pred, body)) =>
+          val rpred = transform(pred, repl, extra)
+          val rbody = transform(body, repl, extra)(using env.withCond(rpred))
+          mkRequire(rpred, rbody)
 
         case Signature(Label.IfExpr, Seq(c, thn, els)) =>
           val rc = transform(c, repl, extra)
@@ -2219,10 +2232,94 @@ trait OCBSL extends Definitions {
 
     def transformCase(matchCase: LabMatchCase, repl: Map[Code, Code], extra: Extra)(using env: OEnv): (LabMatchCase, Set[Code]) = {
       val newPat = replaceIn(matchCase.pattern, repl)
-      val rguard = transform(matchCase.guard, repl, extra)
-      val caseConds = collectPatternConds(newPat) + rguard
+      val patConds = collectPatternConds(newPat)
+      val rguard = transform(matchCase.guard, repl, extra)(using env.withConds(patConds))
+      val caseConds = patConds + rguard
       val rrhs = transform(matchCase.rhs, repl, extra)(using env.withConds(caseConds))
       (LabMatchCase(newPat, rguard, rrhs), caseConds)
+    }
+  }
+
+  class CodeTryFolder[E, T](val depthLimit: Option[Int] = None) {
+    type Extra
+    var currDepthLimit = depthLimit
+    var depth = 0
+
+    final def tryFold(c: Code, acc: T, extra: Extra)(using OEnv): Either[E, T] = {
+      if (currDepthLimit.exists(_ <= depth)) limitDepthReached(c, acc, extra)
+      else {
+        depth += 1
+        val res = tryFoldImpl(c, acc, extra)
+        depth -= 1
+        res
+      }
+    }
+
+    def limitDepthReached(c: Code, acc: T, extra: Extra)(using OEnv): Either[E, T] = Right(acc)
+
+    def canSubstLet(c: Code): Boolean = !isLambda(c)
+
+    def tryFoldImpl(c: Code, acc: T, extra: Extra)(using env: OEnv): Either[E, T] = {
+      code2sig(c) match {
+        // TODO: Quid subst des let???? --> mettre un case ici pr les var
+        //    -> ça sert à rien non? De toute façon, on suppose qu'on utilise déjà les defs non???
+        case Signature(Label.Let(v), Seq(e, b)) =>
+          for {
+            re <- tryFold(e, acc, extra)
+            vd = new ValDef(varId2Var(v))
+            // TODO: Jamais utilisé!!!! -> ajouter un varix comme cas non?
+            rb <- tryFold(b, re, extra)(using env.withLetBound(vd, e, canSubst = canSubstLet(e)))
+          } yield rb
+
+        case Signature(Label.Assert | Label.Assume | Label.Require, Seq(pred, body)) =>
+          for {
+            rpred <- tryFold(pred, acc, extra)
+            rbody <- tryFold(body, rpred, extra)(using env.withCond(pred))
+          } yield rbody
+
+        case Signature(Label.IfExpr, Seq(cond, thn, els)) =>
+          for {
+            rcond <- tryFold(cond, acc, extra)
+            rthn <- tryFold(thn, rcond, extra)(using env.withCond(cond))
+            rels <- tryFold(els, rthn, extra)(using env.withCond(negCodeOf(cond)))
+          } yield rels
+
+        case Signature(Label.Or, args) =>
+          tryFoldSeq(args, acc, extra) { case (disj, env) => env.withCond(negCodeOf(disj)) }
+
+        case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
+          assert(2 * pats.size == guardRhs.size)
+          val (guards, rhss) = guardRhs.grouped(2).map { case Seq(guard, rhs) => (guard, rhs) }.toSeq.unzip
+          val rscrut = tryFold(scrut, acc, extra)
+          pats.zip(guards).zip(rhss).foldLeft(rscrut.map((_, env))) {
+            case (Right((acc, env)), ((pat, guard), rhs)) =>
+              val patConds = collectPatternConds(pat)
+              for {
+                // TODO: collectPatCond ne conserve pas l'ordre --'
+                rpat <- tryFoldSeq(patConds.toSeq, acc, extra)
+                rguard <- tryFold(guard, rpat, extra)(using env.withConds(patConds))
+                caseConds = patConds + guard
+                rrhs <- tryFold(rhs, rguard, extra)(using env.withConds(caseConds))
+                negCaseConds = negatedConjunction(caseConds)
+              } yield (rrhs, env.withCond(negCaseConds))
+            case (Left(e), _) => Left(e)
+          }.map(_._1)
+
+        // TODO: Suppose que lab pas besoin d'avoir des sous parties transformées. P.ex. pour MatchExpr, cela ne jouera pas (en raison des recs?)
+        case Signature(_, children) => tryFoldSeq(children, acc, extra)
+      }
+    }
+
+    final def tryFoldSeq(cs: Seq[Code], acc: T, extra: Extra)(using OEnv): Either[E, T] =
+      tryFoldSeq(cs, acc, extra)((_, env) => env)
+
+    // TODO: Dire que le nextEnv est appliqué pour le suivant (et pas pr le "current")
+    final def tryFoldSeq(cs: Seq[Code], acc: T, extra: Extra)(nextEnv: (Code, OEnv) => OEnv)(using env: OEnv): Either[E, T] = {
+      cs.foldLeft(Right((acc, env)): Either[E, (T, OEnv)]) {
+        case (Right((acc, env)), c) =>
+          tryFold(c, acc, extra).map((_, nextEnv(c, env)))
+        case (Left(e), _) => Left(e) // should do an early return...
+      }.map(_._1)
     }
   }
 

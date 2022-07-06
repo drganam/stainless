@@ -232,7 +232,10 @@ trait Definitions {
   def mkLambda(params: Seq[VarId], body: Code): Signature = Signature(Label.Lambda(params), Seq(body))
   def mkWickedChoose(v: VarId, pred: Code): Signature = Signature(Label.Choose(v), Seq(pred))
   def mkForall(params: Seq[VarId], pred: Code): Signature = Signature(Label.Forall(params), Seq(pred))
-  def mkOr(es: Seq[Code]): Signature = Signature(Label.Or, es)
+  def mkOr(es: Seq[Code]): Signature = {
+    assert(es.size >= 2)
+    Signature(Label.Or, es)
+  }
   def mkNot(e: Code): Signature = Signature(Label.Not, Seq(e))
   def mkEquals(e1: Code, e2: Code): Signature = Signature(Label.Equals, Seq(e1, e2))
   def mkLessThan(e1: Code, e2: Code): Signature = Signature(Label.LessThan, Seq(e1, e2))
