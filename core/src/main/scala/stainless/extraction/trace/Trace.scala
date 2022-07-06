@@ -696,7 +696,7 @@ object Trace {
   // TODO cleaning + check validity of sublemmas
   def nextIteration[T <: AbstractReport[T]](report: AbstractReport[T])(implicit context: inox.Context): Boolean = {
     counter = counter + 1
-    //if(counter % 10 == 0) printEverything
+    if(counter % 25 == 0) printEverything
 
      //println("sublemmas validity: sublemmas and then if there are no errors nor unknowns")
      //println(sublemmas(t))
