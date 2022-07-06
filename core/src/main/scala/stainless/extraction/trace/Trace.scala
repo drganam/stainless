@@ -862,7 +862,9 @@ object Trace {
           case None => None
           case Some(c) => 
             val m = CheckFilter.fixedFullName(f)
-            reporter.info(s"Counterexample for the function $m: $c")
+            val ce = c.counterexample
+            val fe = c.fromEval
+            reporter.info(s"Counterexample for the function $m: $ce, $fe")
         }
       })
 
