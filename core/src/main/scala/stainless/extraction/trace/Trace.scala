@@ -288,7 +288,7 @@ class Trace(override val s: Trees, override val t: termination.Trees)
         // + the coressponding replacement functions
         (eqLemma.copy(
           fullBody = BodyWithSpecs(withPre).withSpec(post).reconstructed,
-          flags = Seq(s.Derived(Some(fd1.id)), s.Annotation("traceInduct",List(StringLiteral(fd1.id.name)))),
+          flags = Seq(s.Derived(Some(fd1.id))),
           returnType = s.UnitType()
         ).copiedFrom(eqLemma) :: sublemmas.flatMap(_._1)) ++ replacement
       }
