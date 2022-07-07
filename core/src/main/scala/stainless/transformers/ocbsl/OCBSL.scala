@@ -32,7 +32,9 @@ trait OCBSL extends Definitions {
 
     def withLetBound(vd: ValDef, c: Code, canSubst: Boolean): OEnv = withLetBounds(Seq((vd, c)), canSubst) // TODO: On devrait plutot utiliser VarId
 
-    def withLetBounds(vds: Seq[(ValDef, Code)], canSubst: Boolean): OEnv = {
+    def withLetBounds(vds: Seq[(ValDef, Code)], canSubst: Boolean): OEnv = withLetBounds(vds)((_, _) => canSubst)
+
+    def withLetBounds(vds: Seq[(ValDef, Code)])(canSubst: (ValDef, Code) => Boolean): OEnv = {
       // Note: params may be empty, which is fine (the nesting level will not increase)
 
       assert(letDef.keySet.intersect(vds.map(_._1.toVariable).toSet).isEmpty)
@@ -40,7 +42,7 @@ trait OCBSL extends Definitions {
       OEnv(conditions,
 //        bound ++ vds.zipWithIndex.map { case ((vd, _), i) => vd.toVariable -> BinderIx.fromScopeLevel(scopeLevel + i) }.toMap,
 //        scopeLevel + vds.size,
-        letDef ++ vds.map((vd, c) => vd.toVariable -> (c, canSubst)))
+        letDef ++ vds.map { case (vd, c) => vd.toVariable -> (c, canSubst(vd, c)) })
     }
 
 //    def withOpenBound(param: ValDef): OEnv = withOpenBounds(Seq(param))
@@ -491,162 +493,6 @@ trait OCBSL extends Definitions {
   }
 
   def freshened(v: VarId): VarId = idOfVariable(varId2Var(v).freshen)
-
-  // TODO: Cette histoire de assume(...) en début de lambda???
-  // TODO: Cette histoire de assume(...) en début de lambda???
-  // TODO: Cette histoire de assume(...) en début de lambda???
-  def inlineLambda(subst: Seq[(VarId, Code)], body: Code)(using env: OEnv): Code = {
-    // TODO: Pourrait être factorisé
-    ???
-    /*
-    def rec(c: Code, varSubst: Map[VarId, VarId])(using env: OEnv): Code = {
-      val tpe = codeTpe(c)
-      code2sig(c) match {
-        case Signature(Label.Var(v), Seq()) =>
-          val newV = varSubst.getOrElse(v, v)
-          codeOfSig(mkVar(newV), tpe)
-
-        case Signature(Label.Let(v), Seq(e, b)) =>
-          val re = rec(e, varSubst)
-          val freshV = freshened(v)
-          // TODO: canSubst
-          val rb = rec(b, varSubst + (v -> freshV))(using env.withLetBound(new ValDef(varId2Var(freshV)), re, canSubst = false))
-          val (sig, p) = simplifySigTopLvl(mkLet(freshV, re, rb), tpe)
-          codeOfSig(sig, tpe)
-
-        case Signature(Label.Lambda(params), Seq(body)) =>
-          val freshParams = params.map(v => v -> freshened(v))
-          val rbody = rec(body, varSubst ++ freshParams.toMap)
-          val (sig, p) = simplifySigTopLvl(mkLambda(freshParams.map(_._2), rbody), tpe)
-          codeOfSig(sig, tpe)
-
-        case Signature(Label.Forall(params), Seq(pred)) =>
-          val freshParams = params.map(v => v -> freshened(v))
-          val rpred = rec(pred, varSubst ++ freshParams.toMap)
-          val (sig, p) = simplifySigTopLvl(mkForall(freshParams.map(_._2), rpred), tpe)
-          codeOfSig(sig, p, tpe)
-
-        case Signature(Label.Choose(v), Seq(pred)) =>
-          val freshV = freshened(v)
-          val rpred = rec(pred, varSubst + (v -> freshV))
-          val (sig, p) = simplifySigTopLvl(mkWickedChoose(freshV, rpred), tpe)
-          codeOfSig(sig, p, tpe)
-
-        case Signature(Label.Assert, Seq(pred, body)) =>
-          val rpred = rec(pred, varSubst)
-          val rbody = rec(body, varSubst)(using env.withCond(rpred))
-          val (sig, p) = simplifySigTopLvl(mkAssert(rpred, rbody), tpe)
-          codeOfSig(sig, p, tpe)
-
-        case Signature(Label.Assume, Seq(pred, body)) =>
-          val rpred = rec(pred, varSubst)
-          val rbody = rec(body, varSubst)(using env.withCond(rpred))
-          val (sig, p) = simplifySigTopLvl(mkAssume(rpred, rbody), tpe)
-          codeOfSig(sig, p, tpe)
-
-        case Signature(Label.IfExpr, Seq(c, thn, els)) =>
-          val rc = rec(c, varSubst)
-          val rthn = rec(thn, varSubst)(using env.withCond(rc))
-          val rels = rec(els, varSubst)(using env.withCond(negCodeOf(rc)))
-          val (sig, p) = simplifySigTopLvl(mkIfExpr(rc, rthn, rels), tpe)
-          codeOfSig(sig, p, tpe)
-
-        case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
-          // TODO: Il faudra supposer que scrut est let-bound?
-          assert(2 * pats.size == guardRhs.size)
-          val (guards, rhss) = guardRhs.grouped(2).map { case Seq(guard, rhs) => (guard, rhs) }.toSeq.unzip
-          val cases = pats.zip(guards).zip(rhss).map {
-            case ((pat, guard), rhs) => LabMatchCase(pat, guard, rhs)
-          }
-          val rscrut = rec(scrut, varSubst)
-          // TODO: Quid pureté (surtout si pas exhaustif)???? Et celle des guard+rhs????
-          processCases(rscrut, cases, Set.empty, varSubst, Seq.empty) match {
-            case (Seq(), _) =>
-              ???
-            case (Seq(matchCase), true) =>
-              // Remarque: si allCovered = true, alors on a forcément un wildcard pattern (et aucune subst n'est nécessaire)
-              assert(matchCase.pattern.isInstanceOf[LabelledPattern.Wildcard])
-              // TODO: Et simplifySigTopLvl ???
-              // TODO: Autre chose pour les bdgs?
-              // TODO: PURITY????
-              // TODO: Idée: slmt si accumulated conds est pure (à faire dans processCase)
-              // TODO: Faire de meme pour computeSignature
-              matchCase.rhs
-            case (newCases, _) =>
-              val purity = newCases.foldLeft(codePurity(rscrut)) {
-                case (p, LabMatchCase(_, guard, rhs)) => p ++ codePurity(guard) ++ codePurity(rhs)
-              }
-              codeOfSig(mkMatchExpr(rscrut, newCases), purity, tpe)
-          }
-
-        // TODO: Suppose que lab pas besoin d'avoir des sous parties transformées. P.ex. pour MatchExpr, cela ne jouera pas (en raison des recs?)
-        case Signature(lab, children) =>
-          val rchildren = children.map(rec(_, varSubst))
-          val (sig, p) = simplifySigTopLvl(Signature(lab, rchildren), tpe)
-          codeOfSig(sig, p, tpe)
-      }
-    }
-
-    // TODO: Ditto, d'ailleurs cela devrait être intégré dans simplifySigTopLvl...
-    // TODO: Ne pas oublier de hoist la remarque hors du processCase une fois que l'on factorise cela en dehors
-    def processCase(scrut: Code, matchCase: LabMatchCase, accumulatedConds: Set[Code], varSubst: Map[VarId, VarId])(using env: OEnv): Option[(LabMatchCase, Set[Code], Boolean)] = {
-      // Remarque: comme il n'y pas de binder explicit, il n'y a rien a freshen.
-      val rguard = rec(matchCase.guard, varSubst)
-      val caseConds = collectPatternConds(matchCase.pattern) + rguard
-      val newEnv = env.withConds(accumulatedConds)
-      val rrhs = rec(matchCase.rhs, varSubst)(using newEnv)
-
-      if (codePurity(scrut).isPure) {
-        // TODO: Ok par rapport à la pureté?
-        if (implied(trueCode)(using newEnv)) {
-          // TODO: A-t-on besoin de faire qqchose pour ces bindings?
-          return Some(LabMatchCase(LabelledPattern.Wildcard(scrut), trueCode, rrhs), Set(trueCode), true)
-        } else if (implied(falseCode)(using newEnv)) {
-          // This `matchCase` is unreachable
-          return None
-        }
-      }
-
-      Some(LabMatchCase(matchCase.pattern, rguard, rrhs), caseConds, false)
-    }
-
-    def processCases(scrut: Code, cases: Seq[LabMatchCase], accumulatedConds: Set[Code], varSubst: Map[VarId, VarId], acc: Seq[LabMatchCase])(using env: OEnv): (Seq[LabMatchCase], Boolean) = {
-      given dontDefaultUseOuterEnv: OEnv = sys.error("Carefully consider the appropriate env to use")
-      if (cases.isEmpty) (acc, false)
-      else {
-        // TODO: Envs ok? Apres tout, on pourrait accumuler les accumulated conds dans env non?
-        processCase(scrut, cases.head, accumulatedConds, varSubst)(using env) match {
-          case Some((newMatchCase, caseConds, allCovered)) =>
-            if (allCovered) (acc :+ newMatchCase, true)
-            else {
-              val negCaseConds = negatedConjunction(caseConds)(using env)
-              processCases(scrut, cases.tail, accumulatedConds + negCaseConds, varSubst, acc :+ newMatchCase)
-            }
-          case None =>
-            processCases(scrut, cases.tail, accumulatedConds, varSubst, acc)
-        }
-      }
-    }
-    // TODO: Remarque: inline une lambda peut donner lieu a une expr impure...
-    // TODO: Pureté?
-    // TODO: Pureté?
-    // TODO: Pureté?
-    val substMap = subst.toMap
-    val initVarSubst = subst.map { case (v, _) => v -> freshened(v) }.toMap
-    val initEnvNewBdgs = initVarSubst.map {
-      case (oldV, newV) => new ValDef(varId2Var(newV)) -> substMap(oldV)
-    }.toSeq
-    val tpe = codeTpe(body)
-    val inlined = rec(body, initVarSubst)(using env.withLetBounds(initEnvNewBdgs, canSubst = true))
-    assert(codeTpe(inlined) == tpe)
-    subst.foldRight(inlined) {
-      case ((oldV, defn), rest) =>
-        val newV = initVarSubst(oldV)
-        val purity = codePurity(defn) ++ codePurity(rest)
-        codeOfSig(mkLet(newV, defn, rest), purity, tpe)
-    }
-    */
-  }
 
   def codeOfSig(sig: Signature, tpe: Type): Code = {
     sig2code.get(sig) match {
@@ -1383,6 +1229,8 @@ trait OCBSL extends Definitions {
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+  def codeOfVarId(v: VarId): Code = codeOfSig(mkVar(v), varTpe(v))
+
   private val sigPurity = new SigPurity
 
   def codePurity(c: Code)(using env: OEnv): Purity = sigPurity.codePurity(c)
@@ -1393,6 +1241,101 @@ trait OCBSL extends Definitions {
   def simplifySigTopLvl(sig: Signature, tpe: Type)(using OEnv): Signature = topLvlSigSimp.transform(sig, tpe, Map.empty, ())
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+  // TODO: Cette histoire de assume(...) en début de lambda???
+  // TODO: Cette histoire de assume(...) en début de lambda???
+  // TODO: Cette histoire de assume(...) en début de lambda???
+  def inlineLetBoundLambda(lam: VarId, in: Code)(using env: OEnv): Code = {
+    val (cLam, _) = env.letDef.getOrElse(varId2Var(lam), sys.error("Treachery!!! Lambda not in env!!!"))
+    val lamVarIdCode = codeOfVarId(lam)
+    val Signature(Label.Lambda(params), Seq(body)) = code2sig(cLam)
+
+    class InlineWrapperImpl extends CodeTransformer(depthLimit = None) {
+      override type Extra = Unit
+
+      // TODO: Ok par rapport à repl + let-bound canSubst truc?
+      override def transformImpl(sig: Signature, tpe: Type, repl: Map[Code, Code], extra: Unit)(using env: OEnv): Signature = sig match {
+        case Signature(Label.Application, `lamVarIdCode` +: args) =>
+          assert(params.size == args.size)
+          code2sig(inlineLambda(params.zip(args), body))
+        case _ => super.transformImpl(sig, tpe, repl, ())
+      }
+    }
+
+    (new InlineWrapperImpl).transformImpl(in, Map.empty, ())
+  }
+
+  // TODO: Cette histoire de assume(...) en début de lambda???
+  // TODO: Cette histoire de assume(...) en début de lambda???
+  // TODO: Cette histoire de assume(...) en début de lambda???
+  // TODO: remarque sur subst dans l'ordre (repr. l'inlining d'argument)
+  def inlineLambda(argsSubst: Seq[(VarId, Code)], body: Code)(using env: OEnv): Code = {
+    // Essentiellement un freshener + simplifySigTopLvl a chaque step
+    class InlinerImpl extends CodeTransformer(depthLimit = None) {
+      override type Extra = Unit
+
+      override def transformImpl(sig: Signature, tpe: Type, repl: Map[Code, Code], extra: Unit)(using env: OEnv): Signature = sig match {
+        case Signature(Label.Let(v), Seq(e, b)) =>
+          val re = transform(e, repl, ())
+          val freshV = freshened(v)
+          val newEnv = env.withLetBound(new ValDef(varId2Var(freshV)), re, canSubst = !isLambda(re))
+          val rb = transformImpl(b, repl + (codeOfVarId(v) -> codeOfVarId(freshV)), ())(using newEnv)
+          simplifySigTopLvl(mkLet(freshV, re, rb), tpe)
+
+        case Signature(Label.Lambda(params), Seq(body)) =>
+          val freshParams = params.map(v => v -> freshened(v))
+          val freshParamsRepl = freshParams.map { case (old, nw) => codeOfVarId(old) -> codeOfVarId(nw) }
+          val rbody = transform(body, repl ++ freshParamsRepl, ())
+          simplifySigTopLvl(mkLambda(freshParams.map(_._2), rbody), tpe)
+
+        case Signature(Label.Forall(params), Seq(pred)) =>
+          val freshParams = params.map(v => v -> freshened(v))
+          val freshParamsRepl = freshParams.map { case (old, nw) => codeOfVarId(old) -> codeOfVarId(nw) }
+          val rpred = transform(pred, repl ++ freshParamsRepl, ())
+          simplifySigTopLvl(mkForall(freshParams.map(_._2), rpred), tpe)
+
+        case Signature(Label.Choose(v), Seq(pred)) =>
+          val freshV = freshened(v)
+          val rpred = transform(pred, repl + (codeOfVarId(v) -> codeOfVarId(freshV)), ())
+          simplifySigTopLvl(mkWickedChoose(freshV, rpred), tpe)
+
+        // Remarque: pas de freshening à faire pour Match parce qu'il n'y a pas de binding à proprement parler
+
+        case Signature(_, _) =>
+          val rsig = super.transformImpl(sig, tpe, repl, ())
+          simplifySigTopLvl(rsig, tpe)
+      }
+    }
+
+    // TODO: Remarque: inline une lambda peut donner lieu a une expr impure...
+    // TODO: Pureté?
+    val bodyTpe = codeTpe(body)
+    val freshVars = argsSubst.map { case (v, _) => v -> freshened(v) }
+    val freshVarsMap = freshVars.toMap
+    val argsSubstMap = argsSubst.toMap
+    // Bind the argument to fresh variables
+    val initEnvBindings = freshVars.map {
+      case (oldV, newV) => new ValDef(varId2Var(newV)) -> argsSubstMap(oldV)
+    }
+    val initEnv = env.withLetBounds(initEnvBindings)((_, c) => !isLambda(c))
+    // Map to replace all occurrences of the old parameter with the fresh bindings variables.
+    // TODO: Ok ça va se faire replace, mais ensuite??? Il n'y a pas la subst de letbind qui se fait!!!!
+    //    -> Devrait être ok (CodeTransformer se charge)
+    val initRepl = freshVars.map { case (old, nw) => codeOfVarId(old) -> codeOfVarId(nw) }.toMap
+    val inlined = (new InlinerImpl).transform(body, initRepl, ())(using initEnv)
+
+    assert(codeTpe(inlined) == bodyTpe)
+    argsSubst.foldRight(inlined) {
+      case ((oldV, arg), rest) =>
+        val newV = freshVarsMap(oldV)
+        codeOfSig(mkLet(newV, arg, rest), bodyTpe)
+    }
+  }
+
+  def substByLet(v: VarId)(using env: OEnv): Option[Code] = {
+    env.letDef.get(varId2Var(v))
+      .filter(_._2).map(_._1)
+  }
 
   class TopLevelSigSimplifier extends CodeTransformer(depthLimit = Some(1)) {
     override type Extra = Unit
@@ -1797,9 +1740,15 @@ trait OCBSL extends Definitions {
       }
     }
 
-    final def transform(c: Code, repl: Map[Code, Code], extra: Extra)(using OEnv): Code = {
+    final def transform(c: Code, repl: Map[Code, Code], extra: Extra)(using env: OEnv): Code = {
       repl.get(c) match {
-        case Some(cc) => cc
+        case Some(cc) =>
+          // Si cc est une var à un enclosing let, on le remplace par sa définition (pr autant que cela est permis)
+          code2sig(cc) match {
+            case Signature(Label.Var(v), Seq()) =>
+              substByLet(v).getOrElse(cc)
+            case _ => cc
+          }
         case None =>
           val tpe = codeTpe(c)
           val newSig = transform(code2sig(c), tpe, repl, extra)
@@ -1825,6 +1774,10 @@ trait OCBSL extends Definitions {
       // TODO: Quid subst des let????
       // TODO: Quid subst des let???? --> mettre un case ici pr les var
       //    -> ça sert à rien non? De toute façon, on suppose qu'on utilise déjà les defs non???
+
+      case Signature(Label.Var(v), Seq()) =>
+        substByLet(v).map(code2sig).getOrElse(sig)
+
       case Signature(Label.Let(v), Seq(e, b)) =>
         val re = transform(e, repl, extra)
         val vd = new ValDef(varId2Var(v))
@@ -1933,6 +1886,10 @@ trait OCBSL extends Definitions {
     def tryFoldImpl(sig: Signature, acc: T, extra: Extra)(using env: OEnv): Either[E, T] = sig match {
       // TODO: Quid subst des let???? --> mettre un case ici pr les var
       //    -> ça sert à rien non? De toute façon, on suppose qu'on utilise déjà les defs non???
+
+      case Signature(Label.Var(v), Seq()) =>
+        substByLet(v).map(tryFold(_, acc, extra)).getOrElse(Right(acc))
+
       case Signature(Label.Let(v), Seq(e, b)) =>
         for {
           re <- tryFold(e, acc, extra)
