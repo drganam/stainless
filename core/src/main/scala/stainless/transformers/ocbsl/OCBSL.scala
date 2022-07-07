@@ -5,7 +5,6 @@ package ocbsl
 import inox.solvers
 
 // TODO: Certains Or ne semble pas correctement être flattened
-// TODO: Inline les lambda (surtout pour les equations)
 // TODO: Not(Or(..)) => And dans uncodeOf
 // TODO: Non!!!! L'ordre des disjunction a de l'importance
 trait OCBSL extends Definitions {
@@ -20,39 +19,18 @@ trait OCBSL extends Definitions {
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
   case class OEnv(conditions: Set[Code],
-//                  bound: Map[Variable, BinderIx],
-//                  scopeLevel: Int,
-                  // variable -> code de la *definition* pas de le code de l'indexed var
-                  // et si on peut utiliser ce code là au lieu de l'indexed var.
-                  // "true" en général, sauf pour les lambdas dans la var apparait plsrs fois.
-                  // Le "uncodeOf" se débrouillera pour faire la substitution inverse, du code de la def à la var
-                  letDef: Map[Variable, (Code, Boolean)]) {
+                  letDef: Map[VarId, (Code, Boolean)]) {
     def withCond(c: Code): OEnv = copy(conditions = conditions + c)
     def withConds(cs: Set[Code]): OEnv = copy(conditions = conditions ++ cs)
 
-    def withLetBound(vd: ValDef, c: Code, canSubst: Boolean): OEnv = withLetBounds(Seq((vd, c)), canSubst) // TODO: On devrait plutot utiliser VarId
+    def withLetBound(v: VarId, c: Code, canSubst: Boolean): OEnv = withLetBounds(Seq((v, c)), canSubst)
 
-    def withLetBounds(vds: Seq[(ValDef, Code)], canSubst: Boolean): OEnv = withLetBounds(vds)((_, _) => canSubst)
+    def withLetBounds(vs: Seq[(VarId, Code)], canSubst: Boolean): OEnv = withLetBounds(vs)((_, _) => canSubst)
 
-    def withLetBounds(vds: Seq[(ValDef, Code)])(canSubst: (ValDef, Code) => Boolean): OEnv = {
-      // Note: params may be empty, which is fine (the nesting level will not increase)
-
-      assert(letDef.keySet.intersect(vds.map(_._1.toVariable).toSet).isEmpty)
-
-      OEnv(conditions,
-//        bound ++ vds.zipWithIndex.map { case ((vd, _), i) => vd.toVariable -> BinderIx.fromScopeLevel(scopeLevel + i) }.toMap,
-//        scopeLevel + vds.size,
-        letDef ++ vds.map { case (vd, c) => vd.toVariable -> (c, canSubst(vd, c)) })
+    def withLetBounds(vs: Seq[(VarId, Code)])(canSubst: (VarId, Code) => Boolean): OEnv = {
+      assert(letDef.keySet.intersect(vs.map(_._1).toSet).isEmpty)
+      OEnv(conditions, letDef ++ vs.map { case (v, c) => v -> (c, canSubst(v, c)) })
     }
-
-//    def withOpenBound(param: ValDef): OEnv = withOpenBounds(Seq(param))
-//
-//    def withOpenBounds(params: Seq[ValDef]): OEnv = {
-//      // Note: params may be empty, which is fine (the nesting level will not increase)
-//      OEnv(conditions,
-//        bound ++ params.zipWithIndex.map((vd, i) => vd.toVariable -> BinderIx.fromScopeLevel(scopeLevel + i)).toMap,
-//        scopeLevel + params.size, letDef)
-//    }
   }
   object OEnv {
     def empty: OEnv = OEnv(Set.empty, Map.empty)
@@ -105,8 +83,10 @@ trait OCBSL extends Definitions {
 
   private val falseSig = Signature(Label.Lit(BooleanLiteral(false)), Seq.empty)
   private val trueSig = Signature(Label.Lit(BooleanLiteral(true)), Seq.empty)
+  private val unitSig = Signature(Label.Lit(UnitLiteral()), Seq.empty)
   private val falseCode = codeOfSig(falseSig, BooleanType())
   private val trueCode = codeOfSig(trueSig, BooleanType())
+  private val unitCode = codeOfSig(unitSig, UnitType())
 
   def codeOf(e: Expr)(using OEnv): Code = {
     if (e.getType == BooleanType()) simplifiedDisjunction(pDisj(e).toSet)
@@ -162,7 +142,9 @@ trait OCBSL extends Definitions {
         simplifySigTopLvl(mkDecreases(codeOf(measure), codeOf(body)), tpe)
 
       case Tuple(args) =>
-        simplifySigTopLvl(mkTuple(args.map(codeOf)), tpe)
+        // TODO: letIn pas assez... il faudra essayer de hoist toussa
+        val rargs = args.map(codeOf)
+        simplifySigTopLvl(mkTuple(rargs), tpe)
 
       case ADT(id, tps, args) =>
         simplifySigTopLvl(mkADT(id, tps, args.map(codeOf)), tpe)
@@ -198,7 +180,7 @@ trait OCBSL extends Definitions {
         // TODO: !!!! ??? immediateCall + inLambda ??? !!!!
         //    pour le "immediateCall": ? p-e par rapport au path condition supplémentaire résultant de stmts intermediaire avant le call?
         //    pour le "inLambda": pour eviter explosion en cas d'inling lambda (~> à gérer dans "uncodeOf"?)
-        val cB = codeOf(body)(using env.withLetBound(vd, cE, canSubst = !isLam))
+        val cB = codeOf(body)(using env.withLetBound(vId, cE, canSubst = !isLam))
         // TODO: Si isLam, il faudra qu'on fasse un count de vId et s'il occure == 0, on pourra drop (pr autant que cE pure)
         //  et s'il occurre == 1, on fera un inline. Pour cela, il faudra voir comment combiner replace + subst sans faire le tree traversal plrs fois...
         simplifySigTopLvl(mkLet(vId, cE, cB), tpe)
@@ -339,9 +321,9 @@ trait OCBSL extends Definitions {
     simpSig
   }
 
-  def signatureOfPatternExpr(subScrut: Code, scrutTpe: Type, pat: Pattern)(using env: OEnv): (LabelledPattern, Seq[(ValDef, Code)], Set[Code]) = {
-    val vdBinder: ValDef = pat.binder.getOrElse(ValDef.fresh("dummyBinder", scrutTpe))
-    val bdgs1 = Seq((vdBinder, subScrut))
+  def signatureOfPatternExpr(subScrut: Code, scrutTpe: Type, pat: Pattern)(using env: OEnv): (LabelledPattern, Seq[(VarId, Code)], Set[Code]) = {
+    val vBinder = idOfVariable(pat.binder.getOrElse(ValDef.fresh("dummyBinder", scrutTpe)).toVariable)
+    val bdgs1 = Seq((vBinder, subScrut))
     pat match {
       case WildcardPattern(_) => (LabelledPattern.Wildcard(subScrut), bdgs1, Set.empty)
 
@@ -581,8 +563,9 @@ trait OCBSL extends Definitions {
   //  -> De manière générale, non, du moins pas une subst tel quel. Du moment qu'on recover le let-binding dans uncodeOf, cela devrait aller
   def sigOfVariableWithSubst(v: Variable)(using env: OEnv): Signature = {
     // Check if `v` is let-bound *and* that we can use the signature/code of the definition of v
-    env.letDef.get(v).filter(_._2).map { case (c, _) => code2sig(c) }
-      .getOrElse(mkVar(idOfVariable(v)))
+    val vId = idOfVariable(v)
+    env.letDef.get(vId).filter(_._2).map { case (c, _) => code2sig(c) }
+      .getOrElse(mkVar(vId))
 
 //    // Check if `v` is let-bound *and* that we can use the signature/code of the definition of v
 //    env.letDef.get(v).filter(_._2).map { case (c, _) => (code2sig(c), codePurity(c)) }
@@ -1246,7 +1229,7 @@ trait OCBSL extends Definitions {
   // TODO: Cette histoire de assume(...) en début de lambda???
   // TODO: Cette histoire de assume(...) en début de lambda???
   def inlineLetBoundLambda(lam: VarId, in: Code)(using env: OEnv): Code = {
-    val (cLam, _) = env.letDef.getOrElse(varId2Var(lam), sys.error("Treachery!!! Lambda not in env!!!"))
+    val (cLam, _) = env.letDef.getOrElse(lam, sys.error("Treachery!!! Lambda not in env!!!"))
     val lamVarIdCode = codeOfVarId(lam)
     val Signature(Label.Lambda(params), Seq(body)) = code2sig(cLam)
 
@@ -1278,7 +1261,7 @@ trait OCBSL extends Definitions {
         case Signature(Label.Let(v), Seq(e, b)) =>
           val re = transform(e, repl, ())
           val freshV = freshened(v)
-          val newEnv = env.withLetBound(new ValDef(varId2Var(freshV)), re, canSubst = !isLambda(re))
+          val newEnv = env.withLetBound(freshV, re, canSubst = !isLambda(re))
           val rb = transformImpl(b, repl + (codeOfVarId(v) -> codeOfVarId(freshV)), ())(using newEnv)
           simplifySigTopLvl(mkLet(freshV, re, rb), tpe)
 
@@ -1315,7 +1298,7 @@ trait OCBSL extends Definitions {
     val argsSubstMap = argsSubst.toMap
     // Bind the argument to fresh variables
     val initEnvBindings = freshVars.map {
-      case (oldV, newV) => new ValDef(varId2Var(newV)) -> argsSubstMap(oldV)
+      case (oldV, newV) => newV -> argsSubstMap(oldV)
     }
     val initEnv = env.withLetBounds(initEnvBindings)((_, c) => !isLambda(c))
     // Map to replace all occurrences of the old parameter with the fresh bindings variables.
@@ -1332,10 +1315,7 @@ trait OCBSL extends Definitions {
     }
   }
 
-  def substByLet(v: VarId)(using env: OEnv): Option[Code] = {
-    env.letDef.get(varId2Var(v))
-      .filter(_._2).map(_._1)
-  }
+  def substByLet(v: VarId)(using env: OEnv): Option[Code] = env.letDef.get(v).filter(_._2).map(_._1)
 
   class TopLevelSigSimplifier extends CodeTransformer(depthLimit = Some(1)) {
     override type Extra = Unit
@@ -1364,6 +1344,11 @@ trait OCBSL extends Definitions {
             case Signature(Label.Lambda(Seq(_)), Seq(`trueCode`)) => code2sig(body)
             case _ => sig
           }
+
+        case Signature(Label.Let(v), Seq(_, _)) =>
+          val rsig@Signature(Label.Let(`v`), Seq(re, rbody)) = super.transformImpl(sig, tpe, repl, ())
+          if (rbody == unitCode) code2sig(re)
+          else rsig
 
         case Signature(Label.IfExpr, Seq(cond, thenn, elze)) =>
           val pCond = codePurity(cond)
@@ -1780,9 +1765,7 @@ trait OCBSL extends Definitions {
 
       case Signature(Label.Let(v), Seq(e, b)) =>
         val re = transform(e, repl, extra)
-        val vd = new ValDef(varId2Var(v))
-        // TODO: env.withLetBound "Jamais utilisé"!!!! -> ajouter un varix comme cas non?
-        val rb = transform(b, repl + (e -> re), extra)(using env.withLetBound(vd, re, canSubst = canSubstLet(re)))
+        val rb = transform(b, repl + (e -> re), extra)(using env.withLetBound(v, re, canSubst = canSubstLet(re)))
         mkLet(v, re, rb)
 
       case Signature(Label.Assert, Seq(pred, body)) =>
@@ -1893,9 +1876,7 @@ trait OCBSL extends Definitions {
       case Signature(Label.Let(v), Seq(e, b)) =>
         for {
           re <- tryFold(e, acc, extra)
-          vd = new ValDef(varId2Var(v))
-          // TODO: Jamais utilisé!!!! -> ajouter un varix comme cas non?
-          rb <- tryFold(b, re, extra)(using env.withLetBound(vd, e, canSubst = canSubstLet(e)))
+          rb <- tryFold(b, re, extra)(using env.withLetBound(v, e, canSubst = canSubstLet(e)))
         } yield rb
 
       case Signature(Label.Assert | Label.Assume | Label.Require, Seq(pred, body)) =>
