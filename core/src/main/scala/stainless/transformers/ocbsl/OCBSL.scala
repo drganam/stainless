@@ -23,17 +23,60 @@ trait OCBSL extends Definitions {
     def withCond(c: Code): OEnv = copy(conditions = conditions + c)
     def withConds(cs: Set[Code]): OEnv = copy(conditions = conditions ++ cs)
 
-    def withLetBound(v: VarId, c: Code, canSubst: Boolean): OEnv = withLetBounds(Seq((v, c)), canSubst)
+    def withLetBound(v: VarId, c: Code, canSubst: Boolean): OEnv = copy(letDef = letDef + (v -> (c, canSubst)))
 
     def withLetBounds(vs: Seq[(VarId, Code)], canSubst: Boolean): OEnv = withLetBounds(vs)((_, _) => canSubst)
 
     def withLetBounds(vs: Seq[(VarId, Code)])(canSubst: (VarId, Code) => Boolean): OEnv = {
       assert(letDef.keySet.intersect(vs.map(_._1).toSet).isEmpty)
-      OEnv(conditions, letDef ++ vs.map { case (v, c) => v -> (c, canSubst(v, c)) })
+      ???
+//      OEnv(conditions, letDef ++ vs.map { case (v, c) => v -> (c, canSubst(v, c)) })
     }
   }
+
   object OEnv {
     def empty: OEnv = OEnv(Set.empty, Map.empty)
+  }
+
+  case class InLambda(v: Boolean)
+
+  // TODO: Le code résultant de computeSig doit s'inclure lui même (a.c. occurences = 1, inLambda = false, afterPC = false et containsLambda selon la structure)
+  // TODO: -> en fait non, mauvaise idée
+  // TODO: Pr les occurrences, pas vrmt besoin de tout track! Juste si <= 1 et avec quel env
+  case class Usage(occurrences: Map[OEnv, Int], inLambda: Boolean, containsLambda: Boolean) {
+    def ++(that: Usage): Usage = Usage(???, inLambda || that.inLambda, containsLambda || that.containsLambda)
+    lazy val nbOccurrences: Int = occurrences.values.sum
+  }
+  case class Usages(c2u: Map[Code, Usage]) {
+    def apply(c: Code): Usage = c2u.getOrElse(c, Usage.none)
+
+    def ++(that: Usages): Usages = ???
+
+    // Note: env pas implicite car ce n'est pas tjrs le defaut qui est le bon
+    def incOccurrence(cs: IterableOnce[Code], inEnv: OEnv): Usages = ???
+  }
+  // TODO: Faire remarquer que le terminal retourné n'est pas "compté" dans usages (mais peut apparaître par CSE)
+  // TODO: ^^^ ah bon? et si c'est une "référence" vers ce code???
+  // OEnv: En gros tous les "let bindings" des arguments pour terminal (qui peuvent être elided)
+  case class CodeRes(terminal: Code, ctx: Usages => Code => Code, usages: Usages, env: OEnv) {
+    def containsLambda: Boolean = isLambda(terminal) || usages.c2u.exists(_._2.containsLambda)
+  }
+
+  object Usage {
+    def none: Usage = Usage(Map.empty, false, false)
+  }
+
+  object Usages {
+    def empty: Usages = Usages(Map.empty)
+  }
+
+  object CodeRes {
+    // TODO: Env ok? après tout, ce "term" n'a p-e pas besoin d'un env en particulier?
+    def fromVar(v: VarId)(using env: OEnv, inLambda: InLambda): CodeRes = {
+      val term = substByLet(v).getOrElse(codeOfVarId(v))
+      // TODO: usage ok? Par ce que là, on semble se contredire avec le fait qu'on ne soit pas "sensé" compter les terminaux...
+      CodeRes(term, _ => identity[Code], ???, env)
+    }
   }
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -46,20 +89,10 @@ trait OCBSL extends Definitions {
   // TODO: On pourrait simplifier les trucs du genre !isInstanceOf[A] && isInstanceOf[B] en isInstanceOf[B] pour les patmat?
 
   // TODO (liste de rappel):
-  //    - Pour le "uncodeOf", pour éviter des duplication, on pourra let-bind les codes pour lesquelles
-  //    les expr. sont non triviales
-  //    - Pourrait-on envisager de supprimer les indexed var pour les lets (slmt pour les lets) et simplement utiliser les codes
-  //    des definitions? On maintiendra un Let(def, body) et le "uncodeOf" pourra l'utiliser pour savoir
-  //    où remettre le let (et là, on pourra même le supprimer si def est pas utilisé et qu'il est pur)
-  //    Cela nous permettra d'éviter de devoir faire des substitutions explicites
-  //      - Attention au gag avec les lambdas!! On risquera de tout inliner dans le truc de simplification...
-  //        Sauf si: On arrive a flairer le truc et qu'on arrive a voir combien il y a de references a cette lambda
-  //        si cest let-bound etc.
   //    - Pour le cache, il faudra qu'on serialize les mapping signature -> code
   //    Il faudra aussi que ce mapping soit le même pr ts les threads!!!
   //      -sig2code: on ajoute 1 indirection par ordinal de label pour diminuer les contention
   //      -code2sig: un simple atomicref d'array fera amplement l'affaire (faudra faire attention pr ne pas faire des allocs concurrentes...)
-  //    -let binding des match, adt args, fn args, etc. (necessaire pour eviter des dupliqués dans uncodeOf)!!!!
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -88,19 +121,20 @@ trait OCBSL extends Definitions {
   private val trueCode = codeOfSig(trueSig, BooleanType())
   private val unitCode = codeOfSig(unitSig, UnitType())
 
-  def codeOf(e: Expr)(using OEnv): Code = {
-    if (e.getType == BooleanType()) simplifiedDisjunction(pDisj(e).toSet)
-    else {
-      val sig = computeSignature(e)
-      codeOfSig(sig, e.getType)
-    }
+  def codeOfExpr(e: Expr)(using OEnv): CodeRes = {
+//    if (e.getType == BooleanType()) simplifiedDisjunction(pDisj(e).toSet)
+//    else {
+//      val sig = sigOfExpr(e)
+//      codeOfSig(sig, e.getType)
+//    }
+    ???
   }
 
-  def negCodeOf(c: Code)(using OEnv): Code = codeOfSig(pNegNormal(c), BooleanType())
+  def negCodeOf(c: Code)(using OEnv): Code = ??? // codeOfSig(pNegNormal(c), BooleanType())
 
   // TODO: Pk ce truc est fait dans codeOf mais pas dans pDisj?
   // TODO: Et les assms???
-  def simplifiedDisjunction(disj: Set[Code])(using OEnv): Code = {
+  def simplifiedDisjunction(disj: Set[Code])(using OEnv): Code = ??? /*{
     assert(disj.forall(c => codeTpe(c) == BooleanType()))
     // TODO: Caching?
     val purity = fold(disj.map(codePurity).toSeq)
@@ -112,87 +146,207 @@ trait OCBSL extends Definitions {
       val sig = Signature(Label.Or, disj1.toSeq.sorted)
       codeOfSig(sig, BooleanType())
     }
+  }*/
+
+  /*
+  // TODO: Mais pas que!!! Il y a aussi pureté etc.
+  // TODO: Si variable ou si lit, pas besoin de bind non plus
+  def needsBinding(usgs: Usages, c: Code)(using OEnv): Boolean = {
+    // TODO: !!! La pureté peut être changée si on inline un let !!!
+    val purity = codePurity(c)
+    val usg = usgs(c)
+    ???
+  }
+  */
+
+  def foldCodeRes(codeRess: Seq[CodeRes]): Usages => Code => Code = {
+    usgs => c => {
+      codeRess.foldRight((c, usgs)) {
+        case (cr, (rest, usgsAcc)) =>
+          val newUsgsAcc = cr.usages ++ usgsAcc
+          val newRest = cr.ctx(newUsgsAcc)(rest)
+          (newRest, newUsgsAcc)
+      }._1
+    }
   }
 
-  def computeSignature(e: Expr)(using env: OEnv): Signature = {
+  def needsBinding(terminal: Code, usg: Usage)(using env: OEnv): Boolean = {
+    code2sig(terminal) match {
+      case Signature(Label.Lit(_) | Label.Var(_), _) => false
+      case _ =>
+        if (usg.nbOccurrences > 1) true
+        else if (codePurity(terminal).isPure) !usg.inLambda || !usg.containsLambda
+        else if (usg.nbOccurrences != 1) true
+        else {
+          // On a usg.occurrences = Map(someEnv -> 1).
+          // someEnv représente l'env. actif lors de l'occurrence de `terminal` dans le trou que l'on s'apprête à compléter.
+          // S'il est différent de l'env ou `terminal` est introduit, alors on a besoin de let-bind, car inline
+          // une expr impure après un PC est incorrect.
+          val appearsAfterPC = usg.occurrences.head._1 ne env
+          appearsAfterPC || usg.inLambda
+        }
+    }
+  }
+
+  def codeOfExprsBound(es: Seq[Expr], consTpe: Type)(cons: Seq[Code] => Signature)(using env: OEnv, inLambda: InLambda): CodeRes =
+    codeOfExprsBound(es)(cs => codeOfSig(cons(cs), consTpe))
+
+  def codeOfExprsBound(es: Seq[Expr])(cons: Seq[Code] => Code)(using env: OEnv, inLambda: InLambda): CodeRes = {
+    given OEnv = sys.error("Carefully select env")
+
+    // newEnv: l'environnement avec tous les let-bound des arguments (qui peuvent être elided)
+    val (newEnv, codeRess) = es.foldLeft((env, Seq.empty[CodeRes])) {
+      case ((env, codeResAcc), e) =>
+        given OEnv = env
+        val codeResE = sigOfExpr(e)
+        val bdg = idOfVariable(Variable.fresh("tmpArg", e.getType))
+        val newEnv = env.withLetBound(bdg, codeResE.terminal, canSubst = !isLambda(codeResE.terminal))
+        (newEnv, codeResAcc :+ codeResE)
+    }
+
+    val subterms = codeRess.map(_.terminal)
+    val term = cons(subterms)
+    val ctx = (usgs: Usages) => (c: Code) => {
+      val termUsg = usgs(term)
+      // Si `term` est utilisé au moins une fois, alors on doit incrémenter (de 1, car on let-bind si occ > 1) les occurrences des args
+      val usgs1 = if (termUsg.nbOccurrences == 0) usgs else usgs.incOccurrence(subterms, newEnv)
+
+      if (needsBinding(term, termUsg)(using newEnv)) {
+        val tpe = codeTpe(c)
+        val bdg = idOfVariable(Variable.fresh("tmpTerm", tpe))
+        val bound = codeOfSig(mkLet(bdg, term, c), tpe)
+        foldCodeRes(codeRess)(usgs1)(bound)
+      } else {
+        foldCodeRes(codeRess)(usgs1)(c)
+      }
+    }
+    // TODO: Faire remarquer que le terminal retourné n'est pas "compté" dans usages
+    val usages = codeRess.foldLeft(Usages.empty)(_ ++ _.usages)
+    CodeRes(term, ctx, usages, newEnv)
+    /*
+    es.foldLeft(env) {
+      case (env, e) =>
+        given OEnv = env
+        val CodeRes(codeE, ctxE, usgsWithinE) = sigOfExpr(e)
+        val bdg = idOfVariable(Variable.fresh("tmp", e.getType))
+        val newEnv = env.withLetBound(bdg, codeE, canSubst = !isLambda(codeE))
+
+        // TODO: Hmmm, quid l'autre ctx?
+        val newCtx: Usages => Code => Code = usgs => c => {
+          if (needsBinding(usgs, codeE)) {
+            // TODO: Ne faudrait-il pas mettre à jour usgs???
+            // TODO: Lorsque l'on construit le Cons, c'est là qu'il faudra incrémenter l'usage
+            ctxE(usgs)(codeOfSig(mkLet(bdg, codeE, c), codeTpe(c)))
+          } else {
+            ctxE(usgs)(c)
+          }
+        }
+
+        ???
+    }
+    */
+
+    /*
+    es.foldRight((initCtx, Usages.empty)) {
+      case (e, (accCtx, accUsgs)) =>
+        val CodeRes(codeE, ctxE, usgsE) = sigOfExpr(e)
+        ???
+    }
+    */
+  }
+
+  def sigOfExpr(e: Expr)(using env: OEnv, inLambda: InLambda): CodeRes = {
     val tpe = e.getType
+    e match {
+      case v: Variable =>
+        val vId = idOfVariable(v)
+        val c = substByLet(vId).getOrElse(codeOfVarId(vId))
+        ???
+
+      case l: Literal[_] => ??? // mkLit(l)
+
+      case ADT(id, tps, args) => codeOfExprsBound(args, tpe)(mkADT(id, tps, _))
+      case Tuple(args) => codeOfExprsBound(args, tpe)(mkTuple)
+    }
+
+    /*
     val sig = e match {
       case v: Variable => sigOfVariableWithSubst(v)
       case l: Literal[_] => mkLit(l)
 
       case Assume(pred, body) =>
-        val cPred = codeOf(pred)
-        val cBody = codeOf(body)(using env.withCond(cPred)) // TODO: Si on ajoute false, est-ce que ça joue qd meme?
+        val cPred = codeOfExpr(pred)
+        val cBody = codeOfExpr(body)(using env.withCond(cPred)) // TODO: Si on ajoute false, est-ce que ça joue qd meme?
         simplifySigTopLvl(mkAssume(cPred, cBody), tpe)
 
       case Assert(pred, _, body) =>
-        val cPred = codeOf(pred)
-        val cBody = codeOf(body)(using env.withCond(cPred)) // TODO: Si on ajoute false, est-ce que ça joue qd meme?
+        val cPred = codeOfExpr(pred)
+        val cBody = codeOfExpr(body)(using env.withCond(cPred)) // TODO: Si on ajoute false, est-ce que ça joue qd meme?
         simplifySigTopLvl(mkAssert(cPred, cBody), tpe)
 
       case Require(pred, body) =>
-        val cPred = codeOf(pred)
-        val cBody = codeOf(body)(using env.withCond(cPred)) // TODO: Si on ajoute false, est-ce que ça joue qd meme?
+        val cPred = codeOfExpr(pred)
+        val cBody = codeOfExpr(body)(using env.withCond(cPred)) // TODO: Si on ajoute false, est-ce que ça joue qd meme?
         simplifySigTopLvl(mkRequire(cPred, cBody), tpe)
 
       case Ensuring(body, pred) =>
-        simplifySigTopLvl(mkEnsuring(codeOf(body), codeOf(pred)), tpe)
+        simplifySigTopLvl(mkEnsuring(codeOfExpr(body), codeOfExpr(pred)), tpe)
 
       case Decreases(measure, body) =>
-        simplifySigTopLvl(mkDecreases(codeOf(measure), codeOf(body)), tpe)
+        simplifySigTopLvl(mkDecreases(codeOfExpr(measure), codeOfExpr(body)), tpe)
 
       case Tuple(args) =>
         // TODO: letIn pas assez... il faudra essayer de hoist toussa
-        val rargs = args.map(codeOf)
+        val rargs = args.map(codeOfExpr)
         simplifySigTopLvl(mkTuple(rargs), tpe)
 
       case ADT(id, tps, args) =>
-        simplifySigTopLvl(mkADT(id, tps, args.map(codeOf)), tpe)
+        simplifySigTopLvl(mkADT(id, tps, args.map(codeOfExpr)), tpe)
 
       case s @ ADTSelector(e, selector) =>
         val adt @ ADTType(_, _) = e.getType
-        simplifySigTopLvl(mkADTSelector(codeOf(e), adt, s.constructor, selector), tpe)
+        simplifySigTopLvl(mkADTSelector(codeOfExpr(e), adt, s.constructor, selector), tpe)
 
       case FunctionInvocation(id, tps, args) =>
-        simplifySigTopLvl(mkFunInvoc(id, tps, args.map(codeOf)), tpe)
+        simplifySigTopLvl(mkFunInvoc(id, tps, args.map(codeOfExpr)), tpe)
 
       case Application(callee, args) =>
-        simplifySigTopLvl(mkApp(codeOf(callee), args.map(codeOf)), tpe)
+        simplifySigTopLvl(mkApp(codeOfExpr(callee), args.map(codeOfExpr)), tpe)
 
       case IfExpr(cond, thenn, elze) =>
-        val cCond = codeOf(cond)
+        val cCond = codeOfExpr(cond)
         // TODO: Si on ajoute false, est-ce que ça joue qd meme?
-        val cThen = codeOf(thenn)(using env.withCond(cCond))
-        val cElse = codeOf(elze)(using env.withCond(negCodeOf(cCond)))
+        val cThen = codeOfExpr(thenn)(using env.withCond(cCond))
+        val cElse = codeOfExpr(elze)(using env.withCond(negCodeOf(cCond)))
         simplifySigTopLvl(mkIfExpr(cCond, cThen, cElse), tpe)
 
       case IsConstructor(e, id) =>
         val adt @ ADTType(_, _) = e.getType
-        simplifySigTopLvl(mkIsCtor(codeOf(e), adt, id), tpe)
+        simplifySigTopLvl(mkIsCtor(codeOfExpr(e), adt, id), tpe)
 
       // TODO: Les lets de ref. à des variables bound ne peuvent etre "shared"!!!
       // TODO: Let of ADT???
       case Let(vd, e, body) =>
         val vId = idOfVariable(vd.toVariable)
-        val cE = codeOf(e)
+        val cE = codeOfExpr(e)
         val isLam = isLambda(cE)
         // TODO: Ok par rapport à la pureté et ces subst?
         // TODO: !!!! ??? immediateCall + inLambda ??? !!!!
         //    pour le "immediateCall": ? p-e par rapport au path condition supplémentaire résultant de stmts intermediaire avant le call?
         //    pour le "inLambda": pour eviter explosion en cas d'inling lambda (~> à gérer dans "uncodeOf"?)
-        val cB = codeOf(body)(using env.withLetBound(vId, cE, canSubst = !isLam))
+        val cB = codeOfExpr(body)(using env.withLetBound(vId, cE, canSubst = !isLam))
         // TODO: Si isLam, il faudra qu'on fasse un count de vId et s'il occure == 0, on pourra drop (pr autant que cE pure)
         //  et s'il occurre == 1, on fera un inline. Pour cela, il faudra voir comment combiner replace + subst sans faire le tree traversal plrs fois...
         simplifySigTopLvl(mkLet(vId, cE, cB), tpe)
 
       case Lambda(params, body) =>
-        simplifySigTopLvl(mkLambda(params.map(vd => idOfVariable(vd.toVariable)), codeOf(body)), tpe)
+        simplifySigTopLvl(mkLambda(params.map(vd => idOfVariable(vd.toVariable)), codeOfExpr(body)), tpe)
 
       case Choose(res, pred) =>
-        simplifySigTopLvl(mkWickedChoose(idOfVariable(res.toVariable), codeOf(pred)), tpe)
+        simplifySigTopLvl(mkWickedChoose(idOfVariable(res.toVariable), codeOfExpr(pred)), tpe)
 
       case Forall(params, body) =>
-        simplifySigTopLvl(mkForall(params.map(vd => idOfVariable(vd.toVariable)), codeOf(body)), tpe)
+        simplifySigTopLvl(mkForall(params.map(vd => idOfVariable(vd.toVariable)), codeOfExpr(body)), tpe)
 
       // TODO: Annotated peut empecher certaines simplif. non? Voir la PR de Georg.
       // TODO: On pourrait p-e ignorer Annotated? De toute façon, si c'est pour avoir des DropVCs, cela ne change rien dans notre cas de figure?
@@ -202,109 +356,109 @@ trait OCBSL extends Definitions {
         // TODO: Gros gag: pourrait-on envisager d'assigner le même code pour la sig. de Annotated que pour la sig. de e ????
         //    Il faudra faire cette update un peu hacky à la fin. On aura besoin de manip les 2 maps par nous meme
         //    sans passer par updateCodeSig. On devra également avoir une map auxiliaire qui se souvient des exprs annotées pour ce uncodeOf...
-        simplifySigTopLvl(mkAnnot(codeOf(e), flags), tpe)
+        simplifySigTopLvl(mkAnnot(codeOfExpr(e), flags), tpe)
 
       // TODO: Ne pourrait-on pas envisager certains simplif. ici? Pk "attendre" codeOf?
       case and @ And(_) =>
         val ands = unAnd(and)
-        val c = codeOf(Not(Or(ands.map(Not.apply))))
+        val c = codeOfExpr(Not(Or(ands.map(Not.apply))))
         code2sig(c)
       case or @ Or(_) =>
         // TODO: checkForContradiction?
         // TODO: Pas d'incohérence avec purity? (p.ex. un code qui est pure, mais pas l'autre)?
         // TODO: Devrait-on ajouter withCond avec les negation des precedents? Ou est-ce que cela risque d'interferer avec OCBSL?
-        val cs = unOr(or).map(codeOf).sorted.distinct
+        val cs = unOr(or).map(codeOfExpr).sorted.distinct
         // TODO: Move simplifyTopLvlSig
         mkOr(cs)
       case Not(e) => pNeg(e) // TODO: ? pk pas simplifyTopLvlSig?
       case Implies(e1, e2) =>
-        val c = codeOf(Or(Not(e1), e2))
+        val c = codeOfExpr(Or(Not(e1), e2))
         code2sig(c)
       case Equals(e1, e2) =>
-        simplifySigTopLvl(mkEquals(codeOf(e1), codeOf(e2)), tpe)
+        simplifySigTopLvl(mkEquals(codeOfExpr(e1), codeOfExpr(e2)), tpe)
       case LessThan(e1, e2) =>
-        simplifySigTopLvl(mkLessThan(codeOf(e1), codeOf(e2)), tpe)
+        simplifySigTopLvl(mkLessThan(codeOfExpr(e1), codeOfExpr(e2)), tpe)
       case GreaterThan(e1, e2) =>
-        simplifySigTopLvl(mkGreaterThan(codeOf(e1), codeOf(e2)), tpe)
+        simplifySigTopLvl(mkGreaterThan(codeOfExpr(e1), codeOfExpr(e2)), tpe)
       case LessEquals(e1, e2) =>
-        simplifySigTopLvl(mkLessEquals(codeOf(e1), codeOf(e2)), tpe)
+        simplifySigTopLvl(mkLessEquals(codeOfExpr(e1), codeOfExpr(e2)), tpe)
       case GreaterEquals(e1, e2) =>
-        simplifySigTopLvl(mkGreaterEquals(codeOf(e1), codeOf(e2)), tpe)
+        simplifySigTopLvl(mkGreaterEquals(codeOfExpr(e1), codeOfExpr(e2)), tpe)
       case UMinus(e) =>
-        simplifySigTopLvl(mkUMinus(codeOf(e)), tpe)
+        simplifySigTopLvl(mkUMinus(codeOfExpr(e)), tpe)
 
       case Plus(e1, e2) =>
-        simplifySigTopLvl(mkPlus(codeOf(e1), codeOf(e2)), tpe)
+        simplifySigTopLvl(mkPlus(codeOfExpr(e1), codeOfExpr(e2)), tpe)
       case Minus(e1, e2) =>
-        simplifySigTopLvl(mkMinus(codeOf(e1), codeOf(e2)), tpe)
+        simplifySigTopLvl(mkMinus(codeOfExpr(e1), codeOfExpr(e2)), tpe)
       case Times(e1, e2) =>
-        simplifySigTopLvl(mkTimes(codeOf(e1), codeOf(e2)), tpe)
+        simplifySigTopLvl(mkTimes(codeOfExpr(e1), codeOfExpr(e2)), tpe)
       case Division(e1, e2) =>
-        simplifySigTopLvl(mkDivision(codeOf(e1), codeOf(e2)), tpe)
+        simplifySigTopLvl(mkDivision(codeOfExpr(e1), codeOfExpr(e2)), tpe)
       case Remainder(e1, e2) =>
-        simplifySigTopLvl(mkRemainder(codeOf(e1), codeOf(e2)), tpe)
+        simplifySigTopLvl(mkRemainder(codeOfExpr(e1), codeOfExpr(e2)), tpe)
       case Modulo(e1, e2) =>
-        simplifySigTopLvl(mkModulo(codeOf(e1), codeOf(e2)), tpe)
+        simplifySigTopLvl(mkModulo(codeOfExpr(e1), codeOfExpr(e2)), tpe)
 
       case BVNot(e) =>
-        simplifySigTopLvl(mkBVNot(codeOf(e)), tpe)
+        simplifySigTopLvl(mkBVNot(codeOfExpr(e)), tpe)
       case BVAnd(e1, e2) =>
-        simplifySigTopLvl(mkBVAnd(codeOf(e1), codeOf(e2)), tpe)
+        simplifySigTopLvl(mkBVAnd(codeOfExpr(e1), codeOfExpr(e2)), tpe)
       case BVOr(e1, e2) =>
-        simplifySigTopLvl(mkBVOr(codeOf(e1), codeOf(e2)), tpe)
+        simplifySigTopLvl(mkBVOr(codeOfExpr(e1), codeOfExpr(e2)), tpe)
       case BVXor(e1, e2) =>
-        simplifySigTopLvl(mkBVXor(codeOf(e1), codeOf(e2)), tpe)
+        simplifySigTopLvl(mkBVXor(codeOfExpr(e1), codeOfExpr(e2)), tpe)
       case BVShiftLeft(e1, e2) =>
-        simplifySigTopLvl(mkBVShiftLeft(codeOf(e1), codeOf(e2)), tpe)
+        simplifySigTopLvl(mkBVShiftLeft(codeOfExpr(e1), codeOfExpr(e2)), tpe)
       case BVAShiftRight(e1, e2) =>
-        simplifySigTopLvl(mkBVAShiftRight(codeOf(e1), codeOf(e2)), tpe)
+        simplifySigTopLvl(mkBVAShiftRight(codeOfExpr(e1), codeOfExpr(e2)), tpe)
       case BVLShiftRight(e1, e2) =>
-        simplifySigTopLvl(mkBVLShiftRight(codeOf(e1), codeOf(e2)), tpe)
+        simplifySigTopLvl(mkBVLShiftRight(codeOfExpr(e1), codeOfExpr(e2)), tpe)
 
       case BVNarrowingCast(e, newType) =>
-        simplifySigTopLvl(mkBVNarrowingCast(codeOf(e), newType), tpe)
+        simplifySigTopLvl(mkBVNarrowingCast(codeOfExpr(e), newType), tpe)
       case BVWideningCast(e, newType) =>
-        simplifySigTopLvl(mkBVWideningCast(codeOf(e), newType), tpe)
+        simplifySigTopLvl(mkBVWideningCast(codeOfExpr(e), newType), tpe)
       case BVUnsignedToSigned(e) =>
-        simplifySigTopLvl(mkBVUnsignedToSigned(codeOf(e)), tpe)
+        simplifySigTopLvl(mkBVUnsignedToSigned(codeOfExpr(e)), tpe)
       case BVSignedToUnsigned(e) =>
-        simplifySigTopLvl(mkBVUnsignedToSigned(codeOf(e)), tpe)
+        simplifySigTopLvl(mkBVUnsignedToSigned(codeOfExpr(e)), tpe)
 
       case TupleSelect(e, index) =>
-        simplifySigTopLvl(mkTupleSelect(codeOf(e), index), tpe)
+        simplifySigTopLvl(mkTupleSelect(codeOfExpr(e), index), tpe)
 
       case FiniteSet(elems, base) =>
-        simplifySigTopLvl(mkFiniteSet(elems.map(codeOf), base), tpe)
+        simplifySigTopLvl(mkFiniteSet(elems.map(codeOfExpr), base), tpe)
       case SetAdd(set, elem) =>
-        simplifySigTopLvl(mkSetAdd(codeOf(set), codeOf(elem)), tpe)
+        simplifySigTopLvl(mkSetAdd(codeOfExpr(set), codeOfExpr(elem)), tpe)
       case ElementOfSet(elem, set) =>
-        simplifySigTopLvl(mkElementOfSet(codeOf(elem), codeOf(set)), tpe)
+        simplifySigTopLvl(mkElementOfSet(codeOfExpr(elem), codeOfExpr(set)), tpe)
       case SubsetOf(lhs, rhs) =>
-        simplifySigTopLvl(mkSubsetOf(codeOf(lhs), codeOf(rhs)), tpe)
+        simplifySigTopLvl(mkSubsetOf(codeOfExpr(lhs), codeOfExpr(rhs)), tpe)
       case SetIntersection(lhs, rhs) =>
-        simplifySigTopLvl(mkSetIntersection(codeOf(lhs), codeOf(rhs)), tpe)
+        simplifySigTopLvl(mkSetIntersection(codeOfExpr(lhs), codeOfExpr(rhs)), tpe)
       case SetUnion(lhs, rhs) =>
-        simplifySigTopLvl(mkSetUnion(codeOf(lhs), codeOf(rhs)), tpe)
+        simplifySigTopLvl(mkSetUnion(codeOfExpr(lhs), codeOfExpr(rhs)), tpe)
       case SetDifference(lhs, rhs) =>
-        simplifySigTopLvl(mkSetDifference(codeOf(lhs), codeOf(rhs)), tpe)
+        simplifySigTopLvl(mkSetDifference(codeOfExpr(lhs), codeOfExpr(rhs)), tpe)
 
       case FiniteArray(elems, base) =>
-        simplifySigTopLvl(mkFiniteArray(elems.map(codeOf), base), tpe)
+        simplifySigTopLvl(mkFiniteArray(elems.map(codeOfExpr), base), tpe)
       case LargeArray(elems, default, size, base) =>
-        simplifySigTopLvl(mkLargeArray(elems.map((i, e) => i -> codeOf(e)), codeOf(default), codeOf(size), base), tpe)
+        simplifySigTopLvl(mkLargeArray(elems.map((i, e) => i -> codeOfExpr(e)), codeOfExpr(default), codeOfExpr(size), base), tpe)
       case ArraySelect(array, index) =>
-        simplifySigTopLvl(mkArraySelect(codeOf(array), codeOf(index)), tpe)
+        simplifySigTopLvl(mkArraySelect(codeOfExpr(array), codeOfExpr(index)), tpe)
       case ArrayUpdated(array, index, value) =>
-        simplifySigTopLvl(mkArrayUpdated(codeOf(array), codeOf(index), codeOf(value)), tpe)
+        simplifySigTopLvl(mkArrayUpdated(codeOfExpr(array), codeOfExpr(index), codeOfExpr(value)), tpe)
       case ArrayLength(array) =>
-        simplifySigTopLvl(mkArrayLength(codeOf(array)), tpe)
+        simplifySigTopLvl(mkArrayLength(codeOfExpr(array)), tpe)
 
       case Error(ofTpe, descr) => simplifySigTopLvl(mkError(ofTpe, descr), tpe)
       case NoTree(ofTpe) => simplifySigTopLvl(mkNoTree(ofTpe), tpe)
 
       // TODO: Passer en revue la pureté: p.ex. si on est pas exhaustif, devrait-on retourner "assumeChecked"?
       case MatchExpr(scrut, cases) =>
-        val cScrut = codeOf(scrut)
+        val cScrut = codeOfExpr(scrut)
         val cCases = signatureOfCases(cScrut, scrut.getType, cases, Seq.empty)
         simplifySigTopLvl(mkMatchExpr(cScrut, cCases), tpe)
 
@@ -319,8 +473,11 @@ trait OCBSL extends Definitions {
       else sig
     }
     simpSig
+    */
+    ???
   }
 
+/*
   def signatureOfPatternExpr(subScrut: Code, scrutTpe: Type, pat: Pattern)(using env: OEnv): (LabelledPattern, Seq[(VarId, Code)], Set[Code]) = {
     val vBinder = idOfVariable(pat.binder.getOrElse(ValDef.fresh("dummyBinder", scrutTpe)).toVariable)
     val bdgs1 = Seq((vBinder, subScrut))
@@ -373,9 +530,9 @@ trait OCBSL extends Definitions {
     // TODO: canSubst?
     // TODO: !!! Si canSubst = false, il faudra faire un freshen d'identifiant p.ex. dans inlineLambda !!!
     val env1 = env.withLetBounds(bdgs, canSubst = true).withConds(patConds)
-    val cGuard = mc.optGuard.map(codeOf(_)(using env1)).getOrElse(trueCode)
+    val cGuard = mc.optGuard.map(codeOfExpr(_)(using env1)).getOrElse(trueCode)
     val env2 = env1.withCond(cGuard)
-    val cRhs = codeOf(mc.rhs)(using env2)
+    val cRhs = codeOfExpr(mc.rhs)(using env2)
     (LabMatchCase(labPat, cGuard, cRhs), patConds + cGuard)
   }
 
@@ -387,6 +544,7 @@ trait OCBSL extends Definitions {
       signatureOfCases(cScrut, scrutTpe, mcs.tail, acc :+ newMatchCase)(using env.withCond(negCaseConds))
     }
   }
+*/
 
   def checkForContradiction(disj: Set[Code])(using OEnv): Boolean = {
     if (disj.exists(c => !codePurity(c).isPure)) {
@@ -417,22 +575,25 @@ trait OCBSL extends Definitions {
 
   // TODO: Ok?
   def pDisj(e: Expr)(using OEnv): Seq[Code] = {
-    assert(e.getType == BooleanType(), s"Got ${e.getType}")
-    computeSignature(e) match {
-      case Signature(Label.Or, children) => children // TODO: Flatten more?
-      case Signature(Label.Not, Seq(c)) => Seq(codeOfSig(pNegNormal(c), BooleanType())) // TODO: Ok?
-      case sig => Seq(codeOfSig(sig, BooleanType()))
-    }
+    ???
+//    assert(e.getType == BooleanType(), s"Got ${e.getType}")
+//    sigOfExpr(e) match {
+//      case Signature(Label.Or, children) => children // TODO: Flatten more?
+//      case Signature(Label.Not, Seq(c)) => Seq(codeOfSig(pNegNormal(c), BooleanType())) // TODO: Ok?
+//      case sig => Seq(codeOfSig(sig, BooleanType()))
+//    }
   }
 
   // TODO: Voir si on peut pas faire qqchose pr eviter code dup avec pNegNormal
   // Signature de Not(child)
   def pNeg(child: Expr)(using OEnv): Signature = {
 
+    ???
+    /*
     // TODO: Où devrait-on mettre le caching? C'est appelé par computeSignature donc ça devrait faire l'affaire non?
 
     child match {
-      case Not(e) => computeSignature(e) // TODO: Orig fait pDisj, mais pDisj et un computeSignature pour nous (du moins, pour le moment)
+      case Not(e) => sigOfExpr(e) // TODO: Orig fait pDisj, mais pDisj et un computeSignature pour nous (du moins, pour le moment)
       // TODO: Les <= en > etc.
       case or @ Or(_) =>
         // Note: ors cannot be empty (by Or `require`)
@@ -456,22 +617,23 @@ trait OCBSL extends Definitions {
         }
       case _ =>
         // TODO: Ok?
-        computeSignature(child) match {
+        sigOfExpr(child) match {
           case Signature(Label.Lit(BooleanLiteral(b)), Seq()) => b2sig(!b)
           case sig => mkNot(codeOfSig(sig, BooleanType()))
         }
-    }
+    }*/
   }
 
   // TODO: ok?
   // TODO: caching?
   // TODO: En gros la signature de Not(c)
   def pNegNormal(c: Code): Signature = {
-    assert(code2sig.contains(c))
-    code2sig(c) match {
-      case Signature(Label.Not, Seq(cc)) => code2sig(cc)
-      case Signature(_, _) => Signature(Label.Not, Seq(c)) // TODO: Ok?
-    }
+    ???
+//    assert(code2sig.contains(c))
+//    code2sig(c) match {
+//      case Signature(Label.Not, Seq(cc)) => code2sig(cc)
+//      case Signature(_, _) => Signature(Label.Not, Seq(c)) // TODO: Ok?
+//    }
   }
 
   def freshened(v: VarId): VarId = idOfVariable(varId2Var(v).freshen)
@@ -559,6 +721,7 @@ trait OCBSL extends Definitions {
   }
   def varTpe(v: VarId): Type = varId2Var(v).tpe
 
+  /*
   // TODO: Peut-on subst des let-bound à leur définition même si ces defs sont impures?
   //  -> De manière générale, non, du moins pas une subst tel quel. Du moment qu'on recover le let-binding dans uncodeOf, cela devrait aller
   def sigOfVariableWithSubst(v: Variable)(using env: OEnv): Signature = {
@@ -574,15 +737,17 @@ trait OCBSL extends Definitions {
 //      .orElse(env.bound.get(v).map(bIx => (sigOfIndexedVar(bIx, v.getType), Pure)))
 //      .getOrElse((mkFreeVar(v), Pure))
   }
+  */
 
-  def conjunct(conj: Set[Code])(using OEnv): Code = negCodeOf(negatedConjunction(conj))
+  def conjunct(conj: Set[Code])(using OEnv): Code = ??? // negCodeOf(negatedConjunction(conj))
 
   def negatedConjunction(conj: Set[Code])(using OEnv): Code= {
     // TODO: Caching?
-    simplifiedDisjunction(conj.map(negCodeOf))
+//    simplifiedDisjunction(conj.map(negCodeOf))
+    ???
   }
 
-  def codeOfIntLit(lit: BigInt, tpe: Type)(using OEnv): Code = codeOf(intLitOfType(lit, tpe))
+  def codeOfIntLit(lit: BigInt, tpe: Type)(using OEnv): Code = ??? // codeOfExpr(intLitOfType(lit, tpe))
 
   def intLitOfType(lit: BigInt, tpe: Type): Expr = tpe match {
     case IntegerType() => IntegerLiteral(lit)
@@ -626,6 +791,7 @@ trait OCBSL extends Definitions {
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+  /*
   case class RevEnv(letDefs: Map[VarId, Code],
                     revLetDefs: Map[Code, VarId],
                     openBounds: Set[VarId],
@@ -1036,7 +1202,7 @@ trait OCBSL extends Definitions {
 //      .plugged(vds.map { case (ix, vd) => ix -> vd.toVariable }.toMap)
 //    RevRes.combined(body)(recons(vds.map(_._2), _))
   }
-
+  */
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
   def b2c(b: Boolean): Code = if (b) trueCode else falseCode
@@ -1116,7 +1282,7 @@ trait OCBSL extends Definitions {
           assert(!fnBlockedBy.contains(fn))
           assert(!blocking.contains(fn))
           visiting += fn
-          val res = codePurity(codeOf(getFunction(fn).fullBody))
+          val res: Purity = ??? // codePurity(codeOfExpr(getFunction(fn).fullBody))
           visiting -= fn
           res match {
             case Pure =>
@@ -1390,14 +1556,16 @@ trait OCBSL extends Definitions {
           isConstructor(e, adt, id) match {
             case Some(b) if purity.isPure => b2sig(b)
             case Some(b) =>
+              // TODO: On peut retirer ces bindings, car on le fait (ou fera) déjà
               val v = idOfVariable(Variable.fresh("tmp", codeTpe(e)))
-              Signature(Label.Let(v), Seq(e, b2c(b)))
+              Signature(Label.Let(v), Seq(e, b2c(b))) // TODO: !!! on ne respecte pas cette histoire de hoisting !!!
             case None => sig
           }
 
         case Signature(Label.ADTSelector(adt, ctor, sel), Seq(e)) =>
           code2sig(e) match {
             // TODO: A-t-on de toute façon id == ctor.id ?
+            // TODO: On peut retirer ces bindings, car on le fait (ou fera) déjà
             case Signature(Label.ADT(id, _), args) =>
               assert(id == ctor.id, "woot? les ids ne correspondent pas!!!!")
               val index = ctor.definition.selectorID2Index(sel)

@@ -18,6 +18,7 @@ trait OCBSLSimplifier { self =>
   private var vcNum: Int = 1
 
   def simplify(e: Expr): Expr = {
+    /*
 //    if (vcNum >= 10) {
 //      ???
 //    }
@@ -25,7 +26,7 @@ trait OCBSLSimplifier { self =>
 //    println("SIMPLIFY:")
 //    println(e)
     val oc = ocbslTL.get()
-    val code = oc.codeOf(e)(using oc.OEnv.empty)
+    val code = oc.codeOfExpr(e)(using oc.OEnv.empty)
 //    println("Got code:")
 //    println(oc.asExplicitSig(code))
     val res0 = oc.uncodeOf(code)(using oc.RevEnv.empty)
@@ -33,6 +34,8 @@ trait OCBSLSimplifier { self =>
     val res = res0.holed.expr(Map.empty).copiedFrom(e)
     vcNum += 1
     res
+    */
+    ???
   }
 }
 object OCBSLSimplifier {
