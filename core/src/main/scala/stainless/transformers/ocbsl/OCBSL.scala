@@ -40,43 +40,65 @@ trait OCBSL extends Definitions {
 
   case class InLambda(v: Boolean)
 
-  // TODO: Le code résultant de computeSig doit s'inclure lui même (a.c. occurences = 1, inLambda = false, afterPC = false et containsLambda selon la structure)
-  // TODO: -> en fait non, mauvaise idée
-  // TODO: Pr les occurrences, pas vrmt besoin de tout track! Juste si <= 1 et avec quel env
-  case class Usage(occurrences: Map[OEnv, Int], inLambda: Boolean, containsLambda: Boolean) {
-    def ++(that: Usage): Usage = Usage(???, inLambda || that.inLambda, containsLambda || that.containsLambda)
-    lazy val nbOccurrences: Int = occurrences.values.sum
+  enum Occurrence {
+    case Zero
+    case Once(inEnv: OEnv, inLambda: Boolean)
+    case Many
+
+    def ++(that: Occurrence): Occurrence = (this, that) match {
+      case (Zero, _) => that
+      case (_, Zero) => this
+      case _ => Many
+    }
+
+    def isZero: Boolean = this match {
+      case Zero => true
+      case _ => false
+    }
+    def isOnce: Boolean = this match {
+      case Once(_, _) => true
+      case _ => false
+    }
+    def isMany: Boolean = this match {
+      case Many => true
+      case _ => false
+    }
   }
-  case class Usages(c2u: Map[Code, Usage]) {
-    def apply(c: Code): Usage = c2u.getOrElse(c, Usage.none)
+
+
+  case class Usages(c2u: Map[Code, Occurrence]) {
+    def apply(c: Code): Occurrence = c2u.getOrElse(c, Occurrence.Zero)
 
     def ++(that: Usages): Usages = ???
 
     // Note: env pas implicite car ce n'est pas tjrs le defaut qui est le bon
     def incOccurrence(cs: IterableOnce[Code], inEnv: OEnv): Usages = ???
   }
-  // TODO: Faire remarquer que le terminal retourné n'est pas "compté" dans usages (mais peut apparaître par CSE)
-  // TODO: ^^^ ah bon? et si c'est une "référence" vers ce code???
-  // OEnv: En gros tous les "let bindings" des arguments pour terminal (qui peuvent être elided)
-  case class CodeRes(terminal: Code, ctx: Usages => Code => Code, usages: Usages, env: OEnv) {
-    def containsLambda: Boolean = isLambda(terminal) || usages.c2u.exists(_._2.containsLambda)
-  }
 
-  object Usage {
-    def none: Usage = Usage(Map.empty, false, false)
-  }
+  // OEnv: En gros tous les "let bindings" des arguments pour terminal (qui peuvent être elided)
+  // terminalHasLambdaDef: contient ou est un lambda soit meme
+  case class CodeRes(terminal: Code, terminalHasLambdaDef: Boolean, ctx: Usages => Code => Code, usages: Usages, env: OEnv)
 
   object Usages {
     def empty: Usages = Usages(Map.empty)
+
+    // TODO: Dire qu'on ne compte que term lui même et pas ses composants
+    def of(term: Code)(using env: OEnv, inLambda: InLambda): Usages =
+      Usages(Map(term -> Occurrence.Once(env, inLambda.v)))
   }
 
   object CodeRes {
-    // TODO: Env ok? après tout, ce "term" n'a p-e pas besoin d'un env en particulier?
-    def fromVar(v: VarId)(using env: OEnv, inLambda: InLambda): CodeRes = {
-      val term = substByLet(v).getOrElse(codeOfVarId(v))
-      // TODO: usage ok? Par ce que là, on semble se contredire avec le fait qu'on ne soit pas "sensé" compter les terminaux...
-      CodeRes(term, _ => identity[Code], ???, env)
-    }
+    // TODO: A revoir
+    // TODO: Dire qu'on ne compte que term lui même et pas ses composants
+    def of(term: Code, termHasLambdaDef: Boolean)(using env: OEnv, inLambda: InLambda): CodeRes =
+      CodeRes(term, termHasLambdaDef, _ => identity[Code], Usages.of(term), env)
+
+//    // TODO: Env ok? après tout, ce "term" n'a p-e pas besoin d'un env en particulier?
+//    def fromVar(v: VarId)(using env: OEnv, inLambda: InLambda): CodeRes = {
+//      val term = substByLet(v).getOrElse(codeOfVarId(v))
+//      // TODO: usage ok? Par ce que là, on semble se contredire avec le fait qu'on ne soit pas "sensé" compter les terminaux...
+//      CodeRes(term, _ => identity[Code], ???, env)
+//    }
   }
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -148,17 +170,6 @@ trait OCBSL extends Definitions {
     }
   }*/
 
-  /*
-  // TODO: Mais pas que!!! Il y a aussi pureté etc.
-  // TODO: Si variable ou si lit, pas besoin de bind non plus
-  def needsBinding(usgs: Usages, c: Code)(using OEnv): Boolean = {
-    // TODO: !!! La pureté peut être changée si on inline un let !!!
-    val purity = codePurity(c)
-    val usg = usgs(c)
-    ???
-  }
-  */
-
   def foldCodeRes(codeRess: Seq[CodeRes]): Usages => Code => Code = {
     usgs => c => {
       codeRess.foldRight((c, usgs)) {
@@ -170,48 +181,53 @@ trait OCBSL extends Definitions {
     }
   }
 
-  def needsBinding(terminal: Code, usg: Usage)(using env: OEnv): Boolean = {
+  // TODO: Puisque c'est un terminal, comment peut-il "contenir" un lambda? -> p.ex. par le moyen de if, assume, etc. tout ces trucs
+  def needsBinding(terminal: Code, terminalHasLambdaDef: Boolean, occ: Occurrence)(using env: OEnv): Boolean = {
     code2sig(terminal) match {
       case Signature(Label.Lit(_) | Label.Var(_), _) => false
       case _ =>
-        if (usg.nbOccurrences > 1) true
-        else if (codePurity(terminal).isPure) !usg.inLambda || !usg.containsLambda
-        else if (usg.nbOccurrences != 1) true
-        else {
-          // On a usg.occurrences = Map(someEnv -> 1).
-          // someEnv représente l'env. actif lors de l'occurrence de `terminal` dans le trou que l'on s'apprête à compléter.
-          // S'il est différent de l'env ou `terminal` est introduit, alors on a besoin de let-bind, car inline
-          // une expr impure après un PC est incorrect.
-          val appearsAfterPC = usg.occurrences.head._1 ne env
-          appearsAfterPC || usg.inLambda
+        lazy val isPure = codePurity(terminal).isPure
+        occ match {
+          case Occurrence.Many => true
+          case Occurrence.Zero if isPure => false
+          case Occurrence.Once(_, inLambda) if isPure => inLambda && terminalHasLambdaDef
+          case Occurrence.Once(inEnv, inLambda) =>
+            // inEnv représente l'env. actif lors de l'occurrence de `terminal` dans le trou que l'on s'apprête à compléter.
+            // S'il est différent de l'env ou `terminal` est introduit, alors on a besoin de let-bind, car inline
+            // une expr impure après un PC est incorrect.
+            (inEnv ne env) || inLambda
+          case Occurrence.Zero => true // Expr impure qui n'apparait pas dans le body; on ne peut pas l'éliminer, il faut donc le bind
         }
     }
   }
 
+  // TODO: Quid simplif???
   def codeOfExprsBound(es: Seq[Expr], consTpe: Type)(cons: Seq[Code] => Signature)(using env: OEnv, inLambda: InLambda): CodeRes =
     codeOfExprsBound(es)(cs => codeOfSig(cons(cs), consTpe))
 
+  // TODO: Quid simplif???
   def codeOfExprsBound(es: Seq[Expr])(cons: Seq[Code] => Code)(using env: OEnv, inLambda: InLambda): CodeRes = {
     given OEnv = sys.error("Carefully select env")
 
     // newEnv: l'environnement avec tous les let-bound des arguments (qui peuvent être elided)
     val (newEnv, codeRess) = es.foldLeft((env, Seq.empty[CodeRes])) {
       case ((env, codeResAcc), e) =>
-        given OEnv = env
-        val codeResE = sigOfExpr(e)
+        val codeResE = sigOfExpr(e)(using env)
         val bdg = idOfVariable(Variable.fresh("tmpArg", e.getType))
         val newEnv = env.withLetBound(bdg, codeResE.terminal, canSubst = !isLambda(codeResE.terminal))
         (newEnv, codeResAcc :+ codeResE)
     }
 
     val subterms = codeRess.map(_.terminal)
+    val termContainsLam = codeRess.exists(_.terminalHasLambdaDef)
     val term = cons(subterms)
+    assert(!isLambda(term), "woot?? On n'est pas sensé construire un lambda avec cette fn!!!")
     val ctx = (usgs: Usages) => (c: Code) => {
-      val termUsg = usgs(term)
+      val termOcc = usgs(term)
       // Si `term` est utilisé au moins une fois, alors on doit incrémenter (de 1, car on let-bind si occ > 1) les occurrences des args
-      val usgs1 = if (termUsg.nbOccurrences == 0) usgs else usgs.incOccurrence(subterms, newEnv)
+      val usgs1 = if (termOcc.isZero) usgs else usgs.incOccurrence(subterms, newEnv)
 
-      if (needsBinding(term, termUsg)(using newEnv)) {
+      if (needsBinding(term, termContainsLam, termOcc)(using newEnv)) {
         val tpe = codeTpe(c)
         val bdg = idOfVariable(Variable.fresh("tmpTerm", tpe))
         val bound = codeOfSig(mkLet(bdg, term, c), tpe)
@@ -220,53 +236,35 @@ trait OCBSL extends Definitions {
         foldCodeRes(codeRess)(usgs1)(c)
       }
     }
-    // TODO: Faire remarquer que le terminal retourné n'est pas "compté" dans usages
-    val usages = codeRess.foldLeft(Usages.empty)(_ ++ _.usages)
-    CodeRes(term, ctx, usages, newEnv)
-    /*
-    es.foldLeft(env) {
-      case (env, e) =>
-        given OEnv = env
-        val CodeRes(codeE, ctxE, usgsWithinE) = sigOfExpr(e)
-        val bdg = idOfVariable(Variable.fresh("tmp", e.getType))
-        val newEnv = env.withLetBound(bdg, codeE, canSubst = !isLambda(codeE))
-
-        // TODO: Hmmm, quid l'autre ctx?
-        val newCtx: Usages => Code => Code = usgs => c => {
-          if (needsBinding(usgs, codeE)) {
-            // TODO: Ne faudrait-il pas mettre à jour usgs???
-            // TODO: Lorsque l'on construit le Cons, c'est là qu'il faudra incrémenter l'usage
-            ctxE(usgs)(codeOfSig(mkLet(bdg, codeE, c), codeTpe(c)))
-          } else {
-            ctxE(usgs)(c)
-          }
-        }
-
-        ???
-    }
-    */
-
-    /*
-    es.foldRight((initCtx, Usages.empty)) {
-      case (e, (accCtx, accUsgs)) =>
-        val CodeRes(codeE, ctxE, usgsE) = sigOfExpr(e)
-        ???
-    }
-    */
+    val usages = codeRess.foldLeft(Usages.of(term)(using newEnv))(_ ++ _.usages)
+    CodeRes(term, termContainsLam, ctx, usages, newEnv)
   }
 
+  // TODO: Quid simplif???
   def sigOfExpr(e: Expr)(using env: OEnv, inLambda: InLambda): CodeRes = {
     val tpe = e.getType
     e match {
       case v: Variable =>
         val vId = idOfVariable(v)
         val c = substByLet(vId).getOrElse(codeOfVarId(vId))
-        ???
+        // TODO: termHasLambdaDef ok??? et si v est une ref. à une lambda???
+        CodeRes.of(c, termHasLambdaDef = false)
 
-      case l: Literal[_] => ??? // mkLit(l)
+      case l: Literal[_] =>
+        CodeRes.of(codeOfSig(mkLit(l), tpe), false)
 
       case ADT(id, tps, args) => codeOfExprsBound(args, tpe)(mkADT(id, tps, _))
       case Tuple(args) => codeOfExprsBound(args, tpe)(mkTuple)
+
+      case Assume(pred, body) =>
+        // TODO: Ok?
+        val resPred = codeOfExpr(pred)
+        // Comme le trou se situe dans le body (après l'assms), on retournera l'env avec l'assumption
+        val newEnv = resPred.env.withCond(resPred.terminal)
+        val resBody = codeOfExpr(body)(using newEnv)
+        val terminal = codeOfSig(mkAssume(resPred.terminal, resBody.terminal), tpe)
+        val ctx = (usgs: Usages) => (c: Code) => resPred.ctx(usgs)(resBody.ctx(usgs)(c))
+        CodeRes(terminal, resPred.terminalHasLambdaDef || resBody.terminalHasLambdaDef, ctx, resPred.usages ++ resBody.usages, newEnv)
     }
 
     /*
