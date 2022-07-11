@@ -271,7 +271,7 @@ trait OCBSL extends Definitions {
         val rcond = codeOfExpr(cond)
         val envThen = rcond.env.withCond(rcond.terminal)
         val rthenn = codeOfExpr(thenn)(using envThen)
-        val envEls = rcond.env.withCond(negCodeOf(rcond.terminal))
+        val envEls = rcond.env.withCond(negCodeOf(rcond.terminal)(using rcond.env))
         val rels = codeOfExpr(els)(using envEls)
 
         // On ne hoist pas les let etc. des branches (donc on "self-plug")
@@ -457,10 +457,24 @@ trait OCBSL extends Definitions {
 
       // TODO: Passer en revue la pureté: p.ex. si on est pas exhaustif, devrait-on retourner "assumeChecked"?
       case MatchExpr(scrut, cases) =>
-        ???
-//        val cScrut = codeOfExpr(scrut)
-//        val cCases = signatureOfCases(cScrut, scrut.getType, cases, Seq.empty)
-//        simplifySigTopLvl(mkMatchExpr(cScrut, cCases), tpe)
+        val rscrut = codeOfExpr(scrut)
+        val (cCases, casesUsgs, casesHasLamDef) = signatureOfCases(rscrut.terminal, scrut.getType, cases, Seq.empty, Usages.empty, accHasLambdaDef = false)
+        // Ici, on fait qqchose de similaire au IfExpr
+        val terminal = codeOfSig(mkMatchExpr(rscrut.terminal, cCases), tpe)
+        val termContainsLam = rscrut.terminalHasLambdaDef || casesHasLamDef // TODO: Ok?
+        val ctx = (usgs: Usages) => (c: Code) => {
+          val termOcc = usgs(terminal)
+          val usgsInc = usgs.incOccurrence(rscrut.terminal +: cCases.flatMap(mc => Seq(mc.guard, mc.rhs)), rscrut.env)
+
+          if (needsBinding(terminal, termContainsLam, termOcc)(using rscrut.env)) {
+            val bdg = idOfVariable(Variable.fresh("tmpTerm", tpe))
+            val bound = codeOfSig(mkLet(bdg, terminal, c), tpe)
+            rscrut.ctx(usgsInc)(bound)
+          } else {
+            rscrut.ctx(if (termOcc.isZero) usgs else usgsInc)(c)
+          }
+        }
+        CodeRes(terminal, termContainsLam, ctx, rscrut.usages ++ casesUsgs, env)
 
       /*
       val resPred = codeOfExpr(pred)
@@ -681,7 +695,7 @@ trait OCBSL extends Definitions {
     ???
   }
 
-/*
+
   def signatureOfPatternExpr(subScrut: Code, scrutTpe: Type, pat: Pattern)(using env: OEnv): (LabelledPattern, Seq[(VarId, Code)], Set[Code]) = {
     val vBinder = idOfVariable(pat.binder.getOrElse(ValDef.fresh("dummyBinder", scrutTpe)).toVariable)
     val bdgs1 = Seq((vBinder, subScrut))
@@ -728,27 +742,32 @@ trait OCBSL extends Definitions {
     }
   }
 
-  def signatureOfCase(cScrut: Code, scrutTpe: Type, mc: MatchCase)(using env: OEnv): (LabMatchCase, Set[Code]) = {
+
+  def signatureOfCase(cScrut: Code, scrutTpe: Type, mc: MatchCase)(using env: OEnv, inLambda: InLambda): (LabMatchCase, Set[Code], Usages, Boolean) = {
     // patConds: sans le guard!
     val (labPat, bdgs, patConds) = signatureOfPatternExpr(cScrut, scrutTpe, mc.pattern)
     // TODO: canSubst?
     // TODO: !!! Si canSubst = false, il faudra faire un freshen d'identifiant p.ex. dans inlineLambda !!!
     val env1 = env.withLetBounds(bdgs, canSubst = true).withConds(patConds)
-    val cGuard = mc.optGuard.map(codeOfExpr(_)(using env1)).getOrElse(trueCode)
+    // TODO: On pourrait conserver le ctx des guard pour le body? En gros, qu'on plug le body dans le ctx de guard
+    val cGuard = mc.optGuard.map(codeOfExpr(_)(using env1).selfPlugged).getOrElse(trueCode)
     val env2 = env1.withCond(cGuard)
-    val cRhs = codeOfExpr(mc.rhs)(using env2)
-    (LabMatchCase(labPat, cGuard, cRhs), patConds + cGuard)
+    // Comme pour les ifs, on ne hoist rien des branche
+    val rrhs = codeOfExpr(mc.rhs)(using env2)
+    val cRhs = rrhs.selfPlugged
+    // TODO: Usage ok?
+    val usg = Usages.of(cGuard)(using env1) ++ Usages.of(cRhs)(using env2)
+    (LabMatchCase(labPat, cGuard, cRhs), patConds + cGuard, usg, rrhs.terminalHasLambdaDef)
   }
 
-  def signatureOfCases(cScrut: Code, scrutTpe: Type, mcs: Seq[MatchCase], acc: Seq[LabMatchCase])(using env: OEnv): Seq[LabMatchCase] = {
-    if (mcs.isEmpty) acc
+  def signatureOfCases(cScrut: Code, scrutTpe: Type, mcs: Seq[MatchCase], acc: Seq[LabMatchCase], accUsgs: Usages, accHasLambdaDef: Boolean)(using env: OEnv, inLambda: InLambda): (Seq[LabMatchCase], Usages, Boolean) = {
+    if (mcs.isEmpty) (acc, accUsgs, accHasLambdaDef)
     else {
-      val (newMatchCase, caseConds) = signatureOfCase(cScrut, scrutTpe, mcs.head)
+      val (newMatchCase, caseConds, usgs, hasLambdaDef) = signatureOfCase(cScrut, scrutTpe, mcs.head)
       val negCaseConds = negatedConjunction(caseConds)
-      signatureOfCases(cScrut, scrutTpe, mcs.tail, acc :+ newMatchCase)(using env.withCond(negCaseConds))
+      signatureOfCases(cScrut, scrutTpe, mcs.tail, acc :+ newMatchCase, accUsgs ++ usgs, accHasLambdaDef || hasLambdaDef)(using env.withCond(negCaseConds))
     }
   }
-*/
 
   def checkForContradiction(disj: Set[Code])(using OEnv): Boolean = {
     if (disj.exists(c => !codePurity(c).isPure)) {
