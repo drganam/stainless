@@ -77,7 +77,12 @@ trait OCBSL extends Definitions {
 
   // OEnv: En gros tous les "let bindings" des arguments pour terminal (qui peuvent être elided)
   // terminalHasLambdaDef: contient ou est un lambda soit meme
-  case class CodeRes(terminal: Code, terminalHasLambdaDef: Boolean, ctx: Usages => Code => Code, usages: Usages, env: OEnv)
+  case class CodeRes(terminal: Code, terminalHasLambdaDef: Boolean, ctx: Usages => Code => Code, usages: Usages, env: OEnv) {
+    // TODO: Ok? Et si "terminal" apparait dans usages???
+    // "self plugged": on remplit le trou qu'on a crée soi-meme avec terminal: on prend donc notre env, et inLambda est false
+    // (en gros: let ... in [] -> let ... in terminal, donc pas dans un lambda
+    def selfPlugged: Code = ctx(usages ++ Usages.of(terminal)(using env, InLambda(false)))(terminal)
+  }
 
   object Usages {
     def empty: Usages = Usages(Map.empty)
@@ -205,6 +210,15 @@ trait OCBSL extends Definitions {
   def codeOfExprsBound(es: Seq[Expr], consTpe: Type)(cons: Seq[Code] => Signature)(using env: OEnv, inLambda: InLambda): CodeRes =
     codeOfExprsBound(es)(cs => codeOfSig(cons(cs), consTpe))
 
+  def codeOfExprsBound(e1: Expr, consTpe: Type)(cons: Code => Signature)(using env: OEnv, inLambda: InLambda): CodeRes =
+    codeOfExprsBound(Seq(e1), consTpe) { case Seq(c1) => cons(c1) }
+
+  def codeOfExprsBound(e1: Expr, e2: Expr, consTpe: Type)(cons: (Code, Code) => Signature)(using env: OEnv, inLambda: InLambda): CodeRes =
+    codeOfExprsBound(Seq(e1, e2), consTpe) { case Seq(c1, c2) => cons(c1, c2) }
+
+  def codeOfExprsBound(e1: Expr, e2: Expr, e3: Expr, consTpe: Type)(cons: (Code, Code, Code) => Signature)(using env: OEnv, inLambda: InLambda): CodeRes =
+    codeOfExprsBound(Seq(e1, e2, e3), consTpe) { case Seq(c1, c2, c3) => cons(c1, c2, c3) }
+
   // TODO: Quid simplif???
   def codeOfExprsBound(es: Seq[Expr])(cons: Seq[Code] => Code)(using env: OEnv, inLambda: InLambda): CodeRes = {
     given OEnv = sys.error("Carefully select env")
@@ -225,18 +239,19 @@ trait OCBSL extends Definitions {
     val ctx = (usgs: Usages) => (c: Code) => {
       val termOcc = usgs(term)
       // Si `term` est utilisé au moins une fois, alors on doit incrémenter (de 1, car on let-bind si occ > 1) les occurrences des args
-      val usgs1 = if (termOcc.isZero) usgs else usgs.incOccurrence(subterms, newEnv)
+      val usgsInc = usgs.incOccurrence(subterms, newEnv)
 
       if (needsBinding(term, termContainsLam, termOcc)(using newEnv)) {
-        val tpe = codeTpe(c)
+        val tpe = codeTpe(term)
         val bdg = idOfVariable(Variable.fresh("tmpTerm", tpe))
         val bound = codeOfSig(mkLet(bdg, term, c), tpe)
-        foldCodeRes(codeRess)(usgs1)(bound)
+        foldCodeRes(codeRess)(usgsInc)(bound)
       } else {
-        foldCodeRes(codeRess)(usgs1)(c)
+        foldCodeRes(codeRess)(if (termOcc.isZero) usgs else usgsInc)(c)
       }
     }
-    val usages = codeRess.foldLeft(Usages.of(term)(using newEnv))(_ ++ _.usages)
+    // val usages = codeRess.foldLeft(Usages.of(term)(using newEnv))(_ ++ _.usages)
+    val usages = codeRess.foldLeft(Usages.empty)(_ ++ _.usages)
     CodeRes(term, termContainsLam, ctx, usages, newEnv)
   }
 
@@ -250,21 +265,212 @@ trait OCBSL extends Definitions {
         // TODO: termHasLambdaDef ok??? et si v est une ref. à une lambda???
         CodeRes.of(c, termHasLambdaDef = false)
 
-      case l: Literal[_] =>
-        CodeRes.of(codeOfSig(mkLit(l), tpe), false)
+      case l: Literal[_] => CodeRes.of(codeOfSig(mkLit(l), tpe), false)
+
+      case IfExpr(cond, thenn, els) =>
+        val rcond = codeOfExpr(cond)
+        val envThen = rcond.env.withCond(rcond.terminal)
+        val rthenn = codeOfExpr(thenn)(using envThen)
+        val envEls = rcond.env.withCond(negCodeOf(rcond.terminal))
+        val rels = codeOfExpr(els)(using envEls)
+
+        // On ne hoist pas les let etc. des branches (donc on "self-plug")
+        val cThenn = rthenn.selfPlugged
+        val cEls = rels.selfPlugged
+        val terminal = codeOfSig(mkIfExpr(rcond.terminal, cThenn, cEls), tpe)
+        val termContainsLam = rcond.terminalHasLambdaDef || rthenn.terminalHasLambdaDef || rels.terminalHasLambdaDef // TODO: Ok?
+        val ctx = (usgs: Usages) => (c: Code) => {
+          val termOcc = usgs(terminal)
+          // En gros, si par chance on a if (cond) e1 sans bdg else e2 sans bdg, e1 et e2 deviennent eligible pour CSE
+          val usgsInc = usgs.incOccurrence(Seq(rcond.terminal, cThenn, cEls), rcond.env)
+
+          if (needsBinding(terminal, termContainsLam, termOcc)(using rcond.env)) {
+            val bdg = idOfVariable(Variable.fresh("tmpTerm", tpe))
+            val bound = codeOfSig(mkLet(bdg, terminal, c), tpe)
+            rcond.ctx(usgsInc)(bound)
+          } else {
+            rcond.ctx(if (termOcc.isZero) usgs else usgsInc)(c)
+          }
+        }
+        // TODO: Usages pour then et els ok? Après tout, l'expr avec tout les bindings plugged se trouve slmt apres rcond.env.withcond(...)
+        val usgs = rcond.usages ++ Usages.of(cThenn)(using envThen) ++ Usages.of(cEls)(using envEls)
+        CodeRes(terminal, termContainsLam, ctx, usgs, rcond.env)
+
+      case Lambda(params, body) =>
+        val rbody = codeOfExpr(body)
+        val cLam = codeOfSig(mkLambda(params.map(vd => idOfVariable(vd.toVariable)), rbody.selfPlugged), tpe)
+        CodeRes(cLam, true, _ => identity[Code], Usages.of(cLam), env)
+
+      case Choose(res, pred) =>
+        val rpred = codeOfExpr(pred)
+        val cWicked = codeOfSig(mkWickedChoose(idOfVariable(res.toVariable), rpred.selfPlugged), tpe)
+        CodeRes(cWicked, true, _ => identity[Code], Usages.of(cWicked), env)
+
+      case Forall(params, pred) =>
+        val rpred = codeOfExpr(pred)
+        val cForall = codeOfSig(mkLambda(params.map(vd => idOfVariable(vd.toVariable)), rpred.selfPlugged), tpe)
+        CodeRes(cForall, true, _ => identity[Code], Usages.of(cForall), env)
+
+      // TODO: Inline lambda si occ == 1
+      case Let(vd, e, body) =>
+        val vId = idOfVariable(vd.toVariable)
+        val re = codeOfExpr(e)
+        val rb = codeOfExpr(body)(using re.env.withLetBound(vId, re.terminal, canSubst = !isLambda(re.terminal)))
+        val ctx = (usgs: Usages) => (c: Code) => {
+          val eOcc = usgs(re.terminal)
+          // Pour `e`, on utilise l'environnement dans lequel il a été construit, donc re.env
+          if (needsBinding(re.terminal, re.terminalHasLambdaDef, eOcc)(using re.env)) {
+            // Pour re.ctx, puisque l'on bind `e`, on set que l'occurrence se passe exactement 1 fois
+            // Pour rb.ctx en revanche, on laisse les occurrences tels quels
+            val usgsCtxE = Usages(usgs.c2u + (re.terminal -> Occurrence.Once(re.env, inLambda.v))) ++ rb.usages
+            val cLet = codeOfSig(mkLet(vId, re.terminal, rb.ctx(usgs)(c)), vd.getType)
+            re.ctx(usgsCtxE)(cLet)
+          } else {
+            re.ctx(usgs ++ rb.usages)(rb.ctx(usgs)(c))
+          }
+        }
+        // TODO: terminalHasLambdaDef ok?
+        // TODO: Usgs ok? Si on elide le letdef, il ne faut pas qu'on compte re.usages...
+        // TODO: -> rb.usages devrait etre ok? c'est usages de terminal!!!
+        CodeRes(rb.terminal, rb.terminalHasLambdaDef, ctx, /*re.usages ++ */rb.usages, rb.env)
+
+      case e: (Assume | Assert | Require) =>
+        val (pred, body, mkSig: ((Code, Code) => Signature)) = e match {
+          case Assume(pred, body) => (pred, body, mkAssume)
+          case Assert(pred, _, body) => (pred, body, mkAssert)
+          case Require(pred, body) => (pred, body, mkRequire)
+        }
+        // TODO: Ok?
+        val rpred = codeOfExpr(pred)
+        val rbody = codeOfExpr(body)(using rpred.env.withCond(rpred.terminal))
+        val ctx = (usgs: Usages) => (c: Code) => {
+          val cAssms = codeOfSig(mkSig(rpred.terminal, c), tpe)
+          rpred.ctx(usgs ++ rbody.usages)(rbody.ctx(usgs)(cAssms))
+        }
+        CodeRes(rbody.terminal, rbody.terminalHasLambdaDef, ctx, rbody.usages, rbody.env)
+
+      case Decreases(measure, body) =>
+        // TODO: Ok?
+        val rmeasure = codeOfExpr(measure)
+        val rbody = codeOfExpr(body)(using rmeasure.env)
+        val ctx = (usgs: Usages) => (c: Code) => {
+          val cDecr = codeOfSig(mkDecreases(rmeasure.terminal, c), tpe)
+          rmeasure.ctx(usgs ++ rbody.usages)(rbody.ctx(usgs)(cDecr))
+        }
+        CodeRes(rbody.terminal, rbody.terminalHasLambdaDef, ctx, rbody.usages, rbody.env)
+
+      case Ensuring(body, pred) =>
+        // TODO: Ok?
+        // TODO: Ok?
+        // TODO: Ok?
+        val rbody = codeOfExpr(body)
+        val rpred = codeOfExpr(pred)(using rbody.env)
+        val ctx = (usgs: Usages) => (c: Code) => {
+          val cReq = codeOfSig(mkEnsuring(c, rpred.terminal), tpe)
+          rbody.ctx(usgs ++ rpred.usages)(rpred.ctx(usgs)(cReq))
+        }
+        CodeRes(rbody.terminal, rbody.terminalHasLambdaDef, ctx, rbody.usages, rbody.env)
 
       case ADT(id, tps, args) => codeOfExprsBound(args, tpe)(mkADT(id, tps, _))
       case Tuple(args) => codeOfExprsBound(args, tpe)(mkTuple)
+      case FunctionInvocation(id, tps, args) => codeOfExprsBound(args, tpe)(mkFunInvoc(id, tps, _))
+      case Application(callee, args) => codeOfExprsBound(callee +: args, tpe) { case cCallee +: cArgs => mkApp(cCallee, cArgs) }
+      case IsConstructor(e, id) =>
+        val adt @ ADTType(_, _) = e.getType
+        codeOfExprsBound(e, tpe)(mkIsCtor(_, adt, id))
+      case s @ ADTSelector(e, selector) =>
+        val adt @ ADTType(_, _) = e.getType
+        codeOfExprsBound(e, tpe)(mkADTSelector(_, adt, s.constructor, selector))
+      // TODO: Annotated peut empecher certaines simplif. non? Voir la PR de Georg.
+      // TODO: On pourrait p-e ignorer Annotated? De toute façon, si c'est pour avoir des DropVCs, cela ne change rien dans notre cas de figure?
+      //  -> sauf p-e si on fait un "uncodeOf" et qu'on a besoin de restaurer certaines annotation, mais là on pourrait p-e envisager
+      //  une map ad-hoc qui contient ces infos...?
+      case Annotated(e, flags) =>
+        // TODO: Gros gag: pourrait-on envisager d'assigner le même code pour la sig. de Annotated que pour la sig. de e ????
+        //    Il faudra faire cette update un peu hacky à la fin. On aura besoin de manip les 2 maps par nous meme
+        //    sans passer par updateCodeSig. On devra également avoir une map auxiliaire qui se souvient des exprs annotées pour ce uncodeOf...
+        codeOfExprsBound(e, tpe)(mkAnnot(_, flags))
 
-      case Assume(pred, body) =>
-        // TODO: Ok?
-        val resPred = codeOfExpr(pred)
-        // Comme le trou se situe dans le body (après l'assms), on retournera l'env avec l'assumption
-        val newEnv = resPred.env.withCond(resPred.terminal)
-        val resBody = codeOfExpr(body)(using newEnv)
-        val terminal = codeOfSig(mkAssume(resPred.terminal, resBody.terminal), tpe)
-        val ctx = (usgs: Usages) => (c: Code) => resPred.ctx(usgs)(resBody.ctx(usgs)(c))
-        CodeRes(terminal, resPred.terminalHasLambdaDef || resBody.terminalHasLambdaDef, ctx, resPred.usages ++ resBody.usages, newEnv)
+      // TODO: Ne pourrait-on pas envisager certains simplif. ici? Pk "attendre" codeOf?
+      case and @ And(_) =>
+        val ands = unAnd(and)
+        codeOfExpr(Not(Or(ands.map(Not.apply))))
+      case or @ Or(_) =>
+        // TODO: Pour le moment, pas d'ocbsl
+        // TODO: Pour le moment, pas d'ocbsl
+        // TODO: Pour le moment, pas d'ocbsl
+        // TODO: checkForContradiction?
+        // TODO: Pas d'incohérence avec purity? (p.ex. un code qui est pure, mais pas l'autre)?
+        // TODO: Devrait-on ajouter withCond avec les negation des precedents? Ou est-ce que cela risque d'interferer avec OCBSL?
+        ///// val cs = unOr(or).map(codeOfExpr).sorted.distinct
+        // TODO: Move simplifyTopLvlSig
+        ///// mkOr(cs)
+        codeOfExprsBound(unOr(or), tpe)(mkOr)
+
+      case Not(e) =>
+        // TODO: Pour le moment, pas d'ocbsl
+        // pNeg(e) // TODO: ? pk pas simplifyTopLvlSig?
+        codeOfExprsBound(e, tpe)(mkNot)
+
+      case Implies(e1, e2) => codeOfExpr(Or(Not(e1), e2))
+      case Equals(e1, e2) => codeOfExprsBound(e1, e2, tpe)(mkEquals)
+      case LessThan(e1, e2) => codeOfExprsBound(e1, e2, tpe)(mkLessThan)
+      case GreaterThan(e1, e2) => codeOfExprsBound(e1, e2, tpe)(mkGreaterThan)
+      case LessEquals(e1, e2) => codeOfExprsBound(e1, e2, tpe)(mkLessEquals)
+      case GreaterEquals(e1, e2) => codeOfExprsBound(e1, e2, tpe)(mkGreaterEquals)
+      case UMinus(e) => codeOfExprsBound(e, tpe)(mkUMinus)
+      case Plus(e1, e2) => codeOfExprsBound(e1, e2, tpe)(mkPlus)
+      case Minus(e1, e2) => codeOfExprsBound(e1, e2, tpe)(mkMinus)
+      case Times(e1, e2) => codeOfExprsBound(e1, e2, tpe)(mkTimes)
+      case Division(e1, e2) => codeOfExprsBound(e1, e2, tpe)(mkDivision)
+      case Remainder(e1, e2) => codeOfExprsBound(e1, e2, tpe)(mkRemainder)
+      case Modulo(e1, e2) => codeOfExprsBound(e1, e2, tpe)(mkModulo)
+      case BVNot(e) => codeOfExprsBound(e, tpe)(mkBVNot)
+      case BVAnd(e1, e2) => codeOfExprsBound(e1, e2, tpe)(mkBVAnd)
+      case BVOr(e1, e2) => codeOfExprsBound(e1, e2, tpe)(mkBVOr)
+      case BVXor(e1, e2) => codeOfExprsBound(e1, e2, tpe)(mkBVXor)
+      case BVShiftLeft(e1, e2) => codeOfExprsBound(e1, e2, tpe)(mkBVShiftLeft)
+      case BVAShiftRight(e1, e2) => codeOfExprsBound(e1, e2, tpe)(mkBVAShiftRight)
+      case BVLShiftRight(e1, e2) => codeOfExprsBound(e1, e2, tpe)(mkBVLShiftRight)
+      case BVNarrowingCast(e, newTpe) => codeOfExprsBound(e, tpe)(mkBVNarrowingCast(_, newTpe))
+      case BVWideningCast(e, newTpe) => codeOfExprsBound(e, tpe)(mkBVWideningCast(_, newTpe))
+      case BVUnsignedToSigned(e) => codeOfExprsBound(e, tpe)(mkBVUnsignedToSigned)
+      case BVSignedToUnsigned(e) => codeOfExprsBound(e, tpe)(mkBVSignedToUnsigned)
+      case TupleSelect(e, index) => codeOfExprsBound(e, tpe)(mkTupleSelect(_, index))
+      case FiniteSet(elems, base) => codeOfExprsBound(elems, tpe)(mkFiniteSet(_, base))
+      case SetAdd(set, elem) => codeOfExprsBound(set, elem, tpe)(mkSetAdd)
+      case ElementOfSet(elem, set) => codeOfExprsBound(elem, set, tpe)(mkElementOfSet)
+      case SubsetOf(lhs, rhs) => codeOfExprsBound(lhs, rhs, tpe)(mkSubsetOf)
+      case SetIntersection(lhs, rhs) => codeOfExprsBound(lhs, rhs, tpe)(mkSetIntersection)
+      case SetUnion(lhs, rhs) => codeOfExprsBound(lhs, rhs, tpe)(mkSetUnion)
+      case SetDifference(lhs, rhs) => codeOfExprsBound(lhs, rhs, tpe)(mkSetDifference)
+      case FiniteArray(elems, base) => codeOfExprsBound(elems, tpe)(mkFiniteArray(_, base))
+      case LargeArray(elems, default, size, base) => ???
+      case ArraySelect(array, index) => codeOfExprsBound(array, index, tpe)(mkArraySelect)
+      case ArrayUpdated(array, index, v) => codeOfExprsBound(array, index, v, tpe)(mkArrayUpdated)
+      case ArrayLength(array) => codeOfExprsBound(array, tpe)(mkArrayLength)
+
+      case Error(ofTpe, descr) =>
+        CodeRes(codeOfSig(mkError(ofTpe, descr), tpe), false, _ => identity[Code], Usages.empty, env)
+      case NoTree(ofTpe) =>
+        CodeRes(codeOfSig(mkNoTree(ofTpe), tpe), false, _ => identity[Code], Usages.empty, env)
+
+      // TODO: Passer en revue la pureté: p.ex. si on est pas exhaustif, devrait-on retourner "assumeChecked"?
+      case MatchExpr(scrut, cases) =>
+        ???
+//        val cScrut = codeOfExpr(scrut)
+//        val cCases = signatureOfCases(cScrut, scrut.getType, cases, Seq.empty)
+//        simplifySigTopLvl(mkMatchExpr(cScrut, cCases), tpe)
+
+      /*
+      val resPred = codeOfExpr(pred)
+      // TODO: Non, le terminal c'est body
+      // Comme le trou se situe dans le body (après l'assms), on retournera l'env avec l'assumption
+      val resBody = codeOfExpr(body)(using resPred.env.withCond(resPred.terminal))
+      val terminal = codeOfSig(mkAssume(resPred.terminal, resBody.terminal), tpe)
+      val ctx = (usgs: Usages) => (c: Code) => resPred.ctx(usgs)(resBody.ctx(usgs)(c))
+      CodeRes(terminal, resPred.terminalHasLambdaDef || resBody.terminalHasLambdaDef, ctx, resPred.usages ++ resBody.usages, resBody.env)
+      */
     }
 
     /*
