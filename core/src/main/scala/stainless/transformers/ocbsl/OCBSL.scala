@@ -29,8 +29,7 @@ trait OCBSL extends Definitions {
 
     def withLetBounds(vs: Seq[(VarId, Code)])(canSubst: (VarId, Code) => Boolean): OEnv = {
       assert(letDef.keySet.intersect(vs.map(_._1).toSet).isEmpty)
-      ???
-//      OEnv(conditions, letDef ++ vs.map { case (v, c) => v -> (c, canSubst(v, c)) })
+      OEnv(conditions, letDef ++ vs.map { case (v, c) => v -> (c, canSubst(v, c)) })
     }
   }
 
@@ -69,10 +68,12 @@ trait OCBSL extends Definitions {
   case class Usages(c2u: Map[Code, Occurrence]) {
     def apply(c: Code): Occurrence = c2u.getOrElse(c, Occurrence.Zero)
 
-    def ++(that: Usages): Usages = ???
+    def ++(that: Usages): Usages = Usages((c2u.keySet ++ that.c2u.keySet)
+      .map(c => c -> (this(c) ++ that(c))).toMap)
 
     // Note: env pas implicite car ce n'est pas tjrs le defaut qui est le bon
-    def incOccurrence(cs: IterableOnce[Code], inEnv: OEnv): Usages = ???
+    def incOccurrence(cs: Iterable[Code], inEnv: OEnv, inLambda: InLambda): Usages =
+      this ++ Usages(cs.map(c => c -> (Occurrence.Once(inEnv, inLambda.v): Occurrence)).toMap)
   }
 
   // OEnv: En gros tous les "let bindings" des arguments pour terminal (qui peuvent être elided)
@@ -148,20 +149,29 @@ trait OCBSL extends Definitions {
   private val trueCode = codeOfSig(trueSig, BooleanType())
   private val unitCode = codeOfSig(unitSig, UnitType())
 
-  def codeOfExpr(e: Expr)(using OEnv): CodeRes = {
+  // TODO: fusionner les deux fns?
+  def codeOfExpr(e: Expr)(using OEnv, InLambda): CodeRes = {
 //    if (e.getType == BooleanType()) simplifiedDisjunction(pDisj(e).toSet)
 //    else {
 //      val sig = sigOfExpr(e)
 //      codeOfSig(sig, e.getType)
 //    }
-    ???
+    // TODO: fusionner les deux fns?
+    sigOfExpr(e)
   }
 
-  def negCodeOf(c: Code)(using OEnv): Code = ??? // codeOfSig(pNegNormal(c), BooleanType())
+  def negCodeOf(c: Code)(using OEnv): Code = {
+
+    // TODO
+    codeOfSig(mkNot(c), BooleanType())
+    // ???
+  } // codeOfSig(pNegNormal(c), BooleanType())
 
   // TODO: Pk ce truc est fait dans codeOf mais pas dans pDisj?
   // TODO: Et les assms???
-  def simplifiedDisjunction(disj: Set[Code])(using OEnv): Code = ??? /*{
+  def simplifiedDisjunction(disj: Seq[Code])(using OEnv): Code = {
+    codeOfSig(mkOr(disj), BooleanType())
+  /*{
     assert(disj.forall(c => codeTpe(c) == BooleanType()))
     // TODO: Caching?
     val purity = fold(disj.map(codePurity).toSeq)
@@ -174,6 +184,7 @@ trait OCBSL extends Definitions {
       codeOfSig(sig, BooleanType())
     }
   }*/
+  }
 
   def foldCodeRes(codeRess: Seq[CodeRes]): Usages => Code => Code = {
     usgs => c => {
@@ -200,7 +211,7 @@ trait OCBSL extends Definitions {
             // inEnv représente l'env. actif lors de l'occurrence de `terminal` dans le trou que l'on s'apprête à compléter.
             // S'il est différent de l'env ou `terminal` est introduit, alors on a besoin de let-bind, car inline
             // une expr impure après un PC est incorrect.
-            (inEnv ne env) || inLambda
+            (inEnv != env) || inLambda
           case Occurrence.Zero => true // Expr impure qui n'apparait pas dans le body; on ne peut pas l'éliminer, il faut donc le bind
         }
     }
@@ -244,7 +255,7 @@ trait OCBSL extends Definitions {
     val ctx = (usgs: Usages) => (c: Code) => {
       val termOcc = usgs(term)
       // Si `term` est utilisé au moins une fois, alors on doit incrémenter (de 1, car on let-bind si occ > 1) les occurrences des args
-      val usgsInc = usgs.incOccurrence(subterms, newEnv)
+      val usgsInc = usgs.incOccurrence(subterms, newEnv, inLambda)
 
       if (needsBinding(term, termContainsLam, termOcc)(using newEnv)) {
         val tpe = codeTpe(term)
@@ -287,7 +298,7 @@ trait OCBSL extends Definitions {
         val ctx = (usgs: Usages) => (c: Code) => {
           val termOcc = usgs(terminal)
           // En gros, si par chance on a if (cond) e1 sans bdg else e2 sans bdg, e1 et e2 deviennent eligible pour CSE
-          val usgsInc = usgs.incOccurrence(Seq(rcond.terminal, cThenn, cEls), rcond.env)
+          val usgsInc = usgs.incOccurrence(Seq(rcond.terminal, cThenn, cEls), rcond.env, inLambda)
 
           if (needsBinding(terminal, termContainsLam, termOcc)(using rcond.env)) {
             val bdg = idOfVariable(Variable.fresh("tmpTerm", tpe))
@@ -478,7 +489,7 @@ trait OCBSL extends Definitions {
         val termContainsLam = rscrut.terminalHasLambdaDef || casesHasLamDef // TODO: Ok?
         val ctx = (usgs: Usages) => (c: Code) => {
           val termOcc = usgs(terminal)
-          val usgsInc = usgs.incOccurrence(rscrut.terminal +: cCases.flatMap(mc => Seq(mc.guard, mc.rhs)), rscrut.env)
+          val usgsInc = usgs.incOccurrence(rscrut.terminal +: cCases.flatMap(mc => Seq(mc.guard, mc.rhs)), rscrut.env, inLambda)
 
           if (needsBinding(terminal, termContainsLam, termOcc)(using rscrut.env)) {
             val bdg = idOfVariable(Variable.fresh("tmpTerm", tpe))
@@ -506,11 +517,11 @@ trait OCBSL extends Definitions {
   }
 
 
-  def signatureOfPatternExpr(subScrut: Code, scrutTpe: Type, pat: Pattern)(using env: OEnv): (LabelledPattern, Seq[(VarId, Code)], Set[Code]) = {
+  def signatureOfPatternExpr(subScrut: Code, scrutTpe: Type, pat: Pattern)(using env: OEnv): (LabelledPattern, Seq[(VarId, Code)], Seq[Code]) = {
     val vBinder = idOfVariable(pat.binder.getOrElse(ValDef.fresh("dummyBinder", scrutTpe)).toVariable)
     val bdgs1 = Seq((vBinder, subScrut))
     pat match {
-      case WildcardPattern(_) => (LabelledPattern.Wildcard(subScrut), bdgs1, Set.empty)
+      case WildcardPattern(_) => (LabelledPattern.Wildcard(subScrut), bdgs1, Seq.empty)
 
       case ADTPattern(_, id, tps, subps) =>
         val adt = ADTType(id, tps)
@@ -521,12 +532,12 @@ trait OCBSL extends Definitions {
           val isCtorSig = simplifySigTopLvl(mkIsCtor(subScrut, adt, id), BooleanType())
           codeOfSig(isCtorSig, BooleanType())
         }
-        val (labSubPats, bdgs2, conds2) = tcons.fields.zip(subps).foldLeft((Seq.empty[LabelledPattern], bdgs1, Set(conds1))) {
+        val (labSubPats, bdgs2, conds2) = tcons.fields.zip(subps).foldLeft((Seq.empty[LabelledPattern], bdgs1, Seq(conds1))) {
           // TODO: Annoté en dropvc?
           case ((labSubPatAcc, bdgsAcc, condsAcc), (fld, subpat)) =>
             val newScrut = codeOfSig(mkADTSelector(subScrut, adt, tcons, fld.id), fld.getType)
             // TODO: Env avec conds accumulées ok?
-            val (labSubPat, newBdgs, newConds) = signatureOfPatternExpr(newScrut, fld.getType, subpat)(using env.withConds(condsAcc))
+            val (labSubPat, newBdgs, newConds) = signatureOfPatternExpr(newScrut, fld.getType, subpat)(using env.withConds(condsAcc.toSet))
             (labSubPatAcc :+ labSubPat, bdgsAcc ++ newBdgs, condsAcc ++ newConds)
         }
         (LabelledPattern.ADT(subScrut, id, tps, labSubPats), bdgs2, conds2)
@@ -534,17 +545,17 @@ trait OCBSL extends Definitions {
       case TuplePattern(_, subps) =>
         val TupleType(bases) = scrutTpe
         assert(bases.size == subps.size)
-        val (labSubPats, bdgs2, conds) = subps.zipWithIndex.foldLeft((Seq.empty[LabelledPattern], bdgs1, Set.empty[Code])) {
+        val (labSubPats, bdgs2, conds) = subps.zipWithIndex.foldLeft((Seq.empty[LabelledPattern], bdgs1, Seq.empty[Code])) {
           case ((labSubPatAcc, bdgsAcc, condsAcc), (subpat, i)) =>
             val newScrutTpe = bases(i)
             val newScrut = codeOfSig(mkTupleSelect(subScrut, i + 1), newScrutTpe)
             // TODO: Env avec conds accumulées ok?
-            val (labSubPat, newBdgs, newConds) = signatureOfPatternExpr(newScrut, newScrutTpe, subpat)(using env.withConds(condsAcc))
+            val (labSubPat, newBdgs, newConds) = signatureOfPatternExpr(newScrut, newScrutTpe, subpat)(using env.withConds(condsAcc.toSet))
             (labSubPatAcc :+ labSubPat, bdgsAcc ++ newBdgs, condsAcc ++ newConds)
         }
         (LabelledPattern.TuplePattern(subScrut, labSubPats), bdgs2, conds)
 
-      case LiteralPattern(_, lit) => (LabelledPattern.Lit(subScrut ,lit), bdgs1, Set.empty)
+      case LiteralPattern(_, lit) => (LabelledPattern.Lit(subScrut ,lit), bdgs1, Seq.empty)
 
       case UnapplyPattern(_, recs, id, tps, subps) =>
         // TODO: !!!! Si on utilise codeOf, ne pas oublier d'utiliser le subst approprié !!!
@@ -553,12 +564,12 @@ trait OCBSL extends Definitions {
   }
 
 
-  def signatureOfCase(cScrut: Code, scrutTpe: Type, mc: MatchCase)(using env: OEnv, inLambda: InLambda): (LabMatchCase, Set[Code], Usages, Boolean) = {
+  def signatureOfCase(cScrut: Code, scrutTpe: Type, mc: MatchCase)(using env: OEnv, inLambda: InLambda): (LabMatchCase, Seq[Code], Usages, Boolean) = {
     // patConds: sans le guard!
     val (labPat, bdgs, patConds) = signatureOfPatternExpr(cScrut, scrutTpe, mc.pattern)
     // TODO: canSubst?
     // TODO: !!! Si canSubst = false, il faudra faire un freshen d'identifiant p.ex. dans inlineLambda !!!
-    val env1 = env.withLetBounds(bdgs, canSubst = true).withConds(patConds)
+    val env1 = env.withLetBounds(bdgs, canSubst = true).withConds(patConds.toSet)
     // TODO: On pourrait conserver le ctx des guard pour le body? En gros, qu'on plug le body dans le ctx de guard
     val cGuard = mc.optGuard.map(codeOfExpr(_)(using env1).selfPlugged).getOrElse(trueCode)
     val env2 = env1.withCond(cGuard)
@@ -567,7 +578,7 @@ trait OCBSL extends Definitions {
     val cRhs = rrhs.selfPlugged
     // TODO: Usage ok?
     val usg = Usages.of(cGuard)(using env1) ++ Usages.of(cRhs)(using env2)
-    (LabMatchCase(labPat, cGuard, cRhs), patConds + cGuard, usg, rrhs.terminalHasLambdaDef)
+    (LabMatchCase(labPat, cGuard, cRhs), patConds :+ cGuard, usg, rrhs.terminalHasLambdaDef)
   }
 
   def signatureOfCases(cScrut: Code, scrutTpe: Type, mcs: Seq[MatchCase], acc: Seq[LabMatchCase], accUsgs: Usages, accHasLambdaDef: Boolean)(using env: OEnv, inLambda: InLambda): (Seq[LabMatchCase], Usages, Boolean) = {
@@ -708,8 +719,8 @@ trait OCBSL extends Definitions {
       // TODO: Quid pureté de rhs???
       // TODO: Pourrait-on envisager de cache env.condition?
       // a ==> b === a && b = a
-      val lhsConj = conjunct(env.conditions)
-      val rhsLhsConj = conjunct(Set(lhsConj, rhs))
+      val lhsConj = conjunct(env.conditions.toSeq) // TODO: Set to Seq ok?
+      val rhsLhsConj = conjunct(Seq(lhsConj, rhs))
       rhsLhsConj == lhsConj
     }
   }
@@ -772,17 +783,19 @@ trait OCBSL extends Definitions {
   }
   */
 
-  def conjunct(conj: Set[Code])(using OEnv): Code = ??? // negCodeOf(negatedConjunction(conj))
+  def conjunct(conj: Seq[Code])(using OEnv): Code = negCodeOf(negatedConjunction(conj))
 
-  def negatedConjunction(conj: Set[Code])(using OEnv): Code= {
+  def negatedConjunction(conj: Seq[Code])(using OEnv): Code= {
+    // TODO
+    codeOfSig(mkOr(conj.map(negCodeOf)), BooleanType())
     // TODO: Caching?
 //    simplifiedDisjunction(conj.map(negCodeOf))
-    ???
+//    ???
   }
 
-  def codeOfIntLit(lit: BigInt, tpe: Type)(using OEnv): Code = ??? // codeOfExpr(intLitOfType(lit, tpe))
+  def codeOfIntLit(lit: BigInt, tpe: Type): Code = codeOfSig(mkLit(intLitOfType(lit, tpe)), tpe)
 
-  def intLitOfType(lit: BigInt, tpe: Type): Expr = tpe match {
+  def intLitOfType(lit: BigInt, tpe: Type): Literal[_] = tpe match {
     case IntegerType() => IntegerLiteral(lit)
     case RealType() => FractionLiteral(lit, 1)
     case BVType(signed, size) =>
@@ -1473,11 +1486,12 @@ trait OCBSL extends Definitions {
           //    -outer assms et local assms
           //    -outer open bound et local open bound
           given OEnv = OEnv.empty
+          given InLambda = InLambda(false)
           assert(!visiting.contains(fn))
           assert(!fnBlockedBy.contains(fn))
           assert(!blocking.contains(fn))
           visiting += fn
-          val res: Purity = ??? // codePurity(codeOfExpr(getFunction(fn).fullBody))
+          val res = codePurity(codeOfExpr(getFunction(fn).fullBody).selfPlugged)
           visiting -= fn
           res match {
             case Pure =>
@@ -1732,12 +1746,12 @@ trait OCBSL extends Definitions {
 
           def sndTry = (code2sig(thenn), code2sig(elze)) match {
             case (Signature(Label.IfExpr, Seq(cond2, thenn2, elze2)), _) if elze == elze2 =>
-              val combinedCond = conjunct(Set(cond, cond2))
+              val combinedCond = conjunct(Seq(cond, cond2))
               val c2 = codeOfSig(mkIfExpr(combinedCond, thenn2, elze2), tpe)
               val c3 = withIncreaseDepth(1)(transform(c2, repl, ()))
               code2sig(c3)
             case (_, Signature(Label.IfExpr, Seq(cond2, thenn2, elze2))) if thenn == thenn2 =>
-              val combinedCond = simplifiedDisjunction(Set(cond, cond2))
+              val combinedCond = simplifiedDisjunction(Seq(cond, cond2))
               val c2 = codeOfSig(mkIfExpr(combinedCond, thenn2, elze2), tpe)
               val c3 = withIncreaseDepth(1)(transform(c2, repl, ()))
               code2sig(c3)
@@ -1953,15 +1967,15 @@ trait OCBSL extends Definitions {
       }
     }
 
-    def simplifyCase(newScrut: Code, matchCase: LabMatchCase, repl: Map[Code, Code])(using env: OEnv): Option[(LabMatchCase, Set[Code], Boolean)] = {
+    def simplifyCase(newScrut: Code, matchCase: LabMatchCase, repl: Map[Code, Code])(using env: OEnv): Option[(LabMatchCase, Seq[Code], Boolean)] = {
       // Remarque: comme il n'y pas de binder explicit, il n'y a rien a freshen.
       val (newMatchCase, caseConds) = transformCase(matchCase, repl, ())
       if (codePurity(newScrut).isPure && caseConds.forall(c => codePurity(c).isPure)) {
-        val envWithConds = env.withConds(caseConds)
+        val envWithConds = env.withConds(caseConds.toSet)
         if (implied(trueCode)(using envWithConds)) {
           // Remarque: comme on ne bind pas explicitement les patterns (mais qu'on crée des node select avec edges vers newScrut),
           // on n'a pas besoin "d'adapter" le rhs dû au remplacement du pattern par un wildcard.
-          return Some(LabMatchCase(LabelledPattern.Wildcard(newScrut), trueCode, newMatchCase.rhs), Set(trueCode), true)
+          return Some(LabMatchCase(LabelledPattern.Wildcard(newScrut), trueCode, newMatchCase.rhs), Seq(trueCode), true)
         } else if (implied(falseCode)(using envWithConds)) {
           // This `matchCase` is unreachable
           return None
@@ -2195,12 +2209,12 @@ trait OCBSL extends Definitions {
       }
     }
 
-    def transformCase(matchCase: LabMatchCase, repl: Map[Code, Code], extra: Extra)(using env: OEnv): (LabMatchCase, Set[Code]) = {
+    def transformCase(matchCase: LabMatchCase, repl: Map[Code, Code], extra: Extra)(using env: OEnv): (LabMatchCase, Seq[Code]) = {
       val newPat = replaceIn(matchCase.pattern, repl)
-      val patConds = collectPatternConds(newPat, recursive = true).toSet
-      val rguard = transform(matchCase.guard, repl, extra)(using env.withConds(patConds))
-      val caseConds = patConds + rguard
-      val rrhs = transform(matchCase.rhs, repl, extra)(using env.withConds(caseConds))
+      val patConds = collectPatternConds(newPat, recursive = true)
+      val rguard = transform(matchCase.guard, repl, extra)(using env.withConds(patConds.toSet))
+      val caseConds = patConds :+ rguard
+      val rrhs = transform(matchCase.rhs, repl, extra)(using env.withConds(caseConds.toSet))
       (LabMatchCase(newPat, rguard, rrhs), caseConds)
     }
   }
@@ -2268,8 +2282,8 @@ trait OCBSL extends Definitions {
             for {
               rpat <- tryFoldSeq(patConds, acc, extra)
               rguard <- tryFold(guard, rpat, extra)(using env.withConds(patConds.toSet))
-              caseConds = patConds.toSet + guard
-              rrhs <- tryFold(rhs, rguard, extra)(using env.withConds(caseConds))
+              caseConds = patConds :+ guard
+              rrhs <- tryFold(rhs, rguard, extra)(using env.withConds(caseConds.toSet))
               negCaseConds = negatedConjunction(caseConds)
             } yield (rrhs, env.withCond(negCaseConds))
           case (Left(e), _) => Left(e)
