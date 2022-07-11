@@ -74,6 +74,8 @@ trait OCBSL extends Definitions {
     // Note: env pas implicite car ce n'est pas tjrs le defaut qui est le bon
     def incOccurrence(cs: Iterable[Code], inEnv: OEnv, inLambda: InLambda): Usages =
       this ++ Usages(cs.map(c => c -> (Occurrence.Once(inEnv, inLambda.v): Occurrence)).toMap)
+
+    def setTo(c: Code, o: Occurrence): Usages = Usages(c2u + (c -> o))
   }
 
   // OEnv: En gros tous les "let bindings" des arguments pour terminal (qui peuvent être elided)
@@ -242,10 +244,14 @@ trait OCBSL extends Definitions {
     val (newEnv, codeRess) = es.foldLeft((env, Seq.empty[CodeRes])) {
       case ((env, codeResAcc), e) =>
         val codeResE = sigOfExpr(e)(using env)
+        /*
+        // TODO: Mais qu'est-ce que c'est que ce truc???
         val bdg = idOfVariable(Variable.fresh("tmpArg", e.getType))
         val newEnv0 = env.withLetBound(bdg, codeResE.terminal, canSubst = !isLambda(codeResE.terminal))
         val newEnv1 = nextEnv(codeResE.terminal, newEnv0)
         (newEnv1, codeResAcc :+ codeResE)
+        */
+        (nextEnv(codeResE.terminal, codeResE.env), codeResAcc :+ codeResE)
     }
 
     val subterms = codeRess.map(_.terminal)
@@ -301,7 +307,7 @@ trait OCBSL extends Definitions {
           val usgsInc = usgs.incOccurrence(Seq(rcond.terminal, cThenn, cEls), rcond.env, inLambda)
 
           if (needsBinding(terminal, termContainsLam, termOcc)(using rcond.env)) {
-            val bdg = idOfVariable(Variable.fresh("tmpTerm", tpe))
+            val bdg = idOfVariable(Variable.fresh("ifBinding", tpe))
             val bound = codeOfSig(mkLet(bdg, terminal, c), tpe)
             rcond.ctx(usgsInc)(bound)
           } else {
@@ -324,7 +330,7 @@ trait OCBSL extends Definitions {
 
       case Forall(params, pred) =>
         val rpred = codeOfExpr(pred)
-        val cForall = codeOfSig(mkLambda(params.map(vd => idOfVariable(vd.toVariable)), rpred.selfPlugged), tpe)
+        val cForall = codeOfSig(mkForall(params.map(vd => idOfVariable(vd.toVariable)), rpred.selfPlugged), tpe)
         CodeRes(cForall, true, _ => identity[Code], Usages.of(cForall), env)
 
       // TODO: Inline lambda si occ == 1
@@ -337,8 +343,8 @@ trait OCBSL extends Definitions {
           // Pour `e`, on utilise l'environnement dans lequel il a été construit, donc re.env
           if (needsBinding(re.terminal, re.terminalHasLambdaDef, eOcc)(using re.env)) {
             // Pour re.ctx, puisque l'on bind `e`, on set que l'occurrence se passe exactement 1 fois
+            val usgsCtxE = (usgs ++ rb.usages).setTo(re.terminal, Occurrence.Once(re.env, inLambda.v))
             // Pour rb.ctx en revanche, on laisse les occurrences tels quels
-            val usgsCtxE = Usages(usgs.c2u + (re.terminal -> Occurrence.Once(re.env, inLambda.v))) ++ rb.usages
             val cLet = codeOfSig(mkLet(vId, re.terminal, rb.ctx(usgs)(c)), vd.getType)
             re.ctx(usgsCtxE)(cLet)
           } else {
@@ -412,25 +418,48 @@ trait OCBSL extends Definitions {
         val ands = unAnd(and)
         codeOfExpr(Not(Or(ands.map(Not.apply))))
       case or @ Or(_) =>
-        // TODO: Pas si vite!!! Il faut ajouter les negation dans env!!!!!!!
-        // TODO: Pas si vite!!! Il faut ajouter les negation dans env!!!!!!!
-        // TODO: Pas si vite!!! Il faut ajouter les negation dans env!!!!!!!
-        // TODO: Pas si vite!!! Il faut ajouter les negation dans env!!!!!!!
-        // TODO: Pas si vite!!! Il faut ajouter les negation dans env!!!!!!!
-        // TODO: Pas si vite!!! Il faut ajouter les negation dans env!!!!!!!
         // TODO: Pour le moment, pas d'ocbsl
         // TODO: Pour le moment, pas d'ocbsl
         // TODO: Pour le moment, pas d'ocbsl
         // TODO: checkForContradiction?
-        // TODO: Pas d'incohérence avec purity? (p.ex. un code qui est pure, mais pas l'autre)?
-        // TODO: Devrait-on ajouter withCond avec les negation des precedents? Ou est-ce que cela risque d'interferer avec OCBSL?
         ///// val cs = unOr(or).map(codeOfExpr).sorted.distinct
         // TODO: Move simplifyTopLvlSig
         ///// mkOr(cs)
+/*
+        val (newEnv, codeRess) = unOr(or).foldLeft((env, Seq.empty[CodeRes])) {
+          case ((env, codeResAcc), e) =>
+            given OEnv = env
+            val re = codeOfExpr(e)
+            val newEnv = re.env.withCond(negCodeOf(re.terminal))
+            (newEnv, codeResAcc :+ re)
+        }
+        val ctx = (usgs: Usages) => (c: Code) => {
+
+        }
+        ???
+*/
+        // TODO: Il y a surement mieux!!!
+        val disjs = unOr(or)
+        // TODO: On pourrait juste hoist les exprs de head
+        val (newEnv, hasLamDef, usgs, cArgs) = disjs.foldLeft((env, false, Usages.empty, Seq.empty[Code])) {
+          case ((env, hasLamDefAcc, usgsAcc, cArgsAcc), e) =>
+            given OEnv = env
+            val re = codeOfExpr(e)
+            val rePlugged = re.selfPlugged
+            val newEnv = re.env.withCond(negCodeOf(rePlugged))
+            (newEnv, hasLamDefAcc || re.terminalHasLambdaDef, usgsAcc ++ re.usages, cArgsAcc :+ rePlugged)
+        }
+        val cOr = codeOfSig(mkOr(cArgs), tpe)
+        // TODO: newEnv ok?
+        CodeRes(cOr, hasLamDef, _ => identity[Code], usgs, newEnv)
+
+        // TODO: Est-ce juste? On n'est pas sensé hoist des truc en dehors des Or!!! Cela introduit un PC après tout!!!
+        /*
         codeOfExprsBound(unOr(or), tpe)(mkOr) { case (disj, env) =>
           given OEnv = env
           env.withCond(negCodeOf(disj))
         }
+        */
 
       case Not(e) =>
         // TODO: Pour le moment, pas d'ocbsl
@@ -492,7 +521,7 @@ trait OCBSL extends Definitions {
           val usgsInc = usgs.incOccurrence(rscrut.terminal +: cCases.flatMap(mc => Seq(mc.guard, mc.rhs)), rscrut.env, inLambda)
 
           if (needsBinding(terminal, termContainsLam, termOcc)(using rscrut.env)) {
-            val bdg = idOfVariable(Variable.fresh("tmpTerm", tpe))
+            val bdg = idOfVariable(Variable.fresh("scrutBinding", tpe))
             val bound = codeOfSig(mkLet(bdg, terminal, c), tpe)
             rscrut.ctx(usgsInc)(bound)
           } else {
@@ -787,7 +816,8 @@ trait OCBSL extends Definitions {
 
   def negatedConjunction(conj: Seq[Code])(using OEnv): Code= {
     // TODO
-    codeOfSig(mkOr(conj.map(negCodeOf)), BooleanType())
+    if (conj.size == 1) negCodeOf(conj.head)
+    else codeOfSig(mkOr(conj.map(negCodeOf)), BooleanType())
     // TODO: Caching?
 //    simplifiedDisjunction(conj.map(negCodeOf))
 //    ???
@@ -998,419 +1028,6 @@ trait OCBSL extends Definitions {
   def recHelper(c1: Code, c2: Code, c3: Code)(recons: (Expr, Expr, Expr) => Expr)(using RevEnv): RevRes =
     recHelper(Seq(c1, c2, c3)) { case Seq(e1, e2, e3) => recons(e1, e2, e3) }
 
-
-  /*
-  case class RevEnv(letDefs: Map[VarId, Code],
-                    revLetDefs: Map[Code, VarId],
-                    openBounds: Set[VarId],
-//                    scopeLevel: Int,
-                    inLambda: Boolean,
-                    noPC: Boolean) {
-    def withLetBound(v: VarId, df: Code): RevEnv = withLetBounds(Seq((v, df)))
-
-    def withLetBounds(lets: Seq[(VarId, Code)]): RevEnv =
-      RevEnv(letDefs ++ lets.toMap, revLetDefs ++ lets.map((v, c) => c -> v).toMap, openBounds, inLambda, noPC)
-
-    def withOpenBound(v: VarId): RevEnv = copy(openBounds = openBounds + v)
-    def withOpenBound(vs: Set[VarId]): RevEnv = copy(openBounds = openBounds ++ vs)
-
-    def isFree(v: VarId): Boolean = !letDefs.contains(v) && !openBounds(v)
-
-//    def withLetBounds(dfs: Seq[Code]): RevEnv = withLetBoundsAndIndices(dfs)._1
-//
-//    def withLetBoundsAndIndices(dfs: Seq[Code]): (RevEnv, Seq[(VarId, Code)]) = {
-//      val indices = dfs.zipWithIndex.map((c, i) => BinderIx.fromScopeLevel(scopeLevel + i) -> c)
-//      val newRenv = RevEnv(
-//        letDefs ++ indices.toMap,
-//        revLetDefs ++ dfs.zipWithIndex.map((c, i) => c -> BinderIx.fromScopeLevel(scopeLevel + i)).toMap,
-//        scopeLevel + dfs.size,
-//        inLambda,
-//        noPC && dfs.forall(codePurity(_).isPure))
-//      (newRenv, indices)
-//    }
-//
-//    def withOpenBoundsAndIndices(nbBounds: Int): (RevEnv, Seq[BinderIx]) =
-//      (copy(scopeLevel = scopeLevel + nbBounds), (scopeLevel until (scopeLevel + nbBounds)).map(BinderIx.fromScopeLevel))
-//
-//    def withOpenBounds(nbBounds: Int): RevEnv = withOpenBoundsAndIndices(nbBounds)._1
-
-    def withPC: RevEnv = copy(noPC = false)
-    def withinLambda: RevEnv = copy(inLambda = true)
-  }
-
-  object RevEnv {
-    def empty: RevEnv = RevEnv(Map.empty, Map.empty, Set.empty, false, true)
-  }
-
-  case class Count(occurrences: Int, inLambda: Boolean, noPC: Boolean) {
-    def ++(other: Count): Count =
-      Count(occurrences + other.occurrences,
-        inLambda || other.inLambda,
-        noPC && other.noPC)
-  }
-
-  case class Counts(cts: Map[VarId, Count]) {
-    def of(ix: VarId): Count = cts.getOrElse(ix, Count(0, false, true))
-
-    def ++(other: Counts): Counts =
-      Counts((cts.keySet ++ other.cts.keySet)
-        .map(ix => ix -> (of(ix) ++ other.of(ix)))
-        .toMap)
-
-    def -(ix: VarId): Counts = Counts(cts - ix)
-    def --(ixs: Set[VarId]): Counts = Counts(cts -- ixs)
-
-    // TODO: Ok?
-    // Si le ix a ces counts là, le résultat de la subst par ix
-    def replaced(ix: VarId, replacedCounts: Counts): Counts = {
-      assert(!replacedCounts.cts.contains(ix))
-      val ixCt = of(ix)
-      if (ixCt.occurrences == 0) return Counts(cts - ix)
-
-      def replaced(candIx: VarId): Count = {
-        val currCnt = of(candIx)
-        val replCnt = replacedCounts.of(candIx)
-        if (replCnt.occurrences == 0) currCnt
-        else currCnt ++ Count(ixCt.occurrences * replCnt.occurrences,
-          ixCt.inLambda || replCnt.inLambda,
-          ixCt.noPC && replCnt.noPC)
-      }
-
-      Counts(((cts.keySet ++ replacedCounts.cts.keySet) - ix)
-        .map(candIx => candIx -> replaced(candIx))
-        .toMap)
-    }
-  }
-
-  object Counts {
-    def empty: Counts = Counts(Map.empty)
-  }
-
-  case class Holed(expr: Map[VarId, Expr] => Expr, holes: Map[VarId, Type]) {
-    def plugged(ix: VarId, e: Expr): Holed = {
-      // TODO: Dire que les non-holes sont ignoré
-      // TODO: Devrait-on qd même supprimer les es qui ne sont pas des trous (pour eviter interference avec plus bas que soi)?
-      // assert(holes.contains(ix), s"$ix not contained in ${holes.toSeq.sorted}")
-      assert(holes.get(ix).forall(_ == e.getType), s"Type of hole ${holes(ix)} not equal to type of expr ${e.getType}")
-      Holed.chkd(subst => expr(subst.updated(ix, e)), holes - ix)
-    }
-
-    def plugged(es: Map[VarId, Expr]): Holed = {
-      // TODO: Dire que les non-holes sont ignoré
-      // TODO: Devrait-on qd même supprimer les es qui ne sont pas des trous (pour eviter interference avec plus bas que soi)?
-      // assert(es.keySet.subsetOf(holes), s"${es.keySet.toSeq.sorted} not a subset of ${holes.toSeq.sorted}")
-      // TODO: Ok?
-      assert(es.forall { case (ix, e) => holes.get(ix).forall(_ == e.getType) }, s"Mismatch types between holes ${holes.toSeq.sortBy(_._1)} and given map ${es.toSeq.sortBy(_._1)}")
-      Holed.chkd(subst => expr(subst ++ es), holes -- es.keySet)
-    }
-
-    def plugged(ix: VarId, other: Holed): Holed = {
-      assert(!other.holes.contains(ix), s"Other ${other.holes.toSeq.sortBy(_._1)} contains $ix")
-      val inCommon = holes.keySet.intersect(other.holes.keySet)
-      assert(inCommon.forall(ix => holes(ix) == other.holes(ix)), s"Mismatch of hole type for ${holes.toSeq.sortBy(_._1)} and ${other.holes.toSeq.sortBy(_._1)}")
-      Holed.chkd({ subst =>
-        // TODO: Ok?
-        expr(subst.updated(ix, other.expr(subst)))
-      }, (holes ++ other.holes) - ix)
-    }
-
-    def pluggedWithOpenBounds(ixs: Set[VarId]): (Holed, Map[VarId, ValDef]) = {
-      val vds = holes.filter { case (ix, _) => ixs.contains(ix) }
-        .map { case (ix, tpe) => ix -> ValDef.fresh(s"bdg_$ix", tpe) }
-      (plugged(vds.map { case (ix, vd) => ix -> vd.toVariable }), vds)
-    }
-
-    def allPluggedWithOpenBounds: (Expr, Map[VarId, ValDef]) = {
-      val (holed, vds) = pluggedWithOpenBounds(holes.keySet)
-      assert(holed.holes.isEmpty)
-      (holed.expr(Map.empty), vds)
-    }
-  }
-
-  object Holed {
-    def const(e: Expr): Holed = Holed.chkd(_ => e, Map.empty)
-
-    def ofOne(ix: VarId, tpe: Type): Holed = Holed.chkd(_(ix), Map(ix -> tpe))
-
-    def combined(holeds: Seq[Holed])(recons: Seq[Expr] => Expr): Holed = {
-      val allHoles = holeds.flatMap(_.holes).groupBy(_._1)
-      assert(allHoles.forall(_._2.distinct.size == 1), s"Type mismatch for holes: $allHoles")
-      Holed.chkd({ subst =>
-        val exprs = holeds.map(_.expr(subst))
-        recons(exprs)
-      }, allHoles.map { case (ix, ixTps) => ix -> ixTps.head._2 })
-    }
-
-    def chkd(expr: Map[VarId, Expr] => Expr, holes: Map[VarId, Type]): Holed = Holed({ subst =>
-      assert(holes.keySet.subsetOf(subst.keySet), s"Holes ${holes.keySet.toSeq.sorted} not a subset of given subst ${subst.keys.toSeq.sorted}")
-      assert(holes.forall((ix, tpe) => subst(ix).getType == tpe),
-        s"Mismatch types between holes ${holes.toSeq.sortBy(_._1)}" +
-          s" and given subst ${subst.toSeq.sortBy(_._1).map { case (ix, e) => (ix, e, e.getType) }}")
-      expr(subst)
-    }, holes)
-  }
-
-  case class RevRes(holed: Holed, counts: Counts, containsLambda: Boolean) {
-    def countOf(ix: VarId): Count = counts.of(ix)
-
-    def plugged(ix: VarId, e: Expr): RevRes = RevRes(holed.plugged(ix, e), counts - ix, containsLambda)
-
-    def plugged(es: Map[VarId, Expr]): RevRes = RevRes(holed.plugged(es), counts -- es.keySet, containsLambda)
-
-//    def pluggedTrimmed(es: Map[BinderIx, Expr]): RevRes = RevRes(holed.plugged(es), counts -- es.keySet)
-
-    def plugged(ix: VarId, other: RevRes): RevRes = {
-      assert(!other.holed.holes.contains(ix))
-      assert(!other.counts.cts.contains(ix))
-      RevRes(holed.plugged(ix, other.holed), counts.replaced(ix, other.counts), containsLambda || other.containsLambda)
-    }
-  }
-
-  object RevRes {
-    def combined(res: Seq[RevRes])(recons: Seq[Expr] => Expr): RevRes =
-      RevRes(Holed.combined(res.map(_.holed))(recons), res.foldLeft(Counts.empty)(_ ++ _.counts), res.exists(_.containsLambda)) // TODO: Ok?
-
-    def combined(r1: RevRes)(recons: Expr => Expr): RevRes =
-      combined(Seq(r1)) { case Seq(e1) => recons(e1) }
-
-    def combined(r1: RevRes, r2: RevRes)(recons: (Expr, Expr) => Expr): RevRes =
-      combined(Seq(r1, r2)) { case Seq(e1, e2) => recons(e1, e2) }
-
-    def combined(r1: RevRes, r2: RevRes, r3: RevRes)(recons: (Expr, Expr, Expr) => Expr): RevRes =
-      combined(Seq(r1, r2, r3)) { case Seq(e1, e2, e3) => recons(e1, e2, e3) }
-  }
-
-  // TODO: Est-ce que le noPC est correct??? Parce que dans lhs + rhs, si lhs a des PC ("non locaux"), alors rhs en aura aussi!!!!
-  // TODO: Est-ce que le noPC est correct??? Parce que dans lhs + rhs, si lhs a des PC ("non locaux"), alors rhs en aura aussi!!!!
-  // TODO: Est-ce que le noPC est correct??? Parce que dans lhs + rhs, si lhs a des PC ("non locaux"), alors rhs en aura aussi!!!!
-  // TODO: Est-ce que le noPC est correct??? Parce que dans lhs + rhs, si lhs a des PC ("non locaux"), alors rhs en aura aussi!!!!
-  // TODO: Est-ce que le noPC est correct??? Parce que dans lhs + rhs, si lhs a des PC ("non locaux"), alors rhs en aura aussi!!!!
-  // TODO: Est-ce que le noPC est correct??? Parce que dans lhs + rhs, si lhs a des PC ("non locaux"), alors rhs en aura aussi!!!!
-  // TODO: Est-ce que le noPC est correct??? Parce que dans lhs + rhs, si lhs a des PC ("non locaux"), alors rhs en aura aussi!!!!
-  def uncodeOf(c: Code)(using renv: RevEnv): RevRes = {
-    renv.revLetDefs.get(c) match {
-      case Some(vIx) =>
-        // TODO: Dire pk (réintroduction des bind, qui peuvent être inline si les conditions sont réunies)
-        return uncodeOf(codeOfSig(mkVar(vIx), codeTpe(c)))
-      case None => ()
-    }
-
-    val allSig = asExplicitSig(c)
-    val result = code2sig(c) match {
-//      case Signature(Label.Var(v), Seq()) => RevRes(Holed.const(v), Counts.empty, containsLambda = false)
-      case Signature(Label.Var(v), Seq()) =>
-        val holed = {
-          if (renv.isFree(v)) Holed.const(varId2Var(v))
-          else Holed.ofOne(v, codeTpe(c))
-        }
-        RevRes(holed, Counts(Map(v -> Count(1, renv.inLambda, renv.noPC))), containsLambda = false)
-
-      case Signature(Label.Let(v), Seq(cE, cBody)) =>
-        ???
-        // TODO: A faire en amont
-        /*
-        val resE = uncodeOf(cE)
-        // TODO: noPC même pour cE? C'est un peu contraignant, cela empeche d'inline des impure...
-        val noPC = renv.noPC && codePurity(cE).isPure
-        // TODO: Remplacer ce "noPC" par qqchose d'autre? Au fond on est interessé à savoir si cE apparait en "premier position" dans cBody
-        val resBody = uncodeOf(cBody)(using renv.withLetBound(v, cE).copy(noPC = noPC))
-        val cntsInBody = resBody.countOf(v)
-        val canSubstPure = codePurity(cE).isPure &&
-          cntsInBody.occurrences <= 1 &&
-          (!cntsInBody.inLambda || !resE.containsLambda) // TODO: S'assurer que ce truc soit ok.
-        /*lazy */val canSubstImpure = !cntsInBody.inLambda && cntsInBody.noPC && cntsInBody.occurrences == 1
-        if (canSubstPure || canSubstImpure) resBody.plugged(v, resE)
-        else {
-          val vd = new ValDef(varId2Var(v))
-          val bodyPlugged = resBody.plugged(v, vd.toVariable: Expr)
-          // TODO: Counts ok?
-          RevRes.combined(resE, bodyPlugged)(Let(vd, _, _))
-        }
-        */
-
-      // TODO: Combinaison des RevRes (en particulier counts) ok?
-      case Signature(Label.MatchExpr(pats), cScrut +: cGuardRhs) =>
-        assert(2 * pats.size == cGuardRhs.size)
-
-        def convertPattern(pat: LabelledPattern, vds: Map[Code, ValDef]): Pattern = {
-          val bdg = vds.get(pat.scrut)
-          pat match {
-            case LabelledPattern.Wildcard(_) => WildcardPattern(bdg)
-            case LabelledPattern.ADT(_, id, tps, sub) => ADTPattern(bdg, id, tps, sub.map(convertPattern(_, vds)))
-            case LabelledPattern.TuplePattern(_, sub) => TuplePattern(bdg, sub.map(convertPattern(_, vds)))
-            case LabelledPattern.Lit(_, lit) => LiteralPattern(bdg, lit)
-            case LabelledPattern.Unapply(_, recs, id, tps, sub) => ???
-          }
-        }
-
-        def processCase(pat: LabelledPattern, cGuard: Code, cRhs: Code): (Pattern, RevRes, RevRes) = {
-          val allPats = pat.allPatterns
-          // TODO: noPC peut ne pas etre modifie si guard = true et si pattern n'introduit pas de cond supp.
-          // TODO: En gros, c'est comme si on fait un let defs sur les pattern: p.ex. c@ADT(b@ADT2, ...) devient bdg1 -> code de c, b -> code de c.field1
-          val scrutBdgs = allPats.zipWithIndex.map {
-            case (pat, i) =>
-              val vId = idOfVariable(Variable.fresh(s"bdg$i", codeTpe(pat.scrut)))
-              vId -> pat.scrut
-          }
-          val scrutBdgsMap = scrutBdgs.toMap
-          val scrutVars = scrutBdgsMap.keySet
-          val newRenv = renv.withLetBounds(scrutBdgs)
-          val guard = uncodeOf(cGuard)(using newRenv)
-          val rhs = uncodeOf(cRhs)(using newRenv)
-          // On retire les scrut. binding qui sont inutiles.
-          val usedScrutVars: Set[VarId] = (guard.counts ++ rhs.counts).cts
-            .filter { case (vId, count) => count.occurrences != 0 && scrutVars(vId) }.keySet
-          val scrutVds = usedScrutVars.map(vId => scrutBdgsMap(vId) -> new ValDef(varId2Var(vId))).toMap
-          val substs = usedScrutVars.map(vId => vId -> (varId2Var(vId): Expr)).toMap
-          // On remplit les trous introduits grâce à renv.withLetBounds avec les vds qui vont être utilisé comme pattern binding
-          (convertPattern(pat, scrutVds), guard.plugged(substs), rhs.plugged(substs))
-        }
-
-        val (guards, rhss) = cGuardRhs.grouped(2).map { case Seq(guard, rhs) => (guard, rhs) }.toSeq.unzip
-        // TODO: Ok?
-        val scrut = uncodeOf(cScrut)
-        val cases = pats.zip(guards).zip(rhss).map {
-          case ((labPat, cGuard), cRhs) =>
-            // val (pat, guard, rhs) =
-            processCase(labPat, cGuard, cRhs)
-        }
-        // TODO: Ok??? !!! quid des holes introduit pr les bindings qui sont ensuite plugged ??? !!!
-        val holes = scrut.holed.holes ++ cases.flatMap { case (_, guard, rhs) => guard.holed.holes ++ rhs.holed.holes }.toSet
-        // TODO: Ok??? !!! quid des holes introduit pr les bindings qui sont ensuite plugged ??? !!!
-        val counts = scrut.counts ++ cases.foldLeft(Counts.empty) { case (acc, (_, guard, rhs)) => acc ++ guard.counts ++ rhs.counts }
-        val containsLambda = scrut.containsLambda || cases.exists { case (_, guard, rhs) => guard.containsLambda || rhs.containsLambda }
-        // TODO: Ok???
-        RevRes(Holed.chkd({ subst =>
-          val scrutExpr = scrut.holed.expr(subst) // TODO: Et s'il y a des trous qui ne sont pas dans scrut/case???
-          val casesExpr = cases.map {
-            case (pat, guard, rhs) =>
-              val guardExpr = guard.holed.expr(subst)
-              val rhsExpr = rhs.holed.expr(subst)
-              MatchCase(pat, if (guardExpr == BooleanLiteral(true)) None else Some(guardExpr), rhsExpr)
-          }
-          MatchExpr(scrutExpr, casesExpr)
-        }, holes), counts, containsLambda)
-
-      case Signature(Label.Tuple, args) => recHelper(args)(Tuple.apply)
-      case Signature(Label.ADT(id, tps), args) => recHelper(args)(ADT(id, tps, _))
-      case Signature(Label.ADTSelector(_, _, sel), Seq(recv)) => recHelper(recv)(ADTSelector(_, sel))
-      case Signature(Label.FunctionInvocation(id, tps), args) => recHelper(args)(FunctionInvocation(id, tps, _))
-      case Signature(Label.Annotated(flags), Seq(e)) => recHelper(e)(Annotated(_, flags))
-      case Signature(Label.IsConstructor(_, id), Seq(e)) => recHelper(e)(IsConstructor(_, id))
-
-      case Signature(Label.Assume, Seq(pred, body)) =>
-        RevRes.combined(uncodeOf(pred), uncodeOf(body)(using renv.withPC))(Assume.apply)
-      case Signature(Label.Assert, Seq(pred, body)) =>
-        RevRes.combined(uncodeOf(pred), uncodeOf(body)(using renv.withPC))(Assert(_, None, _))
-      case Signature(Label.Require, Seq(pred, body)) =>
-        RevRes.combined(uncodeOf(pred), uncodeOf(body)(using renv.withPC))(Require.apply)
-      case Signature(Label.Ensuring, Seq(body, pred)) =>
-        recHelper(body, pred) { case (body, pred: Lambda) => Ensuring(body, pred) }
-      case Signature(Label.Decreases, Seq(measure, body)) =>
-        RevRes.combined(uncodeOf(measure), uncodeOf(body)(using renv.withPC))(Decreases.apply)
-
-      case Signature(Label.IfExpr, Seq(cond, thn, els)) =>
-        RevRes.combined(uncodeOf(cond), uncodeOf(thn)(using renv.withPC), uncodeOf(els)(using renv.withPC))(IfExpr.apply)
-
-      // TODO: Ok?
-      case Signature(Label.Application, all@(callee +: args)) =>
-        recHelper(all) { case callee +: args => Application(callee, args) }
-
-      case Signature(Label.Lambda(params), Seq(cBody)) =>
-        recHelperOpenBinders(params, cBody)(Lambda.apply)(using renv.withinLambda)
-          .copy(containsLambda = true)
-
-      case Signature(Label.Choose(v), Seq(cPred)) =>
-        recHelperOpenBinders(Seq(v), cPred) { case (Seq(vd), pred) => Choose(vd, pred) }
-
-      case Signature(Label.Forall(params), Seq(cPred)) =>
-        recHelperOpenBinders(params, cPred)(Forall.apply)
-
-      case Signature(Label.Or, fst +: rest) =>
-        // TODO: Pourrait-on envisager d'ajouter ces assms dans computeSignature (en + d'ocbsl)?
-        // Note: due to short-circuiting, the negation of the disjunct are added as we "move" towards the right.
-        // So, in `rest`, we have at least the PC `not(fst)` (also see inox.transforms.TransformerWithPC).
-        RevRes.combined(uncodeOf(fst) +: rest.map(uncodeOf(_)(using renv.withPC)))(Or.apply)
-      // TODO: Pour un Not(Or(...)), transformer en And(...)
-      case Signature(Label.Not, Seq(c)) => recHelper(c)(Not.apply)
-      case Signature(Label.Equals, Seq(c1, c2)) => recHelper(c1, c2)(Equals.apply)
-      case Signature(Label.LessThan, Seq(c1, c2)) => recHelper(c1, c2)(LessThan.apply)
-      case Signature(Label.GreaterThan, Seq(c1, c2)) => recHelper(c1, c2)(GreaterThan.apply)
-      case Signature(Label.LessEquals, Seq(c1, c2)) => recHelper(c1, c2)(LessEquals.apply)
-      case Signature(Label.GreaterEquals, Seq(c1, c2)) => recHelper(c1, c2)(GreaterEquals.apply)
-      case Signature(Label.UMinus, Seq(c)) => recHelper(c)(UMinus.apply)
-      case Signature(Label.Plus, Seq(c1, c2)) => recHelper(c1, c2)(Plus.apply)
-      case Signature(Label.Minus, Seq(c1, c2)) => recHelper(c1, c2)(Minus.apply)
-      case Signature(Label.Times, Seq(c1, c2)) => recHelper(c1, c2)(Times.apply)
-      case Signature(Label.Division, Seq(c1, c2)) => recHelper(c1, c2)(Division.apply)
-      case Signature(Label.Remainder, Seq(c1, c2)) => recHelper(c1, c2)(Remainder.apply)
-      case Signature(Label.Modulo, Seq(c1, c2)) => recHelper(c1, c2)(Modulo.apply)
-      case Signature(Label.BVNot, Seq(c)) => recHelper(c)(BVNot.apply)
-      case Signature(Label.BVAnd, Seq(c1, c2)) => recHelper(c1, c2)(BVAnd.apply)
-      case Signature(Label.BVOr, Seq(c1, c2)) => recHelper(c1, c2)(BVOr.apply)
-      case Signature(Label.BVXor, Seq(c1, c2)) => recHelper(c1, c2)(BVXor.apply)
-      case Signature(Label.BVShiftLeft, Seq(c1, c2)) => recHelper(c1, c2)(BVShiftLeft.apply)
-      case Signature(Label.BVAShiftRight, Seq(c1, c2)) => recHelper(c1, c2)(BVAShiftRight.apply)
-      case Signature(Label.BVLShiftRight, Seq(c1, c2)) => recHelper(c1, c2)(BVLShiftRight.apply)
-      case Signature(Label.BVNarrowingCast(newType), Seq(c)) => recHelper(c)(BVNarrowingCast(_, newType))
-      case Signature(Label.BVWideningCast(newType), Seq(c)) => recHelper(c)(BVWideningCast(_, newType))
-      case Signature(Label.BVUnsignedToSigned, Seq(c)) => recHelper(c)(BVUnsignedToSigned.apply)
-      case Signature(Label.BVSignedToUnsigned, Seq(c)) => recHelper(c)(BVSignedToUnsigned.apply)
-      case Signature(Label.Lit(lit), Seq()) => RevRes(Holed.const(lit), Counts.empty, containsLambda = false)
-      case Signature(Label.TupleSelect(index), Seq(c)) => recHelper(c)(TupleSelect(_, index))
-
-      case Signature(Label.FiniteSet(base), args) => recHelper(args)(FiniteSet(_, base))
-      case Signature(Label.SetAdd, Seq(set, elem)) => recHelper(set, elem)(SetAdd.apply)
-      case Signature(Label.ElementOfSet, Seq(elem, set)) => recHelper(elem, set)(ElementOfSet.apply)
-      case Signature(Label.SubsetOf, Seq(lhs, rhs)) => recHelper(lhs, rhs)(SubsetOf.apply)
-      case Signature(Label.SetIntersection, Seq(lhs, rhs)) => recHelper(lhs, rhs)(SetIntersection.apply)
-      case Signature(Label.SetUnion, Seq(lhs, rhs)) => recHelper(lhs, rhs)(SetUnion.apply)
-      case Signature(Label.SetDifference, Seq(lhs, rhs)) => recHelper(lhs, rhs)(SetDifference.apply)
-
-      case Signature(Label.FiniteArray(base), args) => recHelper(args)(FiniteArray(_, base))
-      case Signature(Label.LargeArray(elemsIndices, base), all@(elems :+ default :+ size)) =>
-        recHelper(all) { case elems :+ default :+ size =>
-          LargeArray(elemsIndices.zip(elems).toMap, default, size, base)
-        }
-      case Signature(Label.ArraySelect, Seq(arr, i)) => recHelper(arr, i)(ArraySelect.apply)
-      case Signature(Label.ArrayUpdated, Seq(arr, i, v)) => recHelper(arr, i, v)(ArrayUpdated.apply)
-      case Signature(Label.ArrayLength, Seq(arr)) => recHelper(arr)(ArrayLength.apply)
-
-      case Signature(Label.Error(tpe, descr), Seq()) => RevRes(Holed.const(Error(tpe, descr)), Counts.empty, containsLambda = false)
-      case Signature(Label.NoTree(tpe), Seq()) => RevRes(Holed.const(NoTree(tpe)), Counts.empty, containsLambda = false)
-
-      case sig =>
-        sys.error(s"uncodeOf: what is this: $sig")
-    }
-    val gotExpr = result.holed.allPluggedWithOpenBounds._1
-    assert(codeTpe(c) == gotExpr.getType, s"${codeTpe(c)} != ${gotExpr.getType}")
-    result
-  }
-
-  def recHelper(args: Seq[Code])(recons: Seq[Expr] => Expr)(using RevEnv): RevRes = {
-    RevRes.combined(args.map(uncodeOf))(recons)
-  }
-
-  def recHelper(c1: Code)(recons: Expr => Expr)(using RevEnv): RevRes =
-    recHelper(Seq(c1)) { case Seq(e1) => recons(e1) }
-  def recHelper(c1: Code, c2: Code)(recons: (Expr, Expr) => Expr)(using RevEnv): RevRes =
-    recHelper(Seq(c1, c2)) { case Seq(e1, e2) => recons(e1, e2) }
-  def recHelper(c1: Code, c2: Code, c3: Code)(recons: (Expr, Expr, Expr) => Expr)(using RevEnv): RevRes =
-    recHelper(Seq(c1, c2, c3)) { case Seq(e1, e2, e3) => recons(e1, e2, e3) }
-
-  def recHelperOpenBinders(params: Seq[VarId], cBody: Code)(recons: (Seq[ValDef], Expr) => Expr)(using renv: RevEnv): RevRes = {
-    val vds = params.map(vId => vId -> new ValDef(varId2Var(vId)))
-    val newRenv = renv.withOpenBound(params.toSet)
-    val body = uncodeOf(cBody)(using newRenv)
-      .plugged(vds.map { case (ix, vd) => ix -> vd.toVariable }.toMap)
-    RevRes.combined(body)(recons(vds.map(_._2), _))
-//    val (newRenv, indices) = renv.withOpenBoundsAndIndices(paramTps.size)
-//    val vds = indices.zip(paramTps).map { case (ix, tpe) => ix -> ValDef.fresh(s"bdg$ix", tpe) }
-//    val body = uncodeOf(cBody)(using newRenv)
-//      .plugged(vds.map { case (ix, vd) => ix -> vd.toVariable }.toMap)
-//    RevRes.combined(body)(recons(vds.map(_._2), _))
-  }
-  */
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
   def b2c(b: Boolean): Code = if (b) trueCode else falseCode
