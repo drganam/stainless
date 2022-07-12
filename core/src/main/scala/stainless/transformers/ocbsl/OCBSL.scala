@@ -254,6 +254,13 @@ trait OCBSL extends Definitions {
         (nextEnv(codeResE.terminal, codeResE.env), codeResAcc :+ codeResE)
     }
 
+    combineCodeRes(codeRess)(cons)(nextEnv)(using newEnv)
+  }
+
+  // TODO: Dire que le nextEnv est appliqué pour le suivant (et pas pr le "current")
+  def combineCodeRes(codeRess: Seq[CodeRes])(cons: Seq[Code] => Code)(nextEnv: (Code, OEnv) => OEnv)(using env: OEnv, inLambda: InLambda): CodeRes = {
+    given OEnv = sys.error("Carefully select env")
+
     val subterms = codeRess.map(_.terminal)
     val termContainsLam = codeRess.exists(_.terminalHasLambdaDef)
     val term = cons(subterms)
@@ -261,9 +268,9 @@ trait OCBSL extends Definitions {
     val ctx = (usgs: Usages) => (c: Code) => {
       val termOcc = usgs(term)
       // Si `term` est utilisé au moins une fois, alors on doit incrémenter (de 1, car on let-bind si occ > 1) les occurrences des args
-      val usgsInc = usgs.incOccurrence(subterms, newEnv, inLambda)
+      val usgsInc = usgs.incOccurrence(subterms, env, inLambda)
 
-      if (needsBinding(term, termContainsLam, termOcc)(using newEnv)) {
+      if (needsBinding(term, termContainsLam, termOcc)(using env)) {
         val tpe = codeTpe(term)
         val bdg = idOfVariable(Variable.fresh("tmpTerm", tpe))
         val bound = codeOfSig(mkLet(bdg, term, c), tpe)
@@ -274,7 +281,7 @@ trait OCBSL extends Definitions {
     }
     // val usages = codeRess.foldLeft(Usages.of(term)(using newEnv))(_ ++ _.usages)
     val usages = codeRess.foldLeft(Usages.empty)(_ ++ _.usages)
-    CodeRes(term, termContainsLam, ctx, usages, newEnv)
+    CodeRes(term, termContainsLam, ctx, usages, env)
   }
 
   // TODO: Quid simplif???
@@ -321,17 +328,20 @@ trait OCBSL extends Definitions {
       case Lambda(params, body) =>
         val rbody = codeOfExpr(body)
         val cLam = codeOfSig(mkLambda(params.map(vd => idOfVariable(vd.toVariable)), rbody.selfPlugged), tpe)
-        CodeRes(cLam, true, _ => identity[Code], Usages.of(cLam), env)
+        // TODO: Usages: Is this even correct???
+        CodeRes(cLam, true, _ => identity[Code], rbody.usages, env) //Usages.of(cLam), env)
 
       case Choose(res, pred) =>
         val rpred = codeOfExpr(pred)
         val cWicked = codeOfSig(mkWickedChoose(idOfVariable(res.toVariable), rpred.selfPlugged), tpe)
-        CodeRes(cWicked, true, _ => identity[Code], Usages.of(cWicked), env)
+        // TODO: Usages: Is this even correct???
+        CodeRes(cWicked, false, _ => identity[Code], rpred.usages, env) // Usages.of(cWicked), env)
 
       case Forall(params, pred) =>
         val rpred = codeOfExpr(pred)
         val cForall = codeOfSig(mkForall(params.map(vd => idOfVariable(vd.toVariable)), rpred.selfPlugged), tpe)
-        CodeRes(cForall, true, _ => identity[Code], Usages.of(cForall), env)
+        // TODO: Usages: Is this even correct???
+        CodeRes(cForall, false, _ => identity[Code], rpred.usages, env) // Usages.of(cForall), env)
 
       // TODO: Inline lambda si occ == 1
       case Let(vd, e, body) =>
@@ -403,6 +413,7 @@ trait OCBSL extends Definitions {
       case s @ ADTSelector(e, selector) =>
         val adt @ ADTType(_, _) = e.getType
         codeOfExprsBound(e, tpe)(mkADTSelector(_, adt, s.constructor, selector))
+
       // TODO: Annotated peut empecher certaines simplif. non? Voir la PR de Georg.
       // TODO: On pourrait p-e ignorer Annotated? De toute façon, si c'est pour avoir des DropVCs, cela ne change rien dans notre cas de figure?
       //  -> sauf p-e si on fait un "uncodeOf" et qu'on a besoin de restaurer certaines annotation, mais là on pourrait p-e envisager
@@ -521,7 +532,7 @@ trait OCBSL extends Definitions {
           val usgsInc = usgs.incOccurrence(rscrut.terminal +: cCases.flatMap(mc => Seq(mc.guard, mc.rhs)), rscrut.env, inLambda)
 
           if (needsBinding(terminal, termContainsLam, termOcc)(using rscrut.env)) {
-            val bdg = idOfVariable(Variable.fresh("scrutBinding", tpe))
+            val bdg = idOfVariable(Variable.fresh("matchBinding", tpe))
             val bound = codeOfSig(mkLet(bdg, terminal, c), tpe)
             rscrut.ctx(usgsInc)(bound)
           } else {
@@ -534,17 +545,7 @@ trait OCBSL extends Definitions {
         println("computeSignature: Do not know how to handle "+e)
         ???
     }
-
-    /*
-    val code = codeOfSig(sig, tpe)
-    val simpSig = {
-      if (tpe == BooleanType() && codePurity(code).isPure && implied(code)) trueSig
-      else sig
-    }
-    simpSig
-    */
   }
-
 
   def signatureOfPatternExpr(subScrut: Code, scrutTpe: Type, pat: Pattern)(using env: OEnv): (LabelledPattern, Seq[(VarId, Code)], Seq[Code]) = {
     val vBinder = idOfVariable(pat.binder.getOrElse(ValDef.fresh("dummyBinder", scrutTpe)).toVariable)
@@ -591,7 +592,6 @@ trait OCBSL extends Definitions {
         sys.error(s"Does not know how to handle $pat")
     }
   }
-
 
   def signatureOfCase(cScrut: Code, scrutTpe: Type, mc: MatchCase)(using env: OEnv, inLambda: InLambda): (LabMatchCase, Seq[Code], Usages, Boolean) = {
     // patConds: sans le guard!
@@ -793,24 +793,6 @@ trait OCBSL extends Definitions {
       vId
   }
   def varTpe(v: VarId): Type = varId2Var(v).tpe
-
-  /*
-  // TODO: Peut-on subst des let-bound à leur définition même si ces defs sont impures?
-  //  -> De manière générale, non, du moins pas une subst tel quel. Du moment qu'on recover le let-binding dans uncodeOf, cela devrait aller
-  def sigOfVariableWithSubst(v: Variable)(using env: OEnv): Signature = {
-    // Check if `v` is let-bound *and* that we can use the signature/code of the definition of v
-    val vId = idOfVariable(v)
-    env.letDef.get(vId).filter(_._2).map { case (c, _) => code2sig(c) }
-      .getOrElse(mkVar(vId))
-
-//    // Check if `v` is let-bound *and* that we can use the signature/code of the definition of v
-//    env.letDef.get(v).filter(_._2).map { case (c, _) => (code2sig(c), codePurity(c)) }
-//      .getOrElse((mkVar(idOfVariable(v)), Pure))
-//      // Check if `v` is bound to a lambda, choose forall or let (for which the substitution was forbidden)
-//      .orElse(env.bound.get(v).map(bIx => (sigOfIndexedVar(bIx, v.getType), Pure)))
-//      .getOrElse((mkFreeVar(v), Pure))
-  }
-  */
 
   def conjunct(conj: Seq[Code])(using OEnv): Code = negCodeOf(negatedConjunction(conj))
 
@@ -1211,12 +1193,14 @@ trait OCBSL extends Definitions {
   def codePurity(c: Code)(using env: OEnv): Purity = sigPurity.codePurity(c)
   def sigPurity(sig: Signature)(using env: OEnv): Purity = sigPurity.sigPurity(sig)
 
-  private val topLvlSigSimp = new TopLevelSigSimplifier
+//  private val topLvlSigSimp = new TopLevelSigSimplifier
 
-  def simplifySigTopLvl(sig: Signature, tpe: Type)(using OEnv): Signature = topLvlSigSimp.transform(sig, tpe, Map.empty, ())
+  // TODO
+  def simplifySigTopLvl(sig: Signature, tpe: Type)(using OEnv): Signature = sig // topLvlSigSimp.transform(sig, tpe, Map.empty, ())
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+  /*
   // TODO: Cette histoire de assume(...) en début de lambda???
   // TODO: Cette histoire de assume(...) en début de lambda???
   // TODO: Cette histoire de assume(...) en début de lambda???
@@ -1306,9 +1290,11 @@ trait OCBSL extends Definitions {
         codeOfSig(mkLet(newV, arg, rest), bodyTpe)
     }
   }
+  */
 
   def substByLet(v: VarId)(using env: OEnv): Option[Code] = env.letDef.get(v).filter(_._2).map(_._1)
 
+  /*
   class TopLevelSigSimplifier extends CodeTransformer(depthLimit = Some(1)) {
     override type Extra = Unit
 
@@ -1620,6 +1606,7 @@ trait OCBSL extends Definitions {
     }
 
   }
+  */
 
   class SigPurity extends CodeTryFolder[Unit, Purity](depthLimit = None) {
     override type Extra = Unit
@@ -1699,18 +1686,15 @@ trait OCBSL extends Definitions {
   }
 
   // TODO: Commentaire à propos de code potentiel dans les labels qui ne sont pas transform
-  // TODO: Devrait-on ajouter des let-binding après transformation là ou on s'attend à en voir????
-  //    -> on pourra juste mettre une assertion...
-  // TODO: Aussi ajouter des defs pour sig (comme codeTryFolder)?
   class CodeTransformer(val depthLimit: Option[Int] = None) {
     type Extra
     var currDepthLimit = depthLimit
     var depth = 0
 
-    final def transform(sig: Signature, tpe: Type, repl: Map[Code, Code], extra: Extra)(using OEnv): Signature = {
+    final def transform(sig: Signature, tpe: Type, repl: Map[Code, Code], extra: Extra)(using OEnv, InLambda): CodeRes = {
       // Si la signature a un code, alors on ne devrait pas le retrouver dans repl (autrement, on manquerait une transformation)
       assert(sig2code.get(sig).forall(c => !repl.contains(c)))
-      if (currDepthLimit.exists(_ <= depth)) sig
+      if (currDepthLimit.exists(_ <= depth)) ???
       else {
         depth += 1
         val res = transformImpl(sig, tpe, repl, extra)
@@ -1719,20 +1703,32 @@ trait OCBSL extends Definitions {
       }
     }
 
-    final def transform(c: Code, repl: Map[Code, Code], extra: Extra)(using env: OEnv): Code = {
+    final def transform(c: Code, repl: Map[Code, Code], extra: Extra)(using OEnv, InLambda): CodeRes = {
       repl.get(c) match {
         case Some(cc) =>
           // Si cc est une var à un enclosing let, on le remplace par sa définition (pr autant que cela est permis)
-          code2sig(cc) match {
+          val res = code2sig(cc) match {
             case Signature(Label.Var(v), Seq()) =>
               substByLet(v).getOrElse(cc)
             case _ => cc
           }
+          // TODO: termHasLambdaDef ok??? et si v est une ref. à une lambda???
+          CodeRes.of(res, termHasLambdaDef = false)
         case None =>
-          val tpe = codeTpe(c)
-          val newSig = transform(code2sig(c), tpe, repl, extra)
-          codeOfSig(newSig, tpe)
+          transform(code2sig(c), codeTpe(c), repl, extra)
       }
+    }
+
+    def transformImpl(sig: Signature, tpe: Type, repl: Map[Code, Code], extra: Extra)(using env: OEnv, inLambda: InLambda): CodeRes = sig match {
+      case Signature(Label.Var(v), Seq()) =>
+        val res = substByLet(v).getOrElse(codeOfVarId(v))
+        // TODO: termHasLambdaDef ok??? et si v est une ref. à une lambda???
+        CodeRes.of(res, termHasLambdaDef = false)
+      case Signature(Label.Let(v), Seq(e, b)) =>
+        ???
+//        val re = transform(e, repl, extra)
+//        val rb = transform(b, repl + (e -> re), extra)(using env.withLetBound(v, re, canSubst = canSubstLet(re)))
+//        mkLet(v, re, rb)
     }
 
     // Note: peut être "stacké"
@@ -1746,6 +1742,7 @@ trait OCBSL extends Definitions {
 
     def canSubstLet(c: Code): Boolean = !isLambda(c)
 
+    /*
     // TODO: TODO: Faire la remarque les les .withCond injecté sont issues *après* la transformation, et pas les "originaux"!
     def transformImpl(sig: Signature, tpe: Type, repl: Map[Code, Code], extra: Extra)(using env: OEnv): Signature = sig match {
       // TODO: Quid subst des let????
@@ -1834,6 +1831,7 @@ trait OCBSL extends Definitions {
       val rrhs = transform(matchCase.rhs, repl, extra)(using env.withConds(caseConds.toSet))
       (LabMatchCase(newPat, rguard, rrhs), caseConds)
     }
+    */
   }
 
   class CodeTryFolder[E, T](val depthLimit: Option[Int] = None) {
