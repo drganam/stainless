@@ -31,6 +31,8 @@ trait OCBSL extends Definitions {
       assert(letDef.keySet.intersect(vs.map(_._1).toSet).isEmpty)
       OEnv(conditions, letDef ++ vs.map { case (v, c) => v -> (c, canSubst(v, c)) })
     }
+
+    def isBound(c: Code): Boolean = letDef.exists(_._2._1 == c)
   }
 
   object OEnv {
@@ -192,7 +194,7 @@ trait OCBSL extends Definitions {
   }
 
   // TODO: Puisque c'est un terminal, comment peut-il "contenir" un lambda? -> p.ex. par le moyen de if, assume, etc. tout ces trucs
-  def needsBinding(terminal: Code, terminalHasLambdaDef: Boolean, occ: Occurrence)(using env: OEnv): Boolean = {
+  def needsBinding(terminal: Code, terminalHasLambdaDef: Boolean, occ: Occurrence)(using env: OEnv, inLambda: InLambda): Boolean = {
     code2sig(terminal) match {
       case Signature(Label.Lit(_) | Label.Var(_), _) => false
       case _ =>
@@ -259,6 +261,9 @@ trait OCBSL extends Definitions {
     // TODO: Usages de terminal???
     CodeRes(terminal, terminalContainsLam, ctx, codeRess.foldLeft(Usages.of(terminal))(_ ++ _.usages), env)
   }
+
+  def combineCodeRes(codeRess: Seq[CodeRes], tpe: Type)(cons: Seq[Code] => Signature)(using env: OEnv, inLambda: InLambda): CodeRes =
+    combineCodeRes(codeRess)(cs => codeOfSig(cons(cs), tpe))
 
 //  def idCtx(using env: OEnv, inLambda: InLambda)(u: Usages, c: Code): (Usages, Code) = (u ++ Usages.of(c), c) // TODO: Ok?
   def idCtx(u: Usages, c: Code): (Usages, Code) = (u, c) // TODO: Ok?
@@ -382,6 +387,7 @@ trait OCBSL extends Definitions {
         val ctx = (u: Usages, c: Code) => {
           val eOcc = u(re.terminal)
           // Pour `e`, on utilise l'environnement dans lequel il a été construit, donc re.env
+          // TODO: Rappel: pr les lambdas, le code utilisé est celui de vId, pas de re.terminal!
           if (!canSubst || needsBinding(re.terminal, re.terminalHasLambdaDef, eOcc)(using re.env)) {
             val (u2, c2) = rb.ctx(u, c)
             val cLet = codeOfSig(mkLet(vId, re.terminal, c2), vd.getType)
@@ -423,6 +429,10 @@ trait OCBSL extends Definitions {
         }
         // TODO: Ok?
         val rpred = codeOfExpr(pred)
+        // TODO: Dans usages, devrait-on retourner Usages.of(rpred.terminal) ???
+        // TODO: Dans usages, devrait-on retourner Usages.of(rpred.terminal) ???
+        // TODO: Dans usages, devrait-on retourner Usages.of(rpred.terminal) ???
+        // TODO: Dans usages, devrait-on retourner Usages.of(rpred.terminal) ???
         val rbody = codeOfExpr(body)(using rpred.env.withCond(rpred.terminal))
 //        val ctx = foldCtxs(Seq(rpred.ctx, rbody.ctx))
         val ctx = (u: Usages, c: Code) => {
@@ -451,6 +461,10 @@ trait OCBSL extends Definitions {
           //          val cAssms = codeOfSig(mkSig(rpred.terminal, c), tpe)
           //          foldCtxs(Seq(rpred.ctx, rbody.ctx))(u, cAssms)
         }
+        // TODO: Dans usages, devrait-on retourner Usages.of(rmeasure.terminal) ???
+        // TODO: Dans usages, devrait-on retourner Usages.of(rmeasure.terminal) ???
+        // TODO: Dans usages, devrait-on retourner Usages.of(rmeasure.terminal) ???
+        // TODO: Dans usages, devrait-on retourner Usages.of(rmeasure.terminal) ???
         CodeRes(rbody.terminal, rbody.terminalHasLambdaDef, ctx, /*rmeasure.usages ++ */rbody.usages, rbody.env)
 //        val ctx = (usgs: Usages) => (c: Code) => {
 //          val cDecr = codeOfSig(mkDecreases(rmeasure.terminal, c), tpe)
@@ -642,7 +656,15 @@ trait OCBSL extends Definitions {
 //          }
           val ctx = combinedCtx(terminal, hasLam)(Seq(rscrut.ctx))(incOcc)(using rscrut.env)
           // TODO: rscrut.usages?
+          // TODO: Dans usages, devrait-on retourner Usages.of(rscrut.terminal) ???
+          // TODO: Dans usages, devrait-on retourner Usages.of(rscrut.terminal) ???
+          // TODO: Dans usages, devrait-on retourner Usages.of(rscrut.terminal) ???
+          // TODO: Dans usages, devrait-on retourner Usages.of(rscrut.terminal) ???
+          // TODO: Dans usages, devrait-on retourner Usages.of(rscrut.terminal) ???
           CodeRes(terminal, hasLam, ctx, rcases.foldLeft(Usages.of(terminal)(using rscrut.env))(_ ++ _.usages) , rscrut.env)
+//          val usgs = Usages.of(rscrut.terminal)(using rscrut.env) ++
+//            rcases.foldLeft(Usages.of(terminal)(using rscrut.env))(_ ++ _.usages)
+//          CodeRes(terminal, hasLam, ctx, usgs, rscrut.env)
         }
 
         /*
@@ -741,7 +763,7 @@ trait OCBSL extends Definitions {
     }
   }
 
-  def checkForContradiction(disj: Set[Code])(using OEnv): Boolean = {
+  def checkForContradiction(disj: Set[Code])(using OEnv, InLambda): Boolean = {
     if (disj.exists(c => !codePurity(c).isPure)) {
       return false
     }
@@ -1312,8 +1334,8 @@ trait OCBSL extends Definitions {
 
   private val sigPurity = new SigPurity
 
-  def codePurity(c: Code)(using env: OEnv): Purity = sigPurity.codePurity(c)
-  def sigPurity(sig: Signature)(using env: OEnv): Purity = sigPurity.sigPurity(sig)
+  def codePurity(c: Code)(using OEnv, InLambda): Purity = sigPurity.codePurity(c)
+  def sigPurity(sig: Signature, tpe: Type)(using OEnv, InLambda): Purity = sigPurity.sigPurity(sig, tpe)
 
 //  private val topLvlSigSimp = new TopLevelSigSimplifier
 
@@ -1473,12 +1495,12 @@ trait OCBSL extends Definitions {
             case (Signature(Label.IfExpr, Seq(cond2, thenn2, elze2)), _) if elze == elze2 =>
               val combinedCond = conjunct(Seq(cond, cond2))
               val c2 = codeOfSig(mkIfExpr(combinedCond, thenn2, elze2), tpe)
-              val c3 = withIncreaseDepth(1)(transform(c2, repl, ()))
+              val c3 = withIncreasedDepth(1)(transform(c2, repl, ()))
               code2sig(c3)
             case (_, Signature(Label.IfExpr, Seq(cond2, thenn2, elze2))) if thenn == thenn2 =>
               val combinedCond = simplifiedDisjunction(Seq(cond, cond2))
               val c2 = codeOfSig(mkIfExpr(combinedCond, thenn2, elze2), tpe)
-              val c3 = withIncreaseDepth(1)(transform(c2, repl, ()))
+              val c3 = withIncreasedDepth(1)(transform(c2, repl, ()))
               code2sig(c3)
             case _ => sig
           }
@@ -1523,7 +1545,7 @@ trait OCBSL extends Definitions {
             case Signature(Label.Let(v), Seq(defs, recv)) if codePurity(defs).isPure => code2sig(recv) match {
               case Signature(Label.ADT(_, _), _) =>
                 val cSel = codeOfSig(mkADTSelector(recv, adt, ctor, sel), tpe)
-                val cSelSimp = withIncreaseDepth(1)(transform(cSel, repl, extra))
+                val cSelSimp = withIncreasedDepth(1)(transform(cSel, repl, extra))
                 mkLet(v, defs, cSelSimp)
               case _ => sig
             }
@@ -1733,19 +1755,19 @@ trait OCBSL extends Definitions {
   class SigPurity extends CodeTryFolder[Unit, Purity](depthLimit = None) {
     override type Extra = Unit
 
-    override def tryFoldImpl(sig: Signature, acc: Purity, extra: Unit)(using env: OEnv): Either[Unit, Purity] = {
-      val p = acc ++ sigPurity(sig) // Remarque: ++ est lazy sur sa droite, donc si acc est impure, on ne va pas calculer sigPurityIn
+    override def tryFoldImpl(sig: Signature, tpe: Type, acc: Purity, extra: Unit)(using env: OEnv, inLambda: InLambda): Either[Unit, Purity] = {
+      val p = acc ++ sigPurity(sig, tpe) // Remarque: ++ est lazy sur sa droite, donc si acc est impure, on ne va pas calculer sigPurityIn
       if (p == Impure) Left(())
       else Right(p)
     }
 
     // TODO: Caching
     // TODO: Ce truc avec les Delayed et les blocked by???
-    def codePurity(c: Code)(using env: OEnv): Purity = {
+    def codePurity(c: Code)(using env: OEnv, inLambda: InLambda): Purity = {
       // TODO: On pourrait utiliser un "revLetDef" dans env
       if (env.letDef.exists(_._2._1 == c)) Pure
       else {
-        val purity = sigPurity(code2sig(c))
+        val purity = sigPurity(code2sig(c), codeTpe(c))
         // TODO: Temporaire
         // TODO: Est-ce ok???
         purity match {
@@ -1753,6 +1775,7 @@ trait OCBSL extends Definitions {
           case Delayed(blockers) =>
             codeBlockedBy += c -> blockers
             for (blocker <- blockers) {
+              // TODO: les blocking, codeBlockedBy et toussa devrait aller dans cette class SigPurity
               val (blockedFns, blockedCodes) = blocking.getOrElse(blocker, (Set.empty, Set.empty))
               blocking += blocker -> (blockedFns, blockedCodes + c)
             }
@@ -1761,7 +1784,7 @@ trait OCBSL extends Definitions {
       }
     }
 
-    def sigPurity(sig: Signature)(using env: OEnv): Purity = sig match {
+    def sigPurity(sig: Signature, tpe: Type)(using env: OEnv, inLambda: InLambda): Purity = sig match {
       case Signature(Label.Var(_) | Label.Lit(_), Seq()) => Pure
       case Signature(Label.Assume, Seq(pred, body)) =>
         if (pred == trueCode) codePurity(body) // pas besoin de env.withCond car de toute façon c'est true
@@ -1817,7 +1840,47 @@ trait OCBSL extends Definitions {
       // TODO: Pureté de Decreases?
       // TODO: Array select, map select, etc.???
 
-      case sig => super.tryFoldImpl(sig, Pure, ()).getOrElse(Impure)
+      case sig => super.tryFoldImpl(sig, tpe, Pure, ()).getOrElse(Impure)
+    }
+  }
+
+  private val usgsCollector = new UsagesCollector
+
+  // TODO: Ok?
+  def usagesWithin(c: Code)(using OEnv, InLambda): (Usages, Boolean) = {
+//    // TODO: Devrait-on compter c?
+//    val Right(res) = usgsCollector.tryFold(c, (Usages.of(c), isLambda(c)), ())
+//    res
+    usgsCollector.computeUsages(c)
+  }
+
+  class UsagesCollector extends CodeTryFolder[Nothing, (Usages, Boolean)] {
+    override type Extra = Unit
+
+    override def tryFoldImpl(sig: Signature, tpe: Type, acc: (Usages, Boolean), extra: Unit)
+                            (using env: OEnv, inLambda: InLambda): Either[Nothing, (Usages, Boolean)] = {
+      val (u1, hasLam1) = acc
+      val (u2, hasLam2) = computeUsages(???)
+      Right((u1 ++ u2, hasLam1 || hasLam2))
+    }
+
+    // TODO: Ok?
+    // TODO: Devrait-on compter c?
+    def computeUsages(c: Code)(using OEnv, InLambda): (Usages, Boolean) = {
+      val slf = Usages.of(c)
+      code2sig(c) match {
+        // Pour ces cas là, on ne continue pas (pour avoir un comportement similaire au .selfPlugged utilisé sigOfExpr)
+        case Signature(Label.Lambda(_), Seq(_)) => (slf, true)
+        case Signature(Label.Choose(_) | Label.Forall(_), Seq(_)) => (slf, false)
+
+        // Ditto, sauf qu'on compte le terminal, mais pas pred // TODO (excepté lui-même???)
+        case Signature(Label.Assume | Label.Assert | Label.Require, Seq(pred, body)) =>
+          ???
+
+        case sig =>
+          val Right(res) = super.tryFoldImpl(sig, codeTpe(c), (slf, false), ())
+          res
+      }
     }
   }
 
@@ -1827,31 +1890,47 @@ trait OCBSL extends Definitions {
     var currDepthLimit = depthLimit
     var depth = 0
 
-    final def transform(sig: Signature, tpe: Type, repl: Map[Code, Code], extra: Extra)(using OEnv, InLambda): CodeRes = {
+    /*
+    final def transform(sig: Signature, tpe: Type, repl: Map[Code, Code], extra: Extra)(using env: OEnv, inLambda: InLambda): CodeRes = {
       // Si la signature a un code, alors on ne devrait pas le retrouver dans repl (autrement, on manquerait une transformation)
       assert(sig2code.get(sig).forall(c => !repl.contains(c)))
-      if (currDepthLimit.exists(_ <= depth)) ???
-      else {
+      if (currDepthLimit.exists(_ <= depth)) {
+
+        ???
+      } else {
         depth += 1
         val res = transformImpl(sig, tpe, repl, extra)
         depth -= 1
         res
       }
     }
+    */
 
-    final def transform(c: Code, repl: Map[Code, Code], extra: Extra)(using OEnv, InLambda): CodeRes = {
+    final def transform(c: Code, repl: Map[Code, Code], extra: Extra)(using env: OEnv, inLambda: InLambda): CodeRes = {
       repl.get(c) match {
         case Some(cc) =>
+          assert(env.isBound(cc), "repl fait référence à un code qui n'est pas let-bound!!!")
           // Si cc est une var à un enclosing let, on le remplace par sa définition (pr autant que cela est permis)
           val res = code2sig(cc) match {
             case Signature(Label.Var(v), Seq()) =>
               substByLet(v).getOrElse(cc)
             case _ => cc
           }
-          // TODO: termHasLambdaDef ok??? et si v est une ref. à une lambda???
           CodeRes.of(res, termHasLambdaDef = false)
         case None =>
-          transform(code2sig(c), codeTpe(c), repl, extra)
+          if (currDepthLimit.exists(_ <= depth)) {
+            if (env.isBound(c)) CodeRes.of(c, termHasLambdaDef = isLambda(c))
+            else {
+              // TODO: Ok?
+              val (u, hasLamDef) = usagesWithin(c)
+              CodeRes(c, hasLamDef, idCtx, u, env)
+            }
+          } else {
+            depth += 1
+            val res = transformImpl(code2sig(c), codeTpe(c), repl, extra)
+            depth -= 1
+            res
+          }
       }
     }
 
@@ -1861,14 +1940,24 @@ trait OCBSL extends Definitions {
         // TODO: termHasLambdaDef ok??? et si v est une ref. à une lambda???
         CodeRes.of(res, termHasLambdaDef = false)
       case Signature(Label.Let(v), Seq(e, b)) =>
+        val re = transform(e, repl, extra)
+        val canSbst = canSubstLet(re.terminal)
+        val rb = transform(b, repl + (e -> re.terminal), extra)(using env.withLetBound(v, re.terminal, canSbst))
+
         ???
 //        val re = transform(e, repl, extra)
 //        val rb = transform(b, repl + (e -> re), extra)(using env.withLetBound(v, re, canSubst = canSubstLet(re)))
 //        mkLet(v, re, rb)
+
+      case Signature(lab, children) =>
+        // TODO: Que pour les cas triviaux où env est le même, bindings std, etc.
+        val rchildren = children.map(transform(_, repl, extra))
+        combineCodeRes(rchildren, tpe)(Signature(lab, _))
     }
 
     // Note: peut être "stacké"
-    final def withIncreaseDepth[T](added: Int)(body: => T): T = {
+    final def withIncreasedDepth[T](added: Int)(body: => T): T = {
+      assert(added > 0)
       val currSaved = currDepthLimit
       currDepthLimit = currDepthLimit.map(_ + added)
       val res = body
@@ -1975,26 +2064,23 @@ trait OCBSL extends Definitions {
     var currDepthLimit = depthLimit
     var depth = 0
 
-    final def tryFold(sig: Signature, acc: T, extra: Extra)(using OEnv): Either[E, T] = {
-      if (currDepthLimit.exists(_ <= depth)) limitDepthReached(sig, acc, extra)
+    final def tryFold(sig: Signature, tpe: Type, acc: T, extra: Extra)(using OEnv, InLambda): Either[E, T] = {
+      if (currDepthLimit.exists(_ <= depth)) limitDepthReached(sig, tpe, acc, extra)
       else {
         depth += 1
-        val res = tryFoldImpl(sig, acc, extra)
+        val res = tryFoldImpl(sig, tpe, acc, extra)
         depth -= 1
         res
       }
     }
 
-    final def tryFold(c: Code, acc: T, extra: Extra)(using OEnv): Either[E, T] = tryFold(code2sig(c), acc, extra)
+    final def tryFold(c: Code, acc: T, extra: Extra)(using OEnv, InLambda): Either[E, T] = tryFold(code2sig(c), codeTpe(c), acc, extra)
 
-    def limitDepthReached(sig: Signature, acc: T, extra: Extra)(using OEnv): Either[E, T] = Right(acc)
+    def limitDepthReached(sig: Signature, tpe: Type, acc: T, extra: Extra)(using OEnv, InLambda): Either[E, T] = Right(acc)
 
     def canSubstLet(c: Code): Boolean = !isLambda(c)
 
-    final def tryFoldImpl(c: Code, acc: T, extra: Extra)(using env: OEnv): Either[E, T] =
-      tryFoldImpl(code2sig(c), acc, extra)
-
-    def tryFoldImpl(sig: Signature, acc: T, extra: Extra)(using env: OEnv): Either[E, T] = sig match {
+    def tryFoldImpl(sig: Signature, tpe: Type, acc: T, extra: Extra)(using env: OEnv, inLambda: InLambda): Either[E, T] = sig match {
       // TODO: Quid subst des let???? --> mettre un case ici pr les var
       //    -> ça sert à rien non? De toute façon, on suppose qu'on utilise déjà les defs non???
 
@@ -2023,6 +2109,8 @@ trait OCBSL extends Definitions {
       case Signature(Label.Or, args) =>
         tryFoldSeq(args, acc, extra) { case (disj, env) => env.withCond(negCodeOf(disj)(using env)) }
 
+      case Signature(Label.Lambda(_), Seq(body)) => tryFold(body, acc, extra)(using env, InLambda(true))
+
       case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
         assert(2 * pats.size == guardRhs.size)
         val (guards, rhss) = guardRhs.grouped(2).map { case Seq(guard, rhs) => (guard, rhs) }.toSeq.unzip
@@ -2044,11 +2132,11 @@ trait OCBSL extends Definitions {
       case Signature(_, children) => tryFoldSeq(children, acc, extra)
     }
 
-    final def tryFoldSeq(cs: Seq[Code], acc: T, extra: Extra)(using OEnv): Either[E, T] =
+    final def tryFoldSeq(cs: Seq[Code], acc: T, extra: Extra)(using OEnv, InLambda): Either[E, T] =
       tryFoldSeq(cs, acc, extra)((_, env) => env)
 
     // TODO: Dire que le nextEnv est appliqué pour le suivant (et pas pr le "current")
-    final def tryFoldSeq(cs: Seq[Code], acc: T, extra: Extra)(nextEnv: (Code, OEnv) => OEnv)(using env: OEnv): Either[E, T] = {
+    final def tryFoldSeq(cs: Seq[Code], acc: T, extra: Extra)(nextEnv: (Code, OEnv) => OEnv)(using env: OEnv, inLambda: InLambda): Either[E, T] = {
       cs.foldLeft(Right((acc, env)): Either[E, (T, OEnv)]) {
         case (Right((acc, env)), c) =>
           tryFold(c, acc, extra).map((_, nextEnv(c, env)))
