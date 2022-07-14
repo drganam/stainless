@@ -27,7 +27,7 @@ trait OCBSLSimplifier { self =>
     val oc = ocbslTL.get()
 
     val resE = oc.codeOfExpr(e)(using oc.OEnv.empty, oc.InLambda(false))
-    val codeE = resE.selfPlugged
+    val codeE = resE.selfPlugged._2
     //    println("Got code:")
     //    println(oc.asExplicitSig(code))
     val res = oc.uncodeOf(codeE)(using oc.RevEnv.empty).expr.copiedFrom(e)

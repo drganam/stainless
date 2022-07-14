@@ -87,16 +87,10 @@ trait OCBSL extends Definitions {
   // OEnv: En gros tous les "let bindings" des arguments pour terminal (qui peuvent être elided)
   // terminalHasLambdaDef: contient ou est un lambda soit meme
   case class CodeRes(terminal: Code, terminalHasLambdaDef: Boolean, ctx: (Usages, Code) => (Usages, Code), usages: Usages, env: OEnv) {
-    // TODO: Ok????
-    // TODO: Ok????
-    // TODO: Ok????
-    // "self plugged": on remplit le trou qu'on a crée soi-meme avec terminal: on prend donc notre env, et inLambda est false
-    // (en gros: let ... in [] -> let ... in terminal, donc pas dans un lambda
-    def selfPlugged: Code = {
-//      val u = usages // ++ Usages.of(terminal)(using env, InLambda(false))
-      val res = ctx(usages, terminal)._2
-      res
-    } // ctx(Usages.of(terminal)(using env, InLambda(false)))(terminal)
+    def selfPlugged: (Usages, Code) = {
+      val u = Usages.of(terminal)(using env, InLambda(false))
+      ctx(u, terminal)
+    }
   }
 
   object Usages {
@@ -234,19 +228,10 @@ trait OCBSL extends Definitions {
   def codeOfExprsBound(es: Seq[Expr])(cons: Seq[Code] => Code)(using env: OEnv, inLambda: InLambda): CodeRes = {
     given x_x: OEnv = sys.error("Carefully select env")
 
-    // newEnv: l'environnement avec tous les let-bound des arguments (qui peuvent être elided)
     val (newEnv, codeRess) = es.foldLeft((env, Seq.empty[CodeRes])) {
       case ((env, codeResAcc), e) =>
         val codeResE = codeOfExpr(e)(using env)
         (codeResE.env, codeResAcc :+ codeResE)
-//        /*
-//        // TODO: Mais qu'est-ce que c'est que ce truc???
-//        val bdg = idOfVariable(Variable.fresh("tmpArg", e.getType))
-//        val newEnv0 = env.withLetBound(bdg, codeResE.terminal, canSubst = !isLambda(codeResE.terminal))
-//        val newEnv1 = nextEnv(codeResE.terminal, newEnv0)
-//        (newEnv1, codeResAcc :+ codeResE)
-//        */
-//        (nextEnv(codeResE.terminal, codeResE.env), codeResAcc :+ codeResE)
     }
 
     combineCodeRes(codeRess)(cons)(using newEnv)
@@ -265,8 +250,7 @@ trait OCBSL extends Definitions {
   def combineCodeRes(codeRess: Seq[CodeRes], tpe: Type)(cons: Seq[Code] => Signature)(using env: OEnv, inLambda: InLambda): CodeRes =
     combineCodeRes(codeRess)(cs => codeOfSig(cons(cs), tpe))
 
-//  def idCtx(using env: OEnv, inLambda: InLambda)(u: Usages, c: Code): (Usages, Code) = (u ++ Usages.of(c), c) // TODO: Ok?
-  def idCtx(u: Usages, c: Code): (Usages, Code) = (u, c) // TODO: Ok?
+  def idCtx(u: Usages, c: Code): (Usages, Code) = (u, c)
 
   def combinedCtx(terminal: Code, terminalHasLam: Boolean)
                  (ctxs: Seq[(Usages, Code) => (Usages, Code)])
@@ -275,55 +259,26 @@ trait OCBSL extends Definitions {
                  (u: Usages, c: Code): (Usages, Code) = {
     assert(!isLambda(terminal), "woot?? On n'est pas sensé construire un lambda avec cette fn!!!")
     val terminalOcc = u(terminal)
-    // TODO: N'y a-t-il pas un risque qu'on compte les choses à double???
-    if (needsBinding(terminal, terminalHasLam, terminalOcc)) {
-      val tpe = codeTpe(terminal)
-      val bdg = idOfVariable(Variable.fresh("bdg", tpe))
-      val bound = codeOfSig(mkLet(bdg, terminal, c), tpe)
-      val u2 = /*incSubOccurrences(u)*/u.setTo(terminal, Occurrence.Once(env, inLambda.v))
-      foldCtxs(ctxs)(u2, bound)
-    } else {
-      val u2 = u /*{
-        if (terminalOcc.isZero) u
-        else incSubOccurrences(u)
-      }*/
-      foldCtxs(ctxs)(u2, c)
-    }
-  }
 
-  /*
-  // TODO: env?
-  def combinedCtx(terminal: Code, terminalHasLam: Boolean, subTerminals: Seq[Code])
-                 (ctxs: Seq[(Usages, Code) => (Usages, Code)])
-                 (u: Usages, c: Code)
-                 (using env: OEnv, inLambda: InLambda): (Usages, Code) = {
-    assert(!isLambda(terminal), "woot?? On n'est pas sensé construire un lambda avec cette fn!!!")
-    assert(ctxs.size == subTerminals.size)
-    val terminalOcc = u(terminal)
     if (needsBinding(terminal, terminalHasLam, terminalOcc)) {
       val tpe = codeTpe(terminal)
       val bdg = idOfVariable(Variable.fresh("bdg", tpe))
       val bound = codeOfSig(mkLet(bdg, terminal, c), tpe)
-      val u2 = u.incOccurrence(subTerminals).setTo(terminal, Occurrence.Once(env, inLambda.v))
+      val u2 = incSubOccurrences(u).setTo(terminal, Occurrence.Once(env, inLambda.v))
       foldCtxs(ctxs)(u2, bound)
     } else {
       val u2 = {
         if (terminalOcc.isZero) u
-        else u.incOccurrence(subTerminals :+ terminal)
+        else incSubOccurrences(u)
       }
       foldCtxs(ctxs)(u2, c)
     }
   }
-  */
 
   def foldCtxs(ctxs: Seq[(Usages, Code) => (Usages, Code)])(u: Usages, c: Code): (Usages, Code) =
     ctxs.foldRight((u, c)) { case (ctx, (uAcc, cAcc)) => ctx(uAcc, cAcc) }
 
   // TODO: Quid simplif???
-  // TODO: occurrences: terminal slmt???
-  // TODO: occurrences: terminal slmt???
-  // TODO: occurrences: terminal slmt???
-  // TODO: occurrences: terminal slmt???
   // TODO: occurrences: terminal slmt???
   def sigOfExpr(e: Expr)(using env: OEnv, inLambda: InLambda): CodeRes = {
     val tpe = e.getType
@@ -343,39 +298,32 @@ trait OCBSL extends Definitions {
         val envEls = rcond.env.withCond(negCodeOf(rcond.terminal)(using rcond.env))
         val rels = codeOfExpr(els)(using envEls)
 
+        val uCond = Usages.of(rcond.terminal)(using rcond.env)
         // On ne hoist pas les let etc. des branches (donc on "self-plug")
-        val cThenn = rthenn.selfPlugged
-        val cEls = rels.selfPlugged
+        val (uThenn, cThenn) = rthenn.selfPlugged
+        val (uEls, cEls) = rels.selfPlugged
         val terminal = codeOfSig(mkIfExpr(rcond.terminal, cThenn, cEls), tpe)
         val termContainsLam = rcond.terminalHasLambdaDef || rthenn.terminalHasLambdaDef || rels.terminalHasLambdaDef
-        // TODO: Env ok? En particulier pour les branches...
-        locally {
-          given x_x: OEnv = sys.error("Carefully select env")
-          def incOcc(u: Usages): Usages = {
-            u // .incOccurrence(terminal)(using rcond.env)
-              .incOccurrence(cThenn)(using envThen)
-              .incOccurrence(cEls)(using envEls)
-          }
-
-          // val subctxs = Seq(rcond.ctx, idCtx(using envThen), idCtx(using envEls)) // TODO: Est-ce que cela est sensé????
-          val ctx = combinedCtx(terminal, termContainsLam)(Seq(rcond.ctx))(incOcc)(using rcond.env)
-          // TODO: rcond.usages???
-          CodeRes(terminal, termContainsLam, ctx, rthenn.usages ++ rels.usages ++ Usages.of(terminal)(using rcond.env), rcond.env)
-        }
+        val ctx = combinedCtx(terminal, termContainsLam)(Seq(rcond.ctx))(_ ++ uCond ++ uThenn ++ uEls)(using rcond.env)
+        // TODO: rcond.usages???
+        CodeRes(terminal, termContainsLam, ctx, uCond ++ uThenn ++ uEls ++ Usages.of(terminal)(using rcond.env), rcond.env)
 
       case Lambda(params, body) =>
         val rbody = codeOfExpr(body)
-        val cLam = codeOfSig(mkLambda(params.map(vd => idOfVariable(vd.toVariable)), rbody.selfPlugged), tpe)
+        // TODO: Usages "perdu". Devrait-on les "reutiliser" en utilisant combinedCtx comme pour Or?
+        val cLam = codeOfSig(mkLambda(params.map(vd => idOfVariable(vd.toVariable)), rbody.selfPlugged._2), tpe)
         CodeRes.of(cLam, true)
 
       case Choose(res, pred) =>
         val rpred = codeOfExpr(pred)
-        val cWicked = codeOfSig(mkWickedChoose(idOfVariable(res.toVariable), rpred.selfPlugged), tpe)
+        // TODO: Usages "perdu". Devrait-on les "reutiliser" en utilisant combinedCtx comme pour Or?
+        val cWicked = codeOfSig(mkWickedChoose(idOfVariable(res.toVariable), rpred.selfPlugged._2), tpe)
         CodeRes.of(cWicked, false)
 
       case Forall(params, pred) =>
         val rpred = codeOfExpr(pred)
-        val cForall = codeOfSig(mkForall(params.map(vd => idOfVariable(vd.toVariable)), rpred.selfPlugged), tpe)
+        // TODO: Usages "perdu". Devrait-on les "reutiliser" en utilisant combinedCtx comme pour Or?
+        val cForall = codeOfSig(mkForall(params.map(vd => idOfVariable(vd.toVariable)), rpred.selfPlugged._2), tpe)
         CodeRes.of(cForall, false)
 
       // TODO: Inline lambda si occ == 1
@@ -385,41 +333,21 @@ trait OCBSL extends Definitions {
         val canSubst = !isLambda(re.terminal)
         val rb = codeOfExpr(body)(using re.env.withLetBound(vId, re.terminal, canSubst))
         val ctx = (u: Usages, c: Code) => {
-          val eOcc = u(re.terminal)
+          val (u2, c2) = rb.ctx(u, c)
+          val eOcc = u2(re.terminal)
           // Pour `e`, on utilise l'environnement dans lequel il a été construit, donc re.env
+          // TODO: !canSubst trop contraignant. On devrait faire un cas special pour les lambdas
           // TODO: Rappel: pr les lambdas, le code utilisé est celui de vId, pas de re.terminal!
           if (!canSubst || needsBinding(re.terminal, re.terminalHasLambdaDef, eOcc)(using re.env)) {
-            val (u2, c2) = rb.ctx(u, c)
             val cLet = codeOfSig(mkLet(vId, re.terminal, c2), vd.getType)
             val u3 = u2.setTo(re.terminal, Occurrence.Once(re.env, inLambda.v))
             re.ctx(u3, cLet)
           } else {
-            val (u2, c2) = rb.ctx(u, c)
             re.ctx(u2, c2)
           }
         }
         // TODO: terminalHasLambdaDef ok?
         CodeRes(rb.terminal, rb.terminalHasLambdaDef, ctx, /*re.usages ++ */rb.usages, rb.env)
-
-        /*
-        val ctx = (usgs: Usages) => (c: Code) => {
-          val eOcc = usgs(re.terminal)
-          // Pour `e`, on utilise l'environnement dans lequel il a été construit, donc re.env
-          if (needsBinding(re.terminal, re.terminalHasLambdaDef, eOcc)(using re.env)) {
-            // Pour re.ctx, puisque l'on bind `e`, on set que l'occurrence se passe exactement 1 fois
-            val usgsCtxE = (usgs ++ rb.usages).setTo(re.terminal, Occurrence.Once(re.env, inLambda.v))
-            // Pour rb.ctx en revanche, on laisse les occurrences tels quels
-            val cLet = codeOfSig(mkLet(vId, re.terminal, rb.ctx(usgs)(c)), vd.getType)
-            re.ctx(usgsCtxE)(cLet)
-          } else {
-            re.ctx(usgs ++ rb.usages)(rb.ctx(usgs)(c))
-          }
-        }
-        // TODO: terminalHasLambdaDef ok?
-        // TODO: Usgs ok? Si on elide le letdef, il ne faut pas qu'on compte re.usages...
-        // TODO: -> rb.usages devrait etre ok? c'est usages de terminal!!!
-        CodeRes(rb.terminal, rb.terminalHasLambdaDef, ctx, /*re.usages ++ */rb.usages, rb.env)
-        */
 
       case e: (Assume | Assert | Require) =>
         val (pred, body, mkSig: ((Code, Code) => Signature)) = e match {
@@ -429,48 +357,30 @@ trait OCBSL extends Definitions {
         }
         // TODO: Ok?
         val rpred = codeOfExpr(pred)
-        // TODO: Dans usages, devrait-on retourner Usages.of(rpred.terminal) ???
-        // TODO: Dans usages, devrait-on retourner Usages.of(rpred.terminal) ???
-        // TODO: Dans usages, devrait-on retourner Usages.of(rpred.terminal) ???
-        // TODO: Dans usages, devrait-on retourner Usages.of(rpred.terminal) ???
+        val uPred = Usages.of(rpred.terminal)(using rpred.env)
         val rbody = codeOfExpr(body)(using rpred.env.withCond(rpred.terminal))
-//        val ctx = foldCtxs(Seq(rpred.ctx, rbody.ctx))
         val ctx = (u: Usages, c: Code) => {
           val (u2, c2) = rbody.ctx(u, c)
           val cAssms = codeOfSig(mkSig(rpred.terminal, c2), tpe)
-          rpred.ctx(u2, cAssms)
-//          val cAssms = codeOfSig(mkSig(rpred.terminal, c), tpe)
-//          foldCtxs(Seq(rpred.ctx, rbody.ctx))(u, cAssms)
+          // TODO: Added usgs ok?
+          rpred.ctx(u2 ++ uPred, cAssms)
         }
+        // TODO: Dans usages, devrait-on retourner Usages.of(rmeasure.terminal) ???
         CodeRes(rbody.terminal, rbody.terminalHasLambdaDef, ctx, /*rpred.usages ++ */rbody.usages, rbody.env)
-//        val ctx = (usgs: Usages) => (c: Code) => {
-//          val cAssms = codeOfSig(mkSig(rpred.terminal, c), tpe)
-//          rpred.ctx(usgs ++ rbody.usages)(rbody.ctx(usgs)(cAssms))
-//        }
-//        CodeRes(rbody.terminal, rbody.terminalHasLambdaDef, ctx, rbody.usages, rbody.env)
 
       case Decreases(measure, body) =>
         // TODO: Ok?
         val rmeasure = codeOfExpr(measure)
+        val uMeasure = Usages.of(rmeasure.terminal)(using rmeasure.env)
         val rbody = codeOfExpr(body)(using rmeasure.env)
-        // val ctx = foldCtxs(Seq(rmeasure.ctx, rbody.ctx))
         val ctx = (u: Usages, c: Code) => {
           val (u2, c2) = rbody.ctx(u, c)
           val cDecr = codeOfSig(mkDecreases(rmeasure.terminal, c2), tpe)
-          rmeasure.ctx(u2, cDecr)
-          //          val cAssms = codeOfSig(mkSig(rpred.terminal, c), tpe)
-          //          foldCtxs(Seq(rpred.ctx, rbody.ctx))(u, cAssms)
+          // TODO: Added usgs ok?
+          rmeasure.ctx(u2 ++ uMeasure, cDecr)
         }
         // TODO: Dans usages, devrait-on retourner Usages.of(rmeasure.terminal) ???
-        // TODO: Dans usages, devrait-on retourner Usages.of(rmeasure.terminal) ???
-        // TODO: Dans usages, devrait-on retourner Usages.of(rmeasure.terminal) ???
-        // TODO: Dans usages, devrait-on retourner Usages.of(rmeasure.terminal) ???
         CodeRes(rbody.terminal, rbody.terminalHasLambdaDef, ctx, /*rmeasure.usages ++ */rbody.usages, rbody.env)
-//        val ctx = (usgs: Usages) => (c: Code) => {
-//          val cDecr = codeOfSig(mkDecreases(rmeasure.terminal, c), tpe)
-//          rmeasure.ctx(usgs ++ rbody.usages)(rbody.ctx(usgs)(cDecr))
-//        }
-//        CodeRes(rbody.terminal, rbody.terminalHasLambdaDef, ctx, rbody.usages, rbody.env)
 
       case Ensuring(body, pred) =>
         // TODO: Ok?
@@ -478,31 +388,12 @@ trait OCBSL extends Definitions {
         // TODO: Ok?
         val rbody = codeOfExpr(body)
         val rpred = codeOfExpr(pred) // Using the default env (not rbody.env)
-        val cBody = rbody.selfPlugged
-        val cPred = rpred.selfPlugged
+        // TODO: Usages "perdu". Devrait-on les "reutiliser" en utilisant combinedCtx comme pour Or?
+        val cBody = rbody.selfPlugged._2
+        val cPred = rpred.selfPlugged._2
         val cEns = codeOfSig(mkEnsuring(cBody, cPred), tpe)
         // TODO: termHasLambdaDef?
         CodeRes.of(cEns, termHasLambdaDef = false)
-
-        /*
-        val rbody = codeOfExpr(body)
-        val rpred = codeOfExpr(pred)(using rbody.env)
-//        val ctx = foldCtxs(Seq(rbody.ctx, rpred.ctx))
-        val ctx = (u: Usages, c: Code) => {
-          val (u2, c2) = rpred.ctx(u, c)
-          val cEns = codeOfSig(mkEnsuring(rbody.terminal, c2), tpe)
-          rbody.ctx(u2, cDecr)
-          //          val cAssms = codeOfSig(mkSig(rpred.terminal, c), tpe)
-          //          foldCtxs(Seq(rpred.ctx, rbody.ctx))(u, cAssms)
-        }
-        CodeRes(rbody.terminal, rbody.terminalHasLambdaDef, ctx, /*rbody.usages ++ */rpred.usages, rbody.env)
-        */
-
-//        val ctx = (usgs: Usages) => (c: Code) => {
-//          val cReq = codeOfSig(mkEnsuring(c, rpred.terminal), tpe)
-//          rbody.ctx(usgs ++ rpred.usages)(rpred.ctx(usgs)(cReq))
-//        }
-//        CodeRes(rbody.terminal, rbody.terminalHasLambdaDef, ctx, rbody.usages, rbody.env)
 
       case ADT(id, tps, args) => codeOfExprsBound(args, tpe)(mkADT(id, tps, _))
       case Tuple(args) => codeOfExprsBound(args, tpe)(mkTuple)
@@ -535,57 +426,22 @@ trait OCBSL extends Definitions {
         // TODO: Pour le moment, pas d'ocbsl
         // TODO: checkForContradiction?
         ///// val cs = unOr(or).map(codeOfExpr).sorted.distinct
-        // TODO: Move simplifyTopLvlSig
         ///// mkOr(cs)
-
         val disjs = unOr(or)
         // TODO: On pourrait juste hoist les exprs de head (-> il faudra donc modifier env et ctx retournés)
-        val (envs :+ _, hasLamDef, usgs, cArgs) = disjs.foldLeft((Seq(env), false, Usages.empty, Seq.empty[Code])) {
-          case ((envs, hasLamDefAcc, usgsAcc, cArgsAcc), e) =>
-            given OEnv = envs.last
-            val re = codeOfExpr(e)
-            val rePlugged = re.selfPlugged
-            val newEnv = re.env.withCond(negCodeOf(rePlugged))
-            (envs :+ newEnv, hasLamDefAcc || re.terminalHasLambdaDef, usgsAcc ++ re.usages, cArgsAcc :+ rePlugged)
-        }
-        assert(envs.size == cArgs.size)
-
-        val cOr = codeOfSig(mkOr(cArgs), tpe)
-        // val subctx = envs.map(env => idCtx(using env)) // TODO: Est-ce que cela est sensé????
-        def incOcc(u: Usages): Usages = {
-          u // .incOccurrence(cOr) // On doit incrémenter l'utilisation du terminal nous-même (dans env par défaut)
-            .incOccurrences(cArgs.zip(envs))
-        }
-        val ctx = combinedCtx(cOr, hasLamDef)(Seq(idCtx))(incOcc) // TODO: sub ctx ok?
-        // Remarque: on retourne l'env original car les PCs des ors ne sont pas retenues hors des disjunctions.
-        // P.ex. dans val x = b1 || b2 || b3 il serait insensé d'avoir !b1 && !b2 && !b3 dans le env de x.
-        // TODO: Ok ou bien CodeRes.of???
-        CodeRes(cOr, hasLamDef, ctx, usgs ++ Usages.of(cOr), env)
-
-        // CodeRes.of(cOr, hasLamDef)
-        /*
-        // TODO: Il y a surement mieux!!!
-        val disjs = unOr(or)
-        // TODO: On pourrait juste hoist les exprs de head
-        val (newEnv, hasLamDef, usgs, cArgs) = disjs.foldLeft((env, false, Usages.empty, Seq.empty[Code])) {
+        val (_, hasLamDef, usgs, cArgs) = disjs.foldLeft((env, false, Usages.empty, Seq.empty[Code])) {
           case ((env, hasLamDefAcc, usgsAcc, cArgsAcc), e) =>
             given OEnv = env
             val re = codeOfExpr(e)
-            val rePlugged = re.selfPlugged
+            val (usgs, rePlugged) = re.selfPlugged
             val newEnv = re.env.withCond(negCodeOf(rePlugged))
-            (newEnv, hasLamDefAcc || re.terminalHasLambdaDef, usgsAcc ++ re.usages, cArgsAcc :+ rePlugged)
+            (newEnv, hasLamDefAcc || re.terminalHasLambdaDef, usgsAcc ++ usgs, cArgsAcc :+ rePlugged)
         }
         val cOr = codeOfSig(mkOr(cArgs), tpe)
-        // TODO: newEnv ok? <-- Non!!! Car les assms ne sont pas carried over!!!
-        CodeRes(cOr, hasLamDef, _ => identity[Code], usgs, newEnv)
-        */
-        // TODO: Est-ce juste? On n'est pas sensé hoist des truc en dehors des Or!!! Cela introduit un PC après tout!!!
-        /*
-        codeOfExprsBound(unOr(or), tpe)(mkOr) { case (disj, env) =>
-          given OEnv = env
-          env.withCond(negCodeOf(disj))
-        }
-        */
+        val ctx = combinedCtx(cOr, hasLamDef)(Seq(idCtx))(_ ++ usgs)
+        // Remarque: on retourne l'env original car les PCs des ors ne sont pas retenues hors des disjunctions.
+        // P.ex. dans val x = b1 || b2 || b3 il serait insensé d'avoir !b1 && !b2 && !b3 dans le env de x.
+        CodeRes(cOr, hasLamDef, ctx, usgs ++ Usages.of(cOr), env)
 
       case Not(e) =>
         // TODO: Pour le moment, pas d'ocbsl
@@ -642,46 +498,11 @@ trait OCBSL extends Definitions {
         // Ici, on fait qqchose de similaire au IfExpr
         val terminal = codeOfSig(mkMatchExpr(rscrut.terminal, rcases.map(_.mc)), tpe)
         val hasLam = rscrut.terminalHasLambdaDef || casesHasLamDef
-
-        locally {
-          given x_x: OEnv = sys.error("Carefully select env")
-          def incOcc(u: Usages): Usages = {
-            u // .incOccurrence(terminal)(using rscrut.env)
-              .incOccurrences(rcases.flatMap(rc => Seq((rc.mc.guard, rc.guardEnv), (rc.mc.rhs, rc.rhsEnv))))
-          }
-//          // TODO: Ok? Ca à l'air trop naif et stupide...
-//          val subctxs = rscrut.ctx +: rcases.flatMap {
-//            case SigOfMatchCaseResult(_, guardEnv, rhsEnv) =>
-//              Seq(idCtx(using guardEnv), idCtx(using rhsEnv)) // TODO: Est-ce que cela est sensé????
-//          }
-          val ctx = combinedCtx(terminal, hasLam)(Seq(rscrut.ctx))(incOcc)(using rscrut.env)
-          // TODO: rscrut.usages?
-          // TODO: Dans usages, devrait-on retourner Usages.of(rscrut.terminal) ???
-          // TODO: Dans usages, devrait-on retourner Usages.of(rscrut.terminal) ???
-          // TODO: Dans usages, devrait-on retourner Usages.of(rscrut.terminal) ???
-          // TODO: Dans usages, devrait-on retourner Usages.of(rscrut.terminal) ???
-          // TODO: Dans usages, devrait-on retourner Usages.of(rscrut.terminal) ???
-          CodeRes(terminal, hasLam, ctx, rcases.foldLeft(Usages.of(terminal)(using rscrut.env))(_ ++ _.usages) , rscrut.env)
-//          val usgs = Usages.of(rscrut.terminal)(using rscrut.env) ++
-//            rcases.foldLeft(Usages.of(terminal)(using rscrut.env))(_ ++ _.usages)
-//          CodeRes(terminal, hasLam, ctx, usgs, rscrut.env)
-        }
-
-        /*
-        val ctx = (usgs: Usages) => (c: Code) => {
-          val termOcc = usgs(terminal)
-          val usgsInc = usgs.incOccurrence(rscrut.terminal +: cCases.flatMap(mc => Seq(mc.guard, mc.rhs)), rscrut.env, inLambda)
-
-          if (needsBinding(terminal, termContainsLam, termOcc)(using rscrut.env)) {
-            val bdg = idOfVariable(Variable.fresh("matchBinding", tpe))
-            val bound = codeOfSig(mkLet(bdg, terminal, c), tpe)
-            rscrut.ctx(usgsInc)(bound)
-          } else {
-            rscrut.ctx(if (termOcc.isZero) usgs else usgsInc)(c)
-          }
-        }
-        CodeRes(terminal, termContainsLam, ctx, rscrut.usages ++ casesUsgs, env)
-        */
+        val uCases = rcases.foldLeft(Usages.empty)(_ ++ _.usages)
+        val ctx = combinedCtx(terminal, hasLam)(Seq(rscrut.ctx))(_ ++ uCases)(using rscrut.env)
+        // TODO: rscrut.usages?
+        // TODO: Dans usages, devrait-on retourner Usages.of(rscrut.terminal) ???
+        CodeRes(terminal, hasLam, ctx, Usages.of(terminal)(using rscrut.env) ++ uCases, rscrut.env)
 
       case e =>
         println("computeSignature: Do not know how to handle "+e)
@@ -735,7 +556,7 @@ trait OCBSL extends Definitions {
     }
   }
 
-  case class SigOfMatchCaseResult(mc: LabMatchCase, guardEnv: OEnv, rhsEnv: OEnv, usages: Usages)
+  case class SigOfMatchCaseResult(mc: LabMatchCase, usages: Usages)
 
   def signatureOfCase(cScrut: Code, scrutTpe: Type, mc: MatchCase)(using env: OEnv, inLambda: InLambda): (SigOfMatchCaseResult, Seq[Code], Boolean) = {
     // patConds: sans le guard!
@@ -744,13 +565,18 @@ trait OCBSL extends Definitions {
     // TODO: !!! Si canSubst = false, il faudra faire un freshen d'identifiant p.ex. dans inlineLambda !!!
     val guardEnv = env.withLetBounds(bdgs, canSubst = true).withConds(patConds.toSet)
     // TODO: On pourrait conserver le ctx des guard pour le body? En gros, qu'on plug le body dans le ctx de guard
-    val rguard: Option[CodeRes] = mc.optGuard.map(codeOfExpr(_)(using guardEnv))
-    val (cGuard, usgsGuard) = rguard.map(rg => (rg.selfPlugged, rg.usages)).getOrElse((trueCode, Usages.empty))
-    val rhsEnv = guardEnv.withCond(cGuard)
+
     // Comme pour les ifs, on ne hoist rien des branches
+
+    val rguard: Option[CodeRes] = mc.optGuard.map(codeOfExpr(_)(using guardEnv))
+    val (usgsGuard, cGuard) = rguard.map(_.selfPlugged).getOrElse((Usages.empty, trueCode))
+
+    val rhsEnv = guardEnv.withCond(cGuard)
     val rrhs = codeOfExpr(mc.rhs)(using rhsEnv)
-    val labMc = LabMatchCase(labPat, cGuard, rrhs.selfPlugged)
-    (SigOfMatchCaseResult(labMc, guardEnv, rhsEnv, usgsGuard ++ rrhs.usages), patConds :+ cGuard, rrhs.terminalHasLambdaDef)
+    val (usgsRhs, rhs) = rrhs.selfPlugged
+
+    val labMc = LabMatchCase(labPat, cGuard, rhs)
+    (SigOfMatchCaseResult(labMc, usgsGuard ++ usgsRhs), patConds :+ cGuard, rrhs.terminalHasLambdaDef)
   }
 
   def signatureOfCases(cScrut: Code, scrutTpe: Type, mcs: Seq[MatchCase], acc: Seq[SigOfMatchCaseResult], accHasLambdaDef: Boolean)
@@ -1234,7 +1060,7 @@ trait OCBSL extends Definitions {
           assert(!fnBlockedBy.contains(fn))
           assert(!blocking.contains(fn))
           visiting += fn
-          val res = codePurity(codeOfExpr(getFunction(fn).fullBody).selfPlugged)
+          val res = codePurity(codeOfExpr(getFunction(fn).fullBody).selfPlugged._2)
           visiting -= fn
           res match {
             case Pure =>
