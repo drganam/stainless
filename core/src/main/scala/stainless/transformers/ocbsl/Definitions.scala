@@ -148,6 +148,16 @@ trait Definitions {
 
     case Error(tpe: Type, description: String)
     case NoTree(tpe: Type)
+
+    def isLambda: Boolean = this match {
+      case Lambda(_) => true
+      case _ => false
+    }
+
+    def isDecreases: Boolean = this match {
+      case Decreases => true
+      case _ => false
+    }
   }
 
   case class Signature(label: Label, children: Seq[Code])
