@@ -243,7 +243,7 @@ trait OCBSL extends Definitions {
     val subterms = codeRess.map(_.terminal)
     val terminalContainsLam = codeRess.exists(_.terminalHasLambdaDef)
     val terminal = cons(subterms)
-    val ctx = combinedCtx(terminal, terminalContainsLam)(codeRess.map(_.ctx))(_.incOccurrences(subterms))
+    val ctx = combinedBindingCtx(terminal, terminalContainsLam)(codeRess.map(_.ctx))(_.incOccurrences(subterms))
     // TODO: Usages de terminal???
     CodeRes(terminal, terminalContainsLam, ctx, codeRess.foldLeft(Usages.of(terminal))(_ ++ _.usages), env)
   }
@@ -288,7 +288,7 @@ trait OCBSL extends Definitions {
       val (uEls, cEls) = els.selfPlugged
       val terminal = codeOfSig(mkIfExpr(cond.terminal, cThenn, cEls), tpe)
       val termContainsLam = cond.terminalHasLambdaDef || thenn.terminalHasLambdaDef || els.terminalHasLambdaDef
-      val ctx = combinedCtx(terminal, termContainsLam)(Seq(cond.ctx))(_ ++ uCond ++ uThenn ++ uEls)(using cond.env)
+      val ctx = combinedBindingCtx(terminal, termContainsLam)(Seq(cond.ctx))(_ ++ uCond ++ uThenn ++ uEls)(using cond.env)
       CodeRes(terminal, termContainsLam, ctx, uCond ++ uThenn ++ uEls ++ Usages.of(terminal)(using cond.env), cond.env)
     }
 
@@ -327,16 +327,16 @@ trait OCBSL extends Definitions {
       val cMatchExpr = codeOfSig(mkMatchExpr(scrut.terminal, cases.map(_.mc)), tpe)
       val hasLamda = scrut.terminalHasLambdaDef || cases.exists(_.hasLambdaDef)
       val usgsCases = cases.foldLeft(Usages.empty)(_ ++ _.usages)
-      val ctx = combinedCtx(cMatchExpr, hasLamda)(Seq(scrut.ctx))(_ ++ usgsCases)(using scrut.env)
+      val ctx = combinedBindingCtx(cMatchExpr, hasLamda)(Seq(scrut.ctx))(_ ++ usgsCases)(using scrut.env)
       CodeRes(cMatchExpr, hasLamda, ctx, Usages.of(cMatchExpr)(using scrut.env) ++ usgsCases, scrut.env)
     }
   }
 
-  def combinedCtx(terminal: Code, terminalHasLam: Boolean)
-                 (ctxs: Seq[(Usages, Code) => (Usages, Code)])
-                 (incSubOccurrences: Usages => Usages)
-                 (using env: OEnv, inLambda: InLambda)
-                 (u: Usages, c: Code): (Usages, Code) = {
+  def combinedBindingCtx(terminal: Code, terminalHasLam: Boolean)
+                        (ctxs: Seq[(Usages, Code) => (Usages, Code)])
+                        (incSubOccurrences: Usages => Usages)
+                        (using env: OEnv, inLambda: InLambda)
+                        (u: Usages, c: Code): (Usages, Code) = {
     assert(!isLambda(terminal), "woot?? On n'est pas sensé construire un lambda avec cette fn!!!")
     val terminalOcc = u(terminal)
 
@@ -466,7 +466,7 @@ trait OCBSL extends Definitions {
             (newEnv, hasLamDefAcc || re.terminalHasLambdaDef, usgsAcc ++ usgs, cArgsAcc :+ rePlugged)
         }
         val cOr = codeOfSig(mkOr(cArgs), tpe)
-        val ctx = combinedCtx(cOr, hasLamDef)(Seq(idCtx))(_ ++ usgs)
+        val ctx = combinedBindingCtx(cOr, hasLamDef)(Seq(idCtx))(_ ++ usgs)
         // Remarque: on retourne l'env original car les PCs des ors ne sont pas retenues hors des disjunctions.
         // P.ex. dans val x = b1 || b2 || b3 il serait insensé d'avoir !b1 && !b2 && !b3 dans le env de x.
         CodeRes(cOr, hasLamDef, ctx, usgs ++ Usages.of(cOr), env)
@@ -543,8 +543,8 @@ trait OCBSL extends Definitions {
         val tcons = getConstructor(id, tps)
         assert(tcons.fields.size == subps.size)
         val conds1 = {
-          // Using `simplifySigTopLvl` here as it can reduce to `true` if this ADT is the only ctor
-          val isCtorSig = simplifySigTopLvl(mkIsCtor(subScrut, adt, id), BooleanType())
+          // Using `simplifyTopLvl` here as it can reduce to `true` if this ADT is the only ctor
+          val isCtorSig = simplifyTopLvl(mkIsCtor(subScrut, adt, id), BooleanType())
           codeOfSig(isCtorSig, BooleanType())
         }
         val (labSubPats, bdgs2, conds2) = tcons.fields.zip(subps).foldLeft((Seq.empty[LabelledPattern], bdgs1, Seq(conds1))) {
@@ -1131,8 +1131,8 @@ trait OCBSL extends Definitions {
       val adt = ADTType(id, tps)
       val tcons = getConstructor(id, tps)
       assert(tcons.fields.size == subps.size)
-      // Using `simplifySigTopLvl` here as it can reduce to `true` if this ADT is the only ctor
-      val isCtorSig = simplifySigTopLvl(mkIsCtor(scrut, adt, id), BooleanType())
+      // Using `simplifyTopLvl` here as it can reduce to `true` if this ADT is the only ctor
+      val isCtorSig = simplifyTopLvl(mkIsCtor(scrut, adt, id), BooleanType())
       val cond = codeOfSig(isCtorSig, BooleanType())
       val subconds = {
         // TODO: env with cond ok?
@@ -1189,10 +1189,27 @@ trait OCBSL extends Definitions {
   def codePurity(c: Code)(using OEnv, InLambda): Purity = sigPurity.codePurity(c)
   def sigPurity(sig: Signature, tpe: Type)(using OEnv, InLambda): Purity = sigPurity.sigPurity(sig, tpe)
 
-//  private val topLvlSigSimp = new TopLevelSigSimplifier
+
+  private val topLvlSimplifier = new TopLevelSimplifier
 
   // TODO
-  def simplifySigTopLvl(sig: Signature, tpe: Type)(using OEnv): Signature = sig // topLvlSigSimp.transform(sig, tpe, Map.empty, ())
+  def simplifyTopLvl(sig: Signature, tpe: Type)(using OEnv): Signature = sig // topLvlSigSimp.transform(sig, tpe, Map.empty, ())
+
+  def simplifyTopLvl(c: CodeRes)(using InLambda): CodeRes = {
+    ???
+    /*
+    // TODO: Ok?
+    // TODO: Ok?
+    // TODO: Ok?
+    val c2 = topLvlSimplifier.transform(c.terminal, Map.empty, ())(using c.env)
+    // TODO: Ok?
+    // TODO: Ok?
+    // TODO: Ok?
+    val ctx = combinedBindingCtx(c2.terminal, c2.terminalHasLambdaDef)(Seq(c.ctx, c2.ctx))(identity)(using c.env)
+    CodeRes(c2.terminal, c2.terminalHasLambdaDef, ctx, c2.usages, c2.env)
+    */
+  }
+
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -1225,7 +1242,7 @@ trait OCBSL extends Definitions {
   // TODO: Cette histoire de assume(...) en début de lambda???
   // TODO: remarque sur subst dans l'ordre (repr. l'inlining d'argument)
   def inlineLambda(argsSubst: Seq[(VarId, Code)], body: Code)(using env: OEnv): Code = {
-    // Essentiellement un freshener + simplifySigTopLvl a chaque step
+    // Essentiellement un freshener + simplifyTopLvl a chaque step
     class InlinerImpl extends CodeTransformer(depthLimit = None) {
       override type Extra = Unit
 
@@ -1235,30 +1252,30 @@ trait OCBSL extends Definitions {
           val freshV = freshened(v)
           val newEnv = env.withLetBound(freshV, re, canSubst = !isLambda(re))
           val rb = transformImpl(b, repl + (codeOfVarId(v) -> codeOfVarId(freshV)), ())(using newEnv)
-          simplifySigTopLvl(mkLet(freshV, re, rb), tpe)
+          simplifyTopLvl(mkLet(freshV, re, rb), tpe)
 
         case Signature(Label.Lambda(params), Seq(body)) =>
           val freshParams = params.map(v => v -> freshened(v))
           val freshParamsRepl = freshParams.map { case (old, nw) => codeOfVarId(old) -> codeOfVarId(nw) }
           val rbody = transform(body, repl ++ freshParamsRepl, ())
-          simplifySigTopLvl(mkLambda(freshParams.map(_._2), rbody), tpe)
+          simplifyTopLvl(mkLambda(freshParams.map(_._2), rbody), tpe)
 
         case Signature(Label.Forall(params), Seq(pred)) =>
           val freshParams = params.map(v => v -> freshened(v))
           val freshParamsRepl = freshParams.map { case (old, nw) => codeOfVarId(old) -> codeOfVarId(nw) }
           val rpred = transform(pred, repl ++ freshParamsRepl, ())
-          simplifySigTopLvl(mkForall(freshParams.map(_._2), rpred), tpe)
+          simplifyTopLvl(mkForall(freshParams.map(_._2), rpred), tpe)
 
         case Signature(Label.Choose(v), Seq(pred)) =>
           val freshV = freshened(v)
           val rpred = transform(pred, repl + (codeOfVarId(v) -> codeOfVarId(freshV)), ())
-          simplifySigTopLvl(mkWickedChoose(freshV, rpred), tpe)
+          simplifyTopLvl(mkWickedChoose(freshV, rpred), tpe)
 
         // Remarque: pas de freshening à faire pour Match parce qu'il n'y a pas de binding à proprement parler
 
         case Signature(_, _) =>
           val rsig = super.transformImpl(sig, tpe, repl, ())
-          simplifySigTopLvl(rsig, tpe)
+          simplifyTopLvl(rsig, tpe)
       }
     }
 
@@ -1291,8 +1308,12 @@ trait OCBSL extends Definitions {
   def substByLet(v: VarId)(using env: OEnv): Option[Code] = env.letDef.get(v).filter(_._2).map(_._1)
 
 
-  class TopLevelSigSimplifier extends CodeTransformer(depthLimit = Some(1)) {
+  class TopLevelSimplifier extends CodeTransformer(depthLimit = Some(1)) {
     override type Extra = Unit
+
+    def lets(es: Seq[Code], b: Code)(using env: OEnv, inLambda: InLambda): CodeRes = {
+      ???
+    }
 
     override def transformImpl(sig: Signature, tpe: Type, repl: Map[Code, Code], extra: Unit)(using env: OEnv, inLambda: InLambda): CodeRes = {
       lazy val zero = codeOfIntLit(0, tpe)
@@ -1300,30 +1321,18 @@ trait OCBSL extends Definitions {
       lazy val zeroSig = code2sig(zero)
       lazy val oneSig = code2sig(one)
 
-      ???
-      /*sig match {
-        case Signature(Label.Assume, Seq(pred, body)) =>
-          if (pred == trueCode) code2sig(body)
-          else sig
+      def default: CodeRes = super.transformImpl(sig, tpe, repl, ())
 
-        case Signature(Label.Assert, Seq(pred, body)) =>
-          if (pred == trueCode) code2sig(body)
-          else sig
-
-        case Signature(Label.Require, Seq(pred, body)) =>
-          if (pred == trueCode) code2sig(body)
-          else sig
+      sig match {
+        case Signature(Label.Assume | Label.Assert | Label.Require, Seq(pred, body)) =>
+          if (pred == trueCode) untransformed(body)
+          else default
 
         case Signature(Label.Ensuring, Seq(body, pred)) =>
           code2sig(pred) match {
-            case Signature(Label.Lambda(Seq(_)), Seq(`trueCode`)) => code2sig(body)
-            case _ => sig
+            case Signature(Label.Lambda(Seq(_)), Seq(`trueCode`)) => untransformed(body)
+            case _ => default
           }
-
-        case Signature(Label.Let(v), Seq(_, _)) =>
-          val rsig@Signature(Label.Let(`v`), Seq(re, rbody)) = super.transformImpl(sig, tpe, repl, ())
-          if (rbody == unitCode) code2sig(re)
-          else rsig
 
         case Signature(Label.IfExpr, Seq(cond, thenn, elze)) =>
           val pCond = codePurity(cond)
@@ -1332,19 +1341,22 @@ trait OCBSL extends Definitions {
 
           // Note: on check la purity de `else` parce que c'est elle qu'on va dropper
           // TODO: On peut faire des trucs comme ifExpr
-          val fstTry: Option[Signature] = {
+          val fstTry: Option[CodeRes] = {
             if (pCond.isPure) {
-              if (pElse.isPure && cond == trueCode) Some(code2sig(thenn))
-              else if (pThen.isPure && cond == falseCode) Some(code2sig(elze))
+              if (pElse.isPure && cond == trueCode) Some(untransformed(elze))
+              else if (pThen.isPure && cond == falseCode) Some(untransformed(elze))
               else if (thenn == elze) {
                 assert(pThen == pElse)
-                Some(code2sig(thenn))
+                Some(untransformed(thenn))
               }
               else None
             } else None
           }
 
-          def sndTry = (code2sig(thenn), code2sig(elze)) match {
+          def sndTry: CodeRes = (code2sig(thenn), code2sig(elze)) match {
+            // TODO: A revisiter une fois que l'on a ces conjuncts, etc.
+            // TODO: Pas si vite! Il faudrait aussi recurse sur cond, then els etc.
+            /*
             case (Signature(Label.IfExpr, Seq(cond2, thenn2, elze2)), _) if elze == elze2 =>
               val combinedCond = conjunct(Seq(cond, cond2))
               val c2 = codeOfSig(mkIfExpr(combinedCond, thenn2, elze2), tpe)
@@ -1355,7 +1367,8 @@ trait OCBSL extends Definitions {
               val c2 = codeOfSig(mkIfExpr(combinedCond, thenn2, elze2), tpe)
               val c3 = withIncreasedDepth(1)(transform(c2, repl, ()))
               code2sig(c3)
-            case _ => sig
+            */
+            case _ => default
           }
 
           fstTry.getOrElse(sndTry)
@@ -1363,12 +1376,16 @@ trait OCBSL extends Definitions {
         case Signature(Label.IsConstructor(adt, id), Seq(e)) =>
           val purity = codePurity(e)
           isConstructor(e, adt, id) match {
-            case Some(b) if purity.isPure => b2sig(b)
+            case Some(b) if purity.isPure => CodeRes.of(b2c(b), false)
             case Some(b) =>
-              // TODO: On peut retirer ces bindings, car on le fait (ou fera) déjà
+              val re = transform(e, repl, ())
               val v = idOfVariable(Variable.fresh("tmp", codeTpe(e)))
-              Signature(Label.Let(v), Seq(e, b2c(b))) // TODO: !!! on ne respecte pas cette histoire de hoisting !!!
-            case None => sig
+              // TODO: Est-on sûr que cela va bind ce truc??? car let ne bind pas forcément, et d'ailleurs re.terminal peut etre pure!!!
+              // TODO: CanSubst?
+              // TODO: CanSubst?
+              // TODO: CanSubst?
+              CodeRes.let(v, re, CodeRes.of(b2c(b), false), canSubst = false)
+            case None => default
           }
 
         case Signature(Label.ADTSelector(adt, ctor, sel), Seq(e)) =>
@@ -1382,6 +1399,9 @@ trait OCBSL extends Definitions {
               val toBeBound = args.zipWithIndex.filter { case (c, i) => i != index && !codePurity(c).isPure }.map(_._1)
               // Le résultat de la selection
               val selRes = args(index)
+              lets(toBeBound, selRes)
+
+              /*
               // TODO: En aura-t-on besoin? Si on bind tout avant avec un let, cela devrait faire l'affaire non?
               val resWithBdgs = toBeBound.foldRight(selRes) {
                 case (arg, rest) =>
@@ -1389,7 +1409,10 @@ trait OCBSL extends Definitions {
                   codeOfSig(mkLet(v, arg, rest), tpe)
               }
               code2sig(resWithBdgs)
+              */
 
+            // TODO: On devrait ne plus avoir besoin de ce cas normalement
+            /*
             // TODO: Egalement à faire dans d'autre cas
             // TODO: Egalement à faire dans d'autre cas
             // TODO: Egalement à faire dans d'autre cas
@@ -1402,9 +1425,19 @@ trait OCBSL extends Definitions {
                 mkLet(v, defs, cSelSimp)
               case _ => sig
             }
+            */
 
-            case _ => sig
+            case _ => default
           }
+
+        case _ => default
+      }
+      /*sig match {
+
+        case Signature(Label.Let(v), Seq(_, _)) =>
+          val rsig@Signature(Label.Let(`v`), Seq(re, rbody)) = super.transformImpl(sig, tpe, repl, ())
+          if (rbody == unitCode) code2sig(re)
+          else rsig
 
         case Signature(Label.ADT(id, tps), args) =>
           // Simplification de ADT(base.fld1, base.fld2, etc.) en base si base est de meme nature que l'adt construite
@@ -1745,15 +1778,7 @@ trait OCBSL extends Definitions {
           CodeRes.of(res, termHasLambdaDef = false)
         case None =>
           if (currDepthLimit.exists(_ <= depth)) {
-            if (env.isBound(c)) CodeRes.of(c, termHasLambdaDef = isLambda(c))
-            else {
-              // TODO: Dummy usages, de toute façon, on ne devrait pas en avoir besoin!!!
-              // TODO: Dummy usages, de toute façon, on ne devrait pas en avoir besoin!!!
-              // TODO: Dummy usages, de toute façon, on ne devrait pas en avoir besoin!!!
-              // TODO: Dummy usages, de toute façon, on ne devrait pas en avoir besoin!!!
-              // TODO: Dummy usages, de toute façon, on ne devrait pas en avoir besoin!!!
-              CodeRes(c, hasLambdaDefs(c), idCtx, Usages.of(c), env)
-            }
+            untransformed(c)
           } else {
             depth += 1
             val res = transformImpl(code2sig(c), codeTpe(c), repl, extra)
@@ -1763,11 +1788,44 @@ trait OCBSL extends Definitions {
       }
     }
 
+    // TODO: Ce truc n'a aucun sens!!! les ctx dépendent du type de code!!!!
+    // TODO: Ce truc n'a aucun sens!!! les ctx dépendent du type de code!!!!
+    // TODO: Ce truc n'a aucun sens!!! les ctx dépendent du type de code!!!!
+    // TODO: Ce truc n'a aucun sens!!! les ctx dépendent du type de code!!!!
+    // TODO: Dire ce que c'est
+    final def untransformed(c: Code)(using env: OEnv, inLambda: InLambda): CodeRes = {
+      ???
+      /*
+      if (env.isBound(c)) CodeRes.of(c, termHasLambdaDef = false) // TODO: termHasLambdaDef ok?
+      else {
+        // TODO: Dummy usages, de toute façon, on ne devrait pas en avoir besoin!!!
+        // TODO: Dummy usages, de toute façon, on ne devrait pas en avoir besoin!!!
+        // TODO: Dummy usages, de toute façon, on ne devrait pas en avoir besoin!!!
+        // TODO: Dummy usages, de toute façon, on ne devrait pas en avoir besoin!!!
+        // TODO: Dummy usages, de toute façon, on ne devrait pas en avoir besoin!!!
+        // TODO: Ctx???? Ne devrait-on pas au moins bind???
+        // TODO: Ctx???? Ne devrait-on pas au moins bind???
+        // TODO: Ctx???? Ne devrait-on pas au moins bind???
+        // TODO: Ctx???? Ne devrait-on pas au moins bind???
+        CodeRes(c, hasLambdaDefs(c), idCtx, Usages.of(c), env)
+      }
+      */
+    }
+
     // Note: peut être "stacké"
     final def withIncreasedDepth[T](added: Int)(body: => T): T = {
       assert(added > 0)
       val currSaved = currDepthLimit
       currDepthLimit = currDepthLimit.map(_ + added)
+      val res = body
+      currDepthLimit = currSaved
+      res
+    }
+
+    final def withSetDepth[T](limit: Int)(body: => T): T = {
+      assert(limit >= 0)
+      val currSaved = currDepthLimit
+      currDepthLimit = Some(limit)
       val res = body
       currDepthLimit = currSaved
       res
@@ -1825,7 +1883,7 @@ trait OCBSL extends Definitions {
             (newEnv, hasLamDefAcc || rdisj.terminalHasLambdaDef, usgsAcc ++ usgs, rdisjsAcc :+ rdisjPlugged)
         }
         val cOr = codeOfSig(mkOr(rdisjs), tpe)
-        val ctx = combinedCtx(cOr, hasLamDef)(Seq(idCtx))(_ ++ usgs)
+        val ctx = combinedBindingCtx(cOr, hasLamDef)(Seq(idCtx))(_ ++ usgs)
         CodeRes(cOr, hasLamDef, ctx, usgs ++ Usages.of(cOr), env)
 
       case Signature(Label.Lit(_) | Label.Error(_, _) | Label.NoTree(_), Seq()) =>
@@ -1844,10 +1902,21 @@ trait OCBSL extends Definitions {
         val rcases = transformCases(cases, repl + (scrut -> rscrut.terminal), extra, Seq.empty)(using rscrut.env)
         CodeRes.matchExpr(rscrut, rcases, tpe)
 
+      // TODO: Que pour les cas triviaux où env est le même, bindings std, etc.
       case Signature(lab, children) =>
-        // TODO: Que pour les cas triviaux où env est le même, bindings std, etc.
-        val rchildren = children.map(transform(_, repl, extra))
-        combineCodeRes(rchildren, tpe)(Signature(lab, _))
+        transformSeq(children, tpe, repl, extra)(Signature(lab, _))
+//        val rchildren = children.map(transform(_, repl, extra))
+//        combineCodeRes(rchildren, tpe)(Signature(lab, _))
+    }
+
+    final def transformSeq(cs: Seq[Code], tpe: Type, repl: Map[Code, Code], extra: Extra)(mkSig: Seq[Code] => Signature)(using env: OEnv, inLambda: InLambda): CodeRes = {
+      given x_x: OEnv = sys.error("Carefully select env")
+      val (newEnv, ress) = cs.foldLeft((env, Seq.empty[CodeRes])) {
+        case ((env, codeResAcc), c) =>
+          val res = transform(c, repl, extra)(using env)
+          (res.env, codeResAcc :+ res)
+      }
+      combineCodeRes(ress, tpe)(mkSig)(using newEnv)
     }
 
     def transformCase(matchCase: LabMatchCase, repl: Map[Code, Code], extra: Extra)(using env: OEnv, inLambda: InLambda): (CodeResMatchCase, Seq[Code]) = {
