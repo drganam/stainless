@@ -93,10 +93,12 @@ trait OCBSL extends Definitions {
   // TODO: !!! supprimer usages !!!
   // TODO: !!! supprimer usages !!!
   case class CodeRes(terminal: Code, terminalHasLambdaDef: Boolean, ctx: (Usages, Code) => (Usages, Code), usages: Usages, env: OEnv) {
-    def selfPlugged: (Usages, Code) = {
+    lazy val selfPlugged: (Usages, Code) = {
       val u = Usages.of(terminal)(using env, InLambda(false))
       ctx(u, terminal)
     }
+
+    override def equals(obj: Any): Boolean = sys.error("Do not use equality on CodeRes")
   }
 
   case class CodeResMatchCase(mc: LabMatchCase, usages: Usages, hasLambdaDef: Boolean) // Usages provenant de guard et rhs plugged
@@ -224,8 +226,7 @@ trait OCBSL extends Definitions {
   def codeOfExprsBound(e1: Expr, e2: Expr, e3: Expr, consTpe: Type)(cons: (Code, Code, Code) => Signature)(using env: OEnv, inLambda: InLambda): CodeRes =
     codeOfExprsBound(Seq(e1, e2, e3), consTpe) { case Seq(c1, c2, c3) => cons(c1, c2, c3) }
 
-  // TODO: Dire que le nextEnv est appliqué pour le suivant (et pas pr le "current")
-  // TODO: Quid simplif???
+  // TODO: Très mal nommé!!! C'est slmt pour les expr du type C(args) sans control flow etc.
   def codeOfExprsBound(es: Seq[Expr])(cons: Seq[Code] => Code)(using env: OEnv, inLambda: InLambda): CodeRes = {
     given x_x: OEnv = sys.error("Carefully select env")
 
@@ -238,8 +239,9 @@ trait OCBSL extends Definitions {
     combineCodeRes(codeRess)(cons)(using newEnv)
   }
 
-  // TODO: env?
+  // TODO: Très mal nommé!!! C'est slmt pour les expr du type C(args) sans control flow etc.
   def combineCodeRes(codeRess: Seq[CodeRes])(cons: Seq[Code] => Code)(using env: OEnv, inLambda: InLambda): CodeRes = {
+    assert(codeRess.isEmpty || (env eq codeRess.last.env))
     val subterms = codeRess.map(_.terminal)
     val terminalContainsLam = codeRess.exists(_.terminalHasLambdaDef)
     val terminal = cons(subterms)
@@ -250,6 +252,12 @@ trait OCBSL extends Definitions {
 
   def combineCodeRes(codeRess: Seq[CodeRes], tpe: Type)(cons: Seq[Code] => Signature)(using env: OEnv, inLambda: InLambda): CodeRes =
     combineCodeRes(codeRess)(cs => codeOfSig(cons(cs), tpe))
+
+  def combineCodeRes(cr1: CodeRes, tpe: Type)(cons: Code => Signature)(using InLambda): CodeRes =
+    combineCodeRes(Seq(cr1)) { case Seq(c1) => codeOfSig(cons(c1), tpe) } (using cr1.env)
+
+  def combineCodeRes(cr1: CodeRes, cr2: CodeRes, tpe: Type)(cons: (Code, Code) => Signature)(using InLambda): CodeRes =
+    combineCodeRes(Seq(cr1, cr2)) { case Seq(c1, c2) => codeOfSig(cons(c1, c2), tpe) } (using cr2.env)
 
   def idCtx(u: Usages, c: Code): (Usages, Code) = (u, c)
 
@@ -332,6 +340,7 @@ trait OCBSL extends Definitions {
     }
   }
 
+  // TODO: Très mal nommé!!! C'est slmt pour les expr du type C(args) sans control flow etc.
   def combinedBindingCtx(terminal: Code, terminalHasLam: Boolean)
                         (ctxs: Seq[(Usages, Code) => (Usages, Code)])
                         (incSubOccurrences: Usages => Usages)
@@ -1189,27 +1198,256 @@ trait OCBSL extends Definitions {
   def codePurity(c: Code)(using OEnv, InLambda): Purity = sigPurity.codePurity(c)
   def sigPurity(sig: Signature, tpe: Type)(using OEnv, InLambda): Purity = sigPurity.sigPurity(sig, tpe)
 
-
-  private val topLvlSimplifier = new TopLevelSimplifier
-
   // TODO
   def simplifyTopLvl(sig: Signature, tpe: Type)(using OEnv): Signature = sig // topLvlSigSimp.transform(sig, tpe, Map.empty, ())
 
-  def simplifyTopLvl(c: CodeRes)(using InLambda): CodeRes = {
-    ???
-    /*
-    // TODO: Ok?
-    // TODO: Ok?
-    // TODO: Ok?
-    val c2 = topLvlSimplifier.transform(c.terminal, Map.empty, ())(using c.env)
-    // TODO: Ok?
-    // TODO: Ok?
-    // TODO: Ok?
-    val ctx = combinedBindingCtx(c2.terminal, c2.terminalHasLambdaDef)(Seq(c.ctx, c2.ctx))(identity)(using c.env)
-    CodeRes(c2.terminal, c2.terminalHasLambdaDef, ctx, c2.usages, c2.env)
-    */
-  }
+  // TODO: Peut importe la pureté pour les simplifs, parce que les ctx vont garantir un bind si nécessaire, n'est-ce pas?
+  // TODO: Peut importe la pureté pour les simplifs, parce que les ctx vont garantir un bind si nécessaire, n'est-ce pas?
+  def simplifyTopLvl(lab: Label, children: Seq[CodeRes], tpe: Type)(using env: OEnv, inLambda: InLambda): CodeRes = {
+    lazy val zero = codeOfIntLit(0, tpe)
+    lazy val one = codeOfIntLit(1, tpe)
 
+    val lastEnv = if (children.isEmpty) env else children.last.env
+
+    (lab, children) match {
+      case (Label.Var(v), Seq()) =>
+        val c = substByLet(v).getOrElse(codeOfVarId(v))
+        CodeRes.of(c, termHasLambdaDef = false)
+
+      case (Label.Lit(l), Seq()) => CodeRes.of(codeOfSig(mkLit(l), tpe), termHasLambdaDef = false)
+
+      case (Label.Assume | Label.Assert | Label.Require, Seq(pred, body)) =>
+        if (pred.terminal == trueCode) {
+          // TODO: Est-ce vraiment le bindingCtx qu'on souhaite???
+          // val ctx = combinedBindingCtx(body.terminal, body.terminalHasLambdaDef)(Seq(pred.ctx, body.ctx))(identity)(using body.env)
+          // TODO: Ctx ok? Ne souhaiterait-on pas bind?
+          val ctx = foldCtxs(Seq(pred.ctx, body.ctx))
+          CodeRes(body.terminal, body.terminalHasLambdaDef, ctx, body.usages, body.env)
+        } else {
+          CodeRes.assumeLike(pred, body, tpe)((p, b) => Signature(lab, Seq(p, b)))
+        }
+
+      case (Label.Ensuring, Seq(body, pred)) =>
+        // Ici, on utilise pred.selfPlugged car l'Ensuring construit self plug le predicate
+        code2sig(pred.selfPlugged._2) match {
+          case Signature(Label.Lambda(Seq(_)), Seq(`trueCode`)) => body
+          case _ => CodeRes.ensuring(body, pred, tpe)
+        }
+
+      case (Label.IfExpr, Seq(cond, thenn, els)) =>
+        val pCond = codePurity(cond.terminal)
+        lazy val thennPgd = thenn.selfPlugged._2
+        lazy val elsPgd = els.selfPlugged._2
+        lazy val pThen = codePurity(thennPgd)
+        lazy val pEls = codePurity(elsPgd)
+
+        // TODO: On peut faire des trucs comme ifExpr
+        val fstTry: Option[CodeRes] = {
+          if (pCond.isPure) {
+            // TODO: Ok? Ici, on combine les ctx et on abondonne le "selfPlugged"
+            if (cond.terminal == trueCode && pEls.isPure) {
+              // TODO: Ctx ok? Ne souhaiterait-on pas bind?
+              val ctx = foldCtxs(Seq(cond.ctx, thenn.ctx))
+              // TODO: termContainsLam ok?
+              Some(CodeRes(thenn.terminal, cond.terminalHasLambdaDef || thenn.terminalHasLambdaDef, ctx, thenn.usages, thenn.env))
+            } else if (cond.terminal == falseCode && pThen.isPure) {
+              // TODO: Ctx ok? Ne souhaiterait-on pas bind?
+              val ctx = foldCtxs(Seq(cond.ctx, els.ctx))
+              // TODO: termContainsLam ok?
+              Some(CodeRes(els.terminal, cond.terminalHasLambdaDef || els.terminalHasLambdaDef, ctx, els.usages, els.env))
+            } else if (thennPgd == elsPgd) {
+              assert(pThen == pEls)
+              assert(thenn.terminalHasLambdaDef == els.terminalHasLambdaDef)
+              // TODO: Ctx ok? Ne souhaiterait-on pas bind?
+              val ctx = foldCtxs(Seq(cond.ctx, thenn.ctx))
+              // TODO: termContainsLam ok?
+              Some(CodeRes(thenn.terminal, cond.terminalHasLambdaDef || thenn.terminalHasLambdaDef, ctx, thenn.usages, thenn.env))
+            }
+            else None
+          } else None
+        }
+        def sndTry: CodeRes = (code2sig(thennPgd), code2sig(elsPgd)) match {
+          // TODO: A revisiter une fois que l'on a ces conjuncts, etc.
+          /*
+          case (Signature(Label.IfExpr, Seq(cond2, thenn2, elze2)), _) if elze == elze2 =>
+            val combinedCond = conjunct(Seq(cond, cond2))
+            val c2 = codeOfSig(mkIfExpr(combinedCond, thenn2, elze2), tpe)
+            val c3 = withIncreasedDepth(1)(transform(c2, repl, ()))
+            code2sig(c3)
+          case (_, Signature(Label.IfExpr, Seq(cond2, thenn2, elze2))) if thenn == thenn2 =>
+            val combinedCond = simplifiedDisjunction(Seq(cond, cond2))
+            val c2 = codeOfSig(mkIfExpr(combinedCond, thenn2, elze2), tpe)
+            val c3 = withIncreasedDepth(1)(transform(c2, repl, ()))
+            code2sig(c3)
+          */
+          case _ => CodeRes.ifExpr(cond, thenn, els, tpe)
+        }
+        fstTry.getOrElse(sndTry)
+
+      case (Label.IsConstructor(adt, id), Seq(e)) =>
+        isConstructor(e.terminal, adt, id) match {
+          case Some(b) =>
+            // TODO: termHasLambda?
+            CodeRes(b2c(b), false, e.ctx, e.usages, e.env)
+          case None =>
+            combineCodeRes(e, tpe)(mkIsCtor(_, adt, id))
+        }
+
+      case (Label.ADTSelector(adt, ctor, sel), Seq(e)) =>
+        code2sig(e.terminal) match {
+          case Signature(Label.ADT(id, _), args) =>
+            assert(id == ctor.id, "woot? les ids ne correspondent pas!!!!")
+            val index = ctor.definition.selectorID2Index(sel)
+            // Le résultat de la selection
+            val selRes = args(index)
+            CodeRes(selRes, isLambda(selRes), e.ctx, e.usages, e.env)
+          case _ => combineCodeRes(e, tpe)(mkADTSelector(_, adt, ctor, sel))
+        }
+
+      case (Label.ADT(id, tps), args) =>
+        // Simplification de ADT(base.fld1, base.fld2, etc.) en base si base est de meme nature que l'adt construite
+        val ctor: TypedADTConstructor = getConstructor(id, tps)
+        assert(ctor.fields.size == args.size)
+
+        def sameBase(i: Int, baseSoFar: Option[Code]): Option[Code] = {
+          if (i == args.size) baseSoFar
+          else {
+            val fldId: Identifier = ctor.fields(i).id
+            code2sig(args(i).terminal) match {
+              // TODO: Orig fait e.getType == adt.getType, mais nous on fait ctor == ctor2, est-ce que ça va aussi?
+              case Signature(Label.ADTSelector(_, ctor2, sel), Seq(base))
+                if fldId == sel && ctor == ctor2 &&
+                  baseSoFar.forall(_ == base) &&
+                  isConstructor(base, ADTType(id, tps), id) == Some(true) =>
+                sameBase(i + 1, Some(base))
+              case _ => None // L'aventure se termine ici
+            }
+          }
+        }
+
+        sameBase(0, None) match {
+          case Some(base) => CodeRes(base, false, foldCtxs(args.map(_.ctx)), Usages.empty, lastEnv)
+          case None => combineCodeRes(args, tpe)(mkADT(id, tps, _))(using lastEnv)
+        }
+
+      case (Label.TupleSelect(ii), Seq(e)) =>
+        val i = ii - 1
+        code2sig(e.terminal) match {
+          case Signature(Label.Tuple, args) =>
+            val selRes = args(i)
+            CodeRes(selRes, isLambda(selRes), e.ctx, e.usages, e.env)
+          case _ => combineCodeRes(e, tpe)(mkTupleSelect(_, ii))
+        }
+
+      // TODO: A revisiter une fois qu'on aura inlineLambda
+      case (Label.Application, callee +: args) =>
+        code2sig(callee.terminal) match {
+//          case Signature(Label.Lambda(params), Seq(body)) =>
+//            assert(args.size == params.size)
+//            val inlined = inlineLambda(params.zip(args), body)
+//            code2sig(inlined)
+          case _ => combineCodeRes(children, tpe) { case cCallee +: cArgs => mkApp(cCallee, cArgs) } (using lastEnv)
+        }
+
+      case (lab@(Label.Equals | Label.GreaterEquals | Label.LessEquals | Label.LessThan | Label.GreaterThan), Seq(e1, e2)) =>
+        val (resIfEq, mkSig: ((Code, Code) => Signature)) = lab match {
+          case Label.Equals => (trueCode, mkEquals)
+          case Label.GreaterEquals => (trueCode, mkGreaterEquals)
+          case Label.LessEquals => (trueCode, mkLessEquals)
+          case Label.LessThan => (falseCode, mkLessThan)
+          case Label.GreaterThan => (falseCode, mkGreaterThan)
+        }
+        if (e1.terminal == e2.terminal) CodeRes(resIfEq, false, foldCtxs(Seq(e1.ctx, e2.ctx)), Usages.empty, e2.env)
+        else combineCodeRes(e1, e2, tpe)(mkSig)
+
+      case (Label.UMinus, Seq(e)) =>
+        code2sig(e.terminal) match {
+          case Signature(Label.UMinus, Seq(e2)) => CodeRes(e2, false, e.ctx, Usages.empty, e.env)
+          case _ => combineCodeRes(e, tpe)(mkUMinus)
+        }
+
+      case (Label.Plus, Seq(e1, e2)) =>
+        lazy val ctx = foldCtxs(Seq(e1.ctx, e2.ctx))
+        if (e1.terminal == zero) CodeRes(e2.terminal, false, ctx, Usages.empty, e2.env)
+        else if (e2.terminal == zero) CodeRes(e1.terminal, false, ctx, Usages.empty, e2.env)
+        else combineCodeRes(e1, e2, tpe)(mkPlus)
+
+      case (Label.Minus, Seq(e1, e2)) =>
+        if (e1.terminal == e2.terminal) CodeRes(zero, false, foldCtxs(Seq(e1.ctx, e2.ctx)), Usages.empty, e2.env)
+        else combineCodeRes(e1, e2, tpe)(mkMinus)
+
+      case (Label.Times, Seq(e1, e2)) =>
+        lazy val ctx = foldCtxs(Seq(e1.ctx, e2.ctx))
+        if (e1.terminal == zero || e2.terminal == zero) CodeRes(zero, false, ctx, Usages.empty, e2.env)
+        else if (e1.terminal == one) CodeRes(e2.terminal, false, ctx, Usages.empty, e2.env)
+        else if (e2.terminal == one) CodeRes(e1.terminal, false, ctx, Usages.empty, e2.env)
+        else combineCodeRes(e1, e2, tpe)(mkTimes)
+
+      case (lab@(Label.Division | Label.Remainder | Label.Modulo), Seq(e1, e2)) =>
+        lazy val ctx = foldCtxs(Seq(e1.ctx, e2.ctx))
+        val (resIfEq, mkSig: ((Code, Code) => Signature)) = lab match {
+          case Label.Division => (one, mkDivision)
+          case Label.Remainder => (zero, mkRemainder)
+          case Label.Modulo => (zero, mkModulo)
+        }
+        if (opts.assumeChecked && e2.terminal != zero && e1.terminal == zero) CodeRes(zero, false, ctx, Usages.empty, e2.env)
+        else if (opts.assumeChecked && e2.terminal != zero && e1.terminal == e2.terminal) CodeRes(resIfEq, false, ctx, Usages.empty, e2.env)
+        else combineCodeRes(e1, e2, tpe)(mkSig)
+
+      case (Label.BVNot, Seq(e)) =>
+        code2sig(e.terminal) match {
+          case Signature(Label.BVNot, Seq(e2)) => CodeRes(e2, false, e.ctx, Usages.empty, e.env)
+          case _ => combineCodeRes(e, tpe)(mkBVNot)
+        }
+
+      case (Label.BVAnd, Seq(e1, e2)) =>
+        lazy val ctx = foldCtxs(Seq(e1.ctx, e2.ctx))
+        if (e1.terminal == e2.terminal) CodeRes(e1.terminal, false, ctx, Usages.empty, e2.env)
+        else if (e1.terminal == zero || e2.terminal == zero) CodeRes(zero, false, ctx, Usages.empty, e2.env)
+        else combineCodeRes(e1, e2, tpe)(mkBVAnd)
+
+      case (Label.BVOr, Seq(e1, e2)) =>
+        lazy val ctx = foldCtxs(Seq(e1.ctx, e2.ctx))
+        if (e1.terminal == e2.terminal) CodeRes(e1.terminal, false, ctx, Usages.empty, e2.env)
+        else if (e1.terminal == zero) CodeRes(e2.terminal, false, ctx, Usages.empty, e2.env)
+        else if (e2.terminal == zero) CodeRes(e1.terminal, false, ctx, Usages.empty, e2.env)
+        else combineCodeRes(e1, e2, tpe)(mkBVOr)
+
+      case (Label.BVXor, Seq(e1, e2)) =>
+        lazy val ctx = foldCtxs(Seq(e1.ctx, e2.ctx))
+        if (e1.terminal == e2.terminal) CodeRes(zero, false, ctx, Usages.empty, e2.env)
+        else if (e1.terminal == zero) CodeRes(e2.terminal, false, ctx, Usages.empty, e2.env)
+        else if (e2.terminal == zero) CodeRes(e1.terminal, false, ctx, Usages.empty, e2.env)
+        else combineCodeRes(e1, e2, tpe)(mkBVXor)
+
+      case (lab@(Label.BVShiftLeft | Label.BVAShiftRight | Label.BVLShiftRight), Seq(e1, e2)) =>
+        val mkSig: ((Code, Code) => Signature) = lab match {
+          case Label.BVShiftLeft => mkBVShiftLeft
+          case Label.BVAShiftRight => mkBVAShiftRight
+          case Label.BVLShiftRight => mkBVLShiftRight
+        }
+        if (e2.terminal == zero) CodeRes(e1.terminal, false, foldCtxs(Seq(e1.ctx, e2.ctx)), Usages.empty, e2.env)
+        else combineCodeRes(e1, e2, tpe)(mkSig)
+
+      case (Label.MatchExpr(pats), scrut +: guardRhs) =>
+        assert(2 * pats.size == guardRhs.size)
+//        val (guards, rhss) = guardRhs.grouped(2).map { case Seq(guard, rhs) => (guard, rhs) }.toSeq.unzip
+//        val cases = pats.zip(guards).zip(rhss).map {
+//          case ((pat, guard), rhs) => LabMatchCase(pat, guard, rhs)
+//        }
+        ???
+
+      // Sans simplification
+      case (Label.Let(v), Seq(e, body)) => CodeRes.let(v, e, body, canSubst = !isLambda(e.terminal))
+      case (Label.Decreases, Seq(measure, body)) => CodeRes.assumeLike(measure, body, tpe)(mkDecreases)
+      case (Label.Choose(v), Seq(pred)) => CodeRes.lambdaLike(pred, tpe, isActuallyLambda = false)(mkWickedChoose(v, _))
+      case (Label.Forall(vs), Seq(pred)) => CodeRes.lambdaLike(pred, tpe, isActuallyLambda = false)(mkForall(vs, _))
+      case (Label.Lambda(vs), Seq(body)) => CodeRes.lambdaLike(body, tpe, isActuallyLambda = true)(mkLambda(vs, _))
+      case (Label.FunctionInvocation(id, tps), args) => combineCodeRes(args, tpe)(mkFunInvoc(id, tps, _))(using lastEnv)
+      case (Label.Annotated(flags), Seq(e)) => combineCodeRes(e, tpe)(mkAnnot(_, flags))
+      case (Label.Or, disjs) => ??? // TODO: il semblerait qu'on soit dans l'impasse ici?
+    }
+  }
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -1343,7 +1581,7 @@ trait OCBSL extends Definitions {
           // TODO: On peut faire des trucs comme ifExpr
           val fstTry: Option[CodeRes] = {
             if (pCond.isPure) {
-              if (pElse.isPure && cond == trueCode) Some(untransformed(elze))
+              if (pElse.isPure && cond == trueCode) Some(untransformed(thenn))
               else if (pThen.isPure && cond == falseCode) Some(untransformed(elze))
               else if (thenn == elze) {
                 assert(pThen == pElse)
@@ -1537,7 +1775,7 @@ trait OCBSL extends Definitions {
           val p1 = codePurity(e1)
           val p2 = codePurity(e2)
           if (opts.assumeChecked && e2 != zero && e1 == zero && p2.isPure) { assert(p1.isPure); zeroSig }
-          else if (opts.assumeChecked && e2 != zero && e1 == e2 && p1.isPure) { assert(p2.isPure); oneSig }
+          else if (opts.assumeChecked && e2 != zero && e1 == e2 && p1.isPure) ??? // { assert(p2.isPure); oneSig }
           else sig
 
         case Signature(Label.BVNot, Seq(e)) =>
