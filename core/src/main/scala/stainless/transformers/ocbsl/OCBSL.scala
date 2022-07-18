@@ -5,6 +5,7 @@ package ocbsl
 import inox.solvers
 
 // TODO: Certains Or ne semble pas correctement être flattened
+// TODO: Pr les usgs, si on drop certaines parties, l'usg calculé du ctx n'est pas "mis à jour"...
 trait OCBSL extends Definitions {
   val opts: solvers.PurityOptions
 
@@ -105,22 +106,43 @@ trait OCBSL extends Definitions {
 
     def derived(newTerminal: Code)(using InLambda): CodeRes = derived(newTerminal, isLambda(newTerminal)) // TODO: !!!!
 
-    def derived(newTerminal: Code, newTermHasLambdaDef: Boolean)(using InLambda): CodeRes = code2sig(newTerminal) match {
-      case Signature(lab@(Label.Assume | Label.Assert | Label.Require | Label.Decreases | Label.Ensuring | Label.Let(_)), _) =>
-        sys.error(s"Tried to derive from a code with label $lab, which is not a terminal")
-      // TODO: Deriving var ok?
-      case Signature(Label.Lit(_) | Label.Var(_), Seq()) => copy(terminal = newTerminal, false)
-      case Signature(lab, children) =>
-        // TODO: Suivant le terminal, ce sera p-e un autre ctx qu'il faudra rajouter et c'est pour ça qu'on laisse ce println, pr voir avec quoi ce truc est appelé
-        println(s"Dérivé de $lab")
-        // TODO: Ok???
-        // TODO: Ok???
-        // TODO: Ok???
-        // TODO: Ok???
-        given OEnv = env
-        // TODO: Pour les var et les lit, un id ctx suffit
-        val newCtx = combinedBindingCtx(newTerminal, newTermHasLambdaDef)(Seq(ctx))(_.incOccurrences(children))
-        CodeRes(newTerminal, newTermHasLambdaDef, newCtx, Usages.empty, env)
+    def derived(newTerminal: Code, newTermHasLambdaDef: Boolean)(using InLambda): CodeRes = {
+      // TODO: Ok???
+      // TODO: Ok???
+      given OEnv = env
+
+      code2sig(newTerminal) match {
+        case Signature(lab@(Label.Assume | Label.Assert | Label.Require | Label.Decreases | Label.Ensuring | Label.Let(_)), _) =>
+          sys.error(s"Tried to derive from a code with label $lab, which is not a terminal")
+        // TODO: Deriving var ok?
+        case Signature(Label.Lit(_) | Label.Var(_), Seq()) => copy(terminal = newTerminal, false)
+
+        case Signature(lab@(Label.Lambda(_) | Label.Choose(_) | Label.Forall(_)), Seq(body)) =>
+          println(s"Dérivé de $lab  (ancien terminal = ${code2sig(terminal)})")
+          // TODO: Comme lambdaLike. Ok?
+          val newCtx = combinedUnboundCtx(newTerminal)(Seq(ctx))(_.incOccurrence(body))
+          CodeRes(newTerminal, newTermHasLambdaDef, newCtx, Usages.empty, env)
+
+        // TODO: Quid ifExpr qui fait un plugged ??? Est-ce qd même ok??? On dirait que non, puisqu'il faut ++ les usgs du self plugged!!!
+        //  --> suppose que l'incrément se fera "automatiquement" par le ctx actuel?
+        // TODO: Quid ifExpr qui fait un plugged ??? Est-ce qd même ok??? On dirait que non, puisqu'il faut ++ les usgs du self plugged!!!
+        //  --> suppose que l'incrément se fera "automatiquement" par le ctx actuel?
+        // TODO: Quid ifExpr qui fait un plugged ??? Est-ce qd même ok??? On dirait que non, puisqu'il faut ++ les usgs du self plugged!!!
+        //  --> suppose que l'incrément se fera "automatiquement" par le ctx actuel?
+        // TODO: Quid ifExpr qui fait un plugged ??? Est-ce qd même ok??? On dirait que non, puisqu'il faut ++ les usgs du self plugged!!!
+        //  --> suppose que l'incrément se fera "automatiquement" par le ctx actuel?
+        // TODO: Quid ifExpr qui fait un plugged ??? Est-ce qd même ok??? On dirait que non, puisqu'il faut ++ les usgs du self plugged!!!
+        //  --> suppose que l'incrément se fera "automatiquement" par le ctx actuel?
+        // TODO: Quid ifExpr qui fait un plugged ??? Est-ce qd même ok??? On dirait que non, puisqu'il faut ++ les usgs du self plugged!!!
+        //  --> suppose que l'incrément se fera "automatiquement" par le ctx actuel?
+        case Signature(lab, children) =>
+          // TODO: Suivant le terminal, ce sera p-e un autre ctx qu'il faudra rajouter et c'est pour ça qu'on laisse ce println, pr voir avec quoi ce truc est appelé
+          println(s"Dérivé de $lab  (ancien terminal = ${code2sig(terminal)})")
+          // TODO: Pour les var et les lit, un id ctx suffit
+          // TODO: Inc children ok???
+          val newCtx = combinedBindingCtx(newTerminal, newTermHasLambdaDef)(Seq(ctx))(_.incOccurrences(children))
+          CodeRes(newTerminal, newTermHasLambdaDef, newCtx, Usages.empty, env)
+      }
     }
 
     override def equals(obj: Any): Boolean = sys.error("Do not use equality on CodeRes")
@@ -219,23 +241,36 @@ trait OCBSL extends Definitions {
 //    codeOfSig(mkOr(disj), BoolTy)
   }
 
+  enum BindingCase {
+    // In let v = e in body...
+    case Ellidable // ... the `e` (and the let) can be removed (that is, we can just return `body`, `e` is pure)
+    case Inlinable // ... the `e` can be inlined or bound, but it definitely appears in `body` (may or may not be impure)
+    case MustBind // ... the `e` must be bound (appears in `body` if pure, may not appear if impure)
+  }
+
   // TODO: Puisque c'est un terminal, comment peut-il "contenir" un lambda? -> p.ex. par le moyen de if, assume, etc. tout ces trucs
-  def needsBinding(terminal: Code, terminalHasLambdaDef: Boolean, occ: Occurrence)(using env: OEnv, inLambda: InLambda): Boolean = {
+  def needsBinding(terminal: Code, terminalHasLambdaDef: Boolean, occ: Occurrence)(using env: OEnv, inLambda: InLambda): BindingCase = {
     code2sig(terminal) match {
-      case Signature(Label.Lit(_) | Label.Var(_), _) => false
+      case Signature(Label.Lit(_) | Label.Var(_), _) => BindingCase.Ellidable
       case _ =>
-        if (env.forceBinding) true
+        if (env.forceBinding) BindingCase.MustBind
         else {
           lazy val isPure = codePurity(terminal).isPure
           occ match {
-            case Occurrence.Many => true
-            case Occurrence.Zero => !isPure // Si une expr impure n'apparait pas dans le body, on ne peut pas l'éliminer, il faut donc le bind
-            case Occurrence.Once(_, inLambda) if isPure => inLambda && terminalHasLambdaDef
+            case Occurrence.Many => BindingCase.MustBind
+            case Occurrence.Zero =>
+              // Si une expr impure n'apparait pas dans le body, on ne peut pas l'éliminer, il faut donc le bind
+              if (!isPure) BindingCase.MustBind
+              else BindingCase.Ellidable
+            case Occurrence.Once(_, inLambda) if isPure =>
+              if (inLambda && terminalHasLambdaDef) BindingCase.MustBind
+              else BindingCase.Inlinable
             case Occurrence.Once(inEnv, inLambda) =>
               // inEnv représente l'env. actif lors de l'occurrence de `terminal` dans le trou que l'on s'apprête à compléter.
               // S'il est différent de l'env ou `terminal` est introduit, alors on a besoin de let-bind, car inline
               // une expr impure après un PC est incorrect.
-              (inEnv != env) || inLambda
+              if ((inEnv != env) || inLambda) BindingCase.MustBind
+              else BindingCase.Inlinable
           }
         }
     }
@@ -298,11 +333,11 @@ trait OCBSL extends Definitions {
     // TODO: Dire "elidable"
     def letCtx(vId: VarId, e: CodeRes, b: CodeRes, canSubst: Boolean)(using inLambda: InLambda)(u: Usages, c: Code): (Usages, Code) = {
       val (u2, c2) = b.ctx(u, c)
-      val eOcc = u2(e.terminal)
-      // Pour `e`, on utilise l'environnement dans lequel il a été construit, donc re.env
-      // TODO: !canSubst trop contraignant. On devrait faire un cas special pour les lambdas
-      // TODO: Rappel: pr les lambdas, le code utilisé est celui de vId, pas de re.terminal!
-      if (!canSubst || needsBinding(e.terminal, e.terminalHasLambdaDef, eOcc)(using e.env)) {
+      // TODO: Rappel: pr les lambdas, le code utilisé est celui de vId, pas de e.terminal!
+      val eOcc = u2(if (canSubst) e.terminal else codeOfVarId(vId))
+      // Pour `e`, on utilise l'environnement dans lequel il a été construit, donc e.env
+      val bdgCase = needsBinding(e.terminal, e.terminalHasLambdaDef, eOcc)(using e.env)
+      if (bdgCase == BindingCase.MustBind || (!canSubst && bdgCase == BindingCase.Inlinable)) {
         val cLet = codeOfSig(mkLet(vId, e.terminal, c2), codeTpe(c2))
         val u3 = u2.setTo(e.terminal, Occurrence.Once(e.env, inLambda.v))
         e.ctx(u3, cLet)
@@ -329,12 +364,14 @@ trait OCBSL extends Definitions {
     }
 
     // For Lambda, Choose and Forall
-    def lambdaLike(body: CodeRes, tpe: Type, isActuallyLambda: Boolean)(mkSig: Code => Signature)(using OEnv, InLambda): CodeRes = {
-      // TODO: Usages "perdu". Devrait-on les "reutiliser" en utilisant combinedCtx comme pour Or?
-      val (_, cBody) = body.selfPlugged
+    def lambdaLike(body: CodeRes, tpe: Type, isActuallyLambda: Boolean)(mkSig: Code => Signature)(using env: OEnv, inLambda: InLambda): CodeRes = {
+      val (usgs, cBody) = body.selfPlugged
       val cLamLike = codeOfSig(mkSig(cBody), tpe)
-      // TODO: Default env ok?
-      of(cLamLike, isActuallyLambda)
+      // TODO: Ok?
+      // TODO: Souhaite-on vraiment bind des lambdas etc. en cas d'égalité???
+      // val ctx = combinedBindingCtx(cLamLike, isActuallyLambda)(Seq(idCtx))(_ ++ usgs)
+      val ctx = combinedUnboundCtx(cLamLike)(Seq(idCtx))(_ ++ usgs)
+      CodeRes(cLamLike, isActuallyLambda, ctx, usgs, env)
     }
 
     // For Assume, Assert, Require and Decreases
@@ -349,14 +386,16 @@ trait OCBSL extends Definitions {
       CodeRes(body.terminal, body.terminalHasLambdaDef, ctx, body.usages, body.env)
     }
 
-    def ensuring(body: CodeRes, pred: CodeRes, tpe: Type)(using OEnv, InLambda): CodeRes = {
-      // TODO: Usages "perdu". Devrait-on les "reutiliser" en utilisant combinedCtx comme pour Or?
-      val (_, cBody) = body.selfPlugged
-      val (_, cPred) = pred.selfPlugged
+    def ensuring(body: CodeRes, pred: CodeRes, tpe: Type)(using env: OEnv, inLambda: InLambda): CodeRes = {
+      val (uBody, cBody) = body.selfPlugged
+      val (uPred, cPred) = pred.selfPlugged
       val cEns = codeOfSig(mkEnsuring(cBody, cPred), tpe)
-      // TODO: termHasLambdaDef?
-      // TODO: default env ok?
-      CodeRes.of(cEns, termHasLambdaDef = false)
+      // TODO: Ok?
+      val ctx = combinedUnboundCtx(cEns)(Seq(idCtx))(_ ++ uBody ++ uPred)
+      CodeRes(cEns, false, ctx, Usages.empty, env)
+//      // TODO: termHasLambdaDef?
+//      // TODO: default env ok?
+//      CodeRes.of(cEns, termHasLambdaDef = false)
     }
 
     def matchExpr(scrut: CodeRes, cases: Seq[CodeResMatchCase], tpe: Type)(using InLambda): CodeRes = {
@@ -377,7 +416,7 @@ trait OCBSL extends Definitions {
     assert(!isLambda(terminal), "woot?? On n'est pas sensé construire un lambda avec cette fn!!!")
     val terminalOcc = u(terminal)
 
-    if (needsBinding(terminal, terminalHasLam, terminalOcc)) {
+    if (needsBinding(terminal, terminalHasLam, terminalOcc) == BindingCase.MustBind) {
       val bdg = idOfVariable(Variable.fresh("bdg", codeTpe(terminal)))
       val bound = codeOfSig(mkLet(bdg, terminal, c), codeTpe(c))
       val u2 = incSubOccurrences(u).setTo(terminal, Occurrence.Once(env, inLambda.v))
@@ -391,6 +430,19 @@ trait OCBSL extends Definitions {
     }
   }
 
+  // TODO: Très mal nommé!!!
+  def combinedUnboundCtx(terminal: Code)
+                        (ctxs: Seq[(Usages, Code) => (Usages, Code)])
+                        (incSubOccurrences: Usages => Usages)
+                        (u: Usages, c: Code): (Usages, Code) = {
+    val terminalOcc = u(terminal)
+    val u2 = {
+      if (terminalOcc.isZero) u
+      else incSubOccurrences(u)
+    }
+    foldCtxs(ctxs)(u2, c)
+  }
+
   def foldCtxs(ctxs: Seq[(Usages, Code) => (Usages, Code)])(u: Usages, c: Code): (Usages, Code) =
     ctxs.foldRight((u, c)) { case (ctx, (uAcc, cAcc)) => ctx(uAcc, cAcc) }
 
@@ -398,7 +450,7 @@ trait OCBSL extends Definitions {
   // TODO: occurrences: terminal slmt???
   def sigOfExpr(e: Expr)(using env: OEnv, inLambda: InLambda): CodeRes = {
     val tpe = e.getType
-    e match {
+    val res = e match {
       case v: Variable =>
         val vId = idOfVariable(v)
         val c = substByLet(vId).getOrElse(codeOfVarId(vId))
@@ -545,6 +597,7 @@ trait OCBSL extends Definitions {
         println("computeSignature: Do not know how to handle "+e)
         ???
     }
+    simplifyTopLvl(res)
   }
 
   def signatureOfPatternExpr(subScrut: Code, scrutTpe: Type, pat: Pattern)(using env: OEnv, inLambda: InLambda): (LabelledPattern, Seq[(VarId, Code)], Seq[Code]) = {
