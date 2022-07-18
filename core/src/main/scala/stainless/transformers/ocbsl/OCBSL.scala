@@ -91,58 +91,72 @@ trait OCBSL extends Definitions {
     def setTo(c: Code, o: Occurrence): Usages = Usages(c2u + (c -> o))
   }
 
+  private val unplugMap = mutable.Map.empty[Code, (CodeRes, Usages)]
+
   // OEnv: En gros tous les "let bindings" des arguments pour terminal (qui peuvent être elided)
   // terminalHasLambdaDef: contient ou est un lambda soit meme
-  // TODO: !!! supprimer usages !!!
-  // TODO: !!! supprimer usages !!!
-  // TODO: !!! supprimer usages !!!
   case class CodeRes(terminal: Code, terminalHasLambdaDef: Boolean, ctx: (Usages, Code) => (Usages, Code), usages: Usages, env: OEnv) {
+    assert(CodeRes.isTerminal(terminal), s"Gag: $terminal n'est pas un terminal (est un ${code2sig(terminal)})")
+
     lazy val selfPlugged: (Usages, Code) = {
       val u = Usages.of(terminal)(using env, InLambda(false))
       val (u2, c) = ctx(u, terminal)
       assert(codeTpe(terminal) == codeTpe(c), s"${codeTpe(terminal)} != ${codeTpe(c)}")
+      unplugMap += c -> (this, u2) // TODO: Quid collision?
       (u2, c)
     }
 
     def derived(newTerminal: Code)(using InLambda): CodeRes = derived(newTerminal, isLambda(newTerminal)) // TODO: !!!!
 
     def derived(newTerminal: Code, newTermHasLambdaDef: Boolean)(using InLambda): CodeRes = {
-      // TODO: Ok???
+      def derivable(c: Code): Boolean = code2sig(c) match {
+        case Signature(Label.Lambda(_) | Label.Choose(_) | Label.Forall(_) | Label.IfExpr | Label.MatchExpr(_) | Label.Ensuring, _) => false
+        case _ => true
+      }
+
       // TODO: Ok???
       given OEnv = env
+      val newSig = code2sig(newTerminal)
+      println(s"Dérivé de $newSig  (ancien terminal = ${code2sig(terminal)})")
 
-      code2sig(newTerminal) match {
-        case Signature(lab@(Label.Assume | Label.Assert | Label.Require | Label.Decreases | Label.Ensuring | Label.Let(_)), _) =>
-          sys.error(s"Tried to derive from a code with label $lab, which is not a terminal")
-        // TODO: Deriving var ok?
-        case Signature(Label.Lit(_) | Label.Var(_), Seq()) => copy(terminal = newTerminal, false)
+      // D'abord, on s'assure que l'ancien term. soit ok.
+      // TODO: En a-t-on vraiment besoin?
+//      code2sig(c) match {
+//        case Signature(Label.Lambda(_) | Label.Choose(_) | Label.Forall(_) | Label.IfExpr | Label.MatchExpr(_) | Label.Ensuring, _) =>
+//          if (newSig.children.contains())
+//        case _ => ()
+//      }
 
-        case Signature(lab@(Label.Lambda(_) | Label.Choose(_) | Label.Forall(_)), Seq(body)) =>
-          println(s"Dérivé de $lab  (ancien terminal = ${code2sig(terminal)})")
-          // TODO: Comme lambdaLike. Ok?
-          val newCtx = combinedUnboundCtx(newTerminal)(Seq(ctx))(_.incOccurrence(body))
-          CodeRes(newTerminal, newTermHasLambdaDef, newCtx, Usages.empty, env)
+//      assert(derivable(terminal), s"Ne peut pas dériver à partir de ${code2sig(terminal)}")
+      // On valide le nouveau
+      assert(CodeRes.isTerminal(newTerminal), s"Gag: le nouveau terminal $newTerminal n'est pas un terminal (est un ${code2sig(newTerminal)})")
+      // assert(derivable(newTerminal), s"Ne peut dériver pour le nouveau terminal ${code2sig(newTerminal)}")
 
-        // TODO: Quid ifExpr qui fait un plugged ??? Est-ce qd même ok??? On dirait que non, puisqu'il faut ++ les usgs du self plugged!!!
-        //  --> suppose que l'incrément se fera "automatiquement" par le ctx actuel?
-        // TODO: Quid ifExpr qui fait un plugged ??? Est-ce qd même ok??? On dirait que non, puisqu'il faut ++ les usgs du self plugged!!!
-        //  --> suppose que l'incrément se fera "automatiquement" par le ctx actuel?
-        // TODO: Quid ifExpr qui fait un plugged ??? Est-ce qd même ok??? On dirait que non, puisqu'il faut ++ les usgs du self plugged!!!
-        //  --> suppose que l'incrément se fera "automatiquement" par le ctx actuel?
-        // TODO: Quid ifExpr qui fait un plugged ??? Est-ce qd même ok??? On dirait que non, puisqu'il faut ++ les usgs du self plugged!!!
-        //  --> suppose que l'incrément se fera "automatiquement" par le ctx actuel?
-        // TODO: Quid ifExpr qui fait un plugged ??? Est-ce qd même ok??? On dirait que non, puisqu'il faut ++ les usgs du self plugged!!!
-        //  --> suppose que l'incrément se fera "automatiquement" par le ctx actuel?
-        // TODO: Quid ifExpr qui fait un plugged ??? Est-ce qd même ok??? On dirait que non, puisqu'il faut ++ les usgs du self plugged!!!
-        //  --> suppose que l'incrément se fera "automatiquement" par le ctx actuel?
-        case Signature(lab, children) =>
-          // TODO: Suivant le terminal, ce sera p-e un autre ctx qu'il faudra rajouter et c'est pour ça qu'on laisse ce println, pr voir avec quoi ce truc est appelé
-          println(s"Dérivé de $lab  (ancien terminal = ${code2sig(terminal)})")
-          // TODO: Pour les var et les lit, un id ctx suffit
-          // TODO: Inc children ok???
-          val newCtx = combinedBindingCtx(newTerminal, newTermHasLambdaDef)(Seq(ctx))(_.incOccurrences(children))
-          CodeRes(newTerminal, newTermHasLambdaDef, newCtx, Usages.empty, env)
+      // TODO !!! Quid des comptes des children des children etc. ????
+      // TODO !!! Quid des comptes des children des children etc. ????
+      // TODO !!! Quid des comptes des children des children etc. ????
+      // TODO !!! Quid des comptes des children des children etc. ????
+      // TODO !!! Quid des comptes des children des children etc. ????
+      // TODO !!! Quid des comptes des children des children etc. ????
+      val newUsgs = newSig.children
+        .map(c => unplugMap.get(c).map(_._2).getOrElse(Usages.of(c)))
+        .foldLeft(Usages.empty)(_ ++ _)
+
+      val newCtx = newSig match {
+        case Signature(Label.Lambda(_) | Label.Choose(_) | Label.Forall(_), Seq(body)) =>
+          // val (bodyUnpl, bodyUsgs) = unplugMap(body)  // TODO: bodyUsgs comprend body dans les usages. ok?
+          combinedUnboundCtx(newTerminal)(Seq(ctx))(_ ++ newUsgs)
+//        case Signature(Label.IfExpr, Seq(cond, thenn, els)) =>
+//          ???
+//        case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
+//          ???
+        case Signature(Label.Ensuring, Seq(body, pred)) =>
+          combinedUnboundCtx(newTerminal)(Seq(ctx))(_ ++ newUsgs)
+        case Signature(_, _) =>
+          combinedBindingCtx(newTerminal, newTermHasLambdaDef)(Seq(ctx))(_ ++ newUsgs)
+//          combinedBindingCtx(newTerminal, newTermHasLambdaDef)(Seq(ctx))(_.incOccurrences(children))
       }
+      CodeRes(newTerminal, newTermHasLambdaDef, newCtx, Usages.empty, env)
     }
 
     override def equals(obj: Any): Boolean = sys.error("Do not use equality on CodeRes")
@@ -233,6 +247,7 @@ trait OCBSL extends Definitions {
     val disj1 = disj.filter(_ != falseCode).distinct
     if (disj1.isEmpty) falseCode
     else if (disj1.size == 1) disj1.head
+    // TODO: mayDrop trop contraignant! On peut utiliser le short circuiting: si on a qqchose de true et que tout ce qu'on a parcouru est pure, on peut tout drop et retourner true
     else if (mayDrop && (disj1.contains(trueCode) || checkForContradiction(disj1))) trueCode
     else {
       val disj2 = if (mayReorder) disj1.sorted else disj1
@@ -243,7 +258,7 @@ trait OCBSL extends Definitions {
 
   enum BindingCase {
     // In let v = e in body...
-    case Ellidable // ... the `e` (and the let) can be removed (that is, we can just return `body`, `e` is pure)
+    case Elidable // ... the `e` (and the let) can be removed (that is, we can just return `body`, `e` is pure)
     case Inlinable // ... the `e` can be inlined or bound, but it definitely appears in `body` (may or may not be impure)
     case MustBind // ... the `e` must be bound (appears in `body` if pure, may not appear if impure)
   }
@@ -251,7 +266,7 @@ trait OCBSL extends Definitions {
   // TODO: Puisque c'est un terminal, comment peut-il "contenir" un lambda? -> p.ex. par le moyen de if, assume, etc. tout ces trucs
   def needsBinding(terminal: Code, terminalHasLambdaDef: Boolean, occ: Occurrence)(using env: OEnv, inLambda: InLambda): BindingCase = {
     code2sig(terminal) match {
-      case Signature(Label.Lit(_) | Label.Var(_), _) => BindingCase.Ellidable
+      case Signature(Label.Lit(_) | Label.Var(_), _) => BindingCase.Elidable
       case _ =>
         if (env.forceBinding) BindingCase.MustBind
         else {
@@ -261,7 +276,7 @@ trait OCBSL extends Definitions {
             case Occurrence.Zero =>
               // Si une expr impure n'apparait pas dans le body, on ne peut pas l'éliminer, il faut donc le bind
               if (!isPure) BindingCase.MustBind
-              else BindingCase.Ellidable
+              else BindingCase.Elidable
             case Occurrence.Once(_, inLambda) if isPure =>
               if (inLambda && terminalHasLambdaDef) BindingCase.MustBind
               else BindingCase.Inlinable
@@ -330,6 +345,12 @@ trait OCBSL extends Definitions {
       CodeRes(term, termHasLambdaDef, idCtx, Usages.of(term), env)
     }
 
+    def isTerminal(c: Code): Boolean = code2sig(c) match {
+      // TODO: Ensuring?
+      case Signature(Label.Assume | Label.Assert | Label.Require | Label.Decreases/* | Label.Ensuring*/ | Label.Let(_), _) => false
+      case _ => true
+    }
+
     // TODO: Dire "elidable"
     def letCtx(vId: VarId, e: CodeRes, b: CodeRes, canSubst: Boolean)(using inLambda: InLambda)(u: Usages, c: Code): (Usages, Code) = {
       val (u2, c2) = b.ctx(u, c)
@@ -376,14 +397,18 @@ trait OCBSL extends Definitions {
 
     // For Assume, Assert, Require and Decreases
     def assumeLike(pred: CodeRes, body: CodeRes)(mkSig: (Code, Code) => Signature)(using InLambda): CodeRes = {
-      val ctx = (u: Usages, c: Code) => {
-        val (u2, c2) = body.ctx(u, c)
-        val cAssms = codeOfSig(mkSig(pred.terminal, c2), codeTpe(c2))
-        // TODO: Added usgs ok?
-        val uPred = Usages.of(pred.terminal)(using pred.env)
-        pred.ctx(u2 ++ uPred, cAssms)
+      if (pred.terminal == trueCode) {
+        CodeRes(body.terminal, body.terminalHasLambdaDef, foldCtxs(Seq(pred.ctx, body.ctx)), body.usages, body.env)
+      } else {
+        val ctx = (u: Usages, c: Code) => {
+          val (u2, c2) = body.ctx(u, c)
+          val cAssms = codeOfSig(mkSig(pred.terminal, c2), codeTpe(c2))
+          // TODO: Added usgs ok?
+          val uPred = Usages.of(pred.terminal)(using pred.env)
+          pred.ctx(u2 ++ uPred, cAssms)
+        }
+        CodeRes(body.terminal, body.terminalHasLambdaDef, ctx, body.usages, body.env)
       }
-      CodeRes(body.terminal, body.terminalHasLambdaDef, ctx, body.usages, body.env)
     }
 
     def ensuring(body: CodeRes, pred: CodeRes, tpe: Type)(using env: OEnv, inLambda: InLambda): CodeRes = {
@@ -732,10 +757,29 @@ trait OCBSL extends Definitions {
     }
     val isPure = cArgs.forall(c => codePurity(c).isPure)
     val cOr = simplifiedDisjunction(cArgs, mayDrop = isPure, mayReorder = isPure) // codeOfSig(mkOr(cArgs), tpe)
-    val ctx = combinedBindingCtx(cOr, hasLamDef)(Seq(idCtx))(_ ++ usgs)
-    // Remarque: on retourne l'env original car les PCs des ors ne sont pas retenues hors des disjunctions.
-    // P.ex. dans val x = b1 || b2 || b3 il serait insensé d'avoir !b1 && !b2 && !b3 dans le env de x.
-    CodeRes(cOr, hasLamDef, ctx, usgs ++ Usages.of(cOr), env)
+    /*
+    // TODO: !!!! Voir s'il n'y a pas d'autre endroits susceptible à ce genre de choses !!!!
+    // TODO: !!!! Voir s'il n'y a pas d'autre endroits susceptible à ce genre de choses !!!!
+    // TODO: !!!! Voir s'il n'y a pas d'autre endroits susceptible à ce genre de choses !!!!
+    code2sig(cOr) match {
+      case Signature(Label.Let(v), Seq(e, body)) => ???
+      case Signature(lab@(Label.Lambda(_) | Label.Choose(_) | Label.Forall(_)), Seq(pred, body)) => ???
+      case Signature(Label.Ensuring, Seq(body, pred)) => ???
+    }
+    */
+    unplugMap.get(cOr) match {
+      // TODO: Voir commentaire MatchExpr
+      // TODO: Voir commentaire MatchExpr
+      // TODO: Voir commentaire MatchExpr
+      // TODO: Voir commentaire MatchExpr
+      // TODO: Voir commentaire MatchExpr
+      case Some((cr, _)) => cr // TODO: Mais c'est dégueulasse !!!! Et c'est quoi la justification au juste?????
+      case None =>
+        val ctx = combinedBindingCtx(cOr, hasLamDef)(Seq(idCtx))(_ ++ usgs)
+        // Remarque: on retourne l'env original car les PCs des ors ne sont pas retenues hors des disjunctions.
+        // P.ex. dans val x = b1 || b2 || b3 il serait insensé d'avoir !b1 && !b2 && !b3 dans le env de x.
+        CodeRes(cOr, hasLamDef, ctx, usgs ++ Usages.of(cOr), env)
+    }
   }
 
   // TODO: Voir si on peut pas faire qqchose pr eviter code dup avec pNegNormal
@@ -1275,13 +1319,20 @@ trait OCBSL extends Definitions {
 
     code2sig(cr.terminal) match {
       case Signature(Label.Assume | Label.Assert | Label.Require, Seq(pred, body)) =>
-        if (pred == trueCode) cr.derived(body) else cr
+        sys.error("Quoi????")
+//        if (pred == trueCode) {
+//          val bodyUnpl = unplugMap(body) // TODO: Aucune garantie...
+//          cr.derived(body)
+//        } else cr
 
+      // TODO: A gérer
+      /*
       case Signature(Label.Ensuring, Seq(body, pred)) =>
         code2sig(pred) match {
           case Signature(Label.Lambda(Seq(_)), Seq(`trueCode`)) => cr.derived(body)
           case _ => cr
         }
+      */
 
       case Signature(Label.IfExpr, Seq(cond, thenn, els)) =>
         val pCond = codePurity(cond)
@@ -1292,12 +1343,24 @@ trait OCBSL extends Definitions {
         val fstTry: Option[CodeRes] = {
           if (pCond.isPure) {
             // TODO: Ok? Ici, on combine les ctx et on abondonne le "selfPlugged"
-            if (cond == trueCode && pEls.isPure) Some(cr.derived(thenn))
-            else if (cond == falseCode && pThen.isPure) Some(cr.derived(els))
-            else if (thenn == els) {
+            // TODO: Voir commentaire MatchExpr
+            // TODO: Voir commentaire MatchExpr
+            // TODO: Voir commentaire MatchExpr
+            // TODO: Voir commentaire MatchExpr
+            // TODO: Voir commentaire MatchExpr
+            if ((cond == trueCode && pEls.isPure) || thenn == els) {
+              val thennUnpl = unplugMap(thenn)._1
+              val ctx = foldCtxs(Seq(cr.ctx, thennUnpl.ctx))
+              Some(CodeRes(thennUnpl.terminal, thennUnpl.terminalHasLambdaDef, ctx, Usages.empty, thennUnpl.env))
+            } else if (cond == falseCode && pThen.isPure) {
+              val elsUnpl = unplugMap(els)._1
+              val ctx = foldCtxs(Seq(cr.ctx, elsUnpl.ctx))
+              Some(CodeRes(elsUnpl.terminal, elsUnpl.terminalHasLambdaDef, ctx, Usages.empty, elsUnpl.env))
+              // Some(cr.derived(els))
+            } /*else if (thenn == els) {
               assert(pThen == pEls)
               Some(cr.derived(thenn))
-            }
+            }*/
             else None
           } else None
         }
@@ -1456,7 +1519,14 @@ trait OCBSL extends Definitions {
 
         simplifyCases(cases) match {
           case SimplifiedCases.Empty => sys.error("ah bah la, je sais pas quoi faire...")
-          case SimplifiedCases.ElidableMatchExpr(rhs) => cr.derived(rhs) // TODO: Ok???
+          case SimplifiedCases.ElidableMatchExpr(rhs) =>
+            // TODO: Ok???
+            val rhsUnpl = unplugMap(rhs)._1
+            val ctx = foldCtxs(Seq(cr.ctx, rhsUnpl.ctx))
+            // TODO: Gag: si le case est impure, on va le bind *et* on va mettre le rhs ici!!!!
+            // TODO: Gag: si le case est impure, on va le bind *et* on va mettre le rhs ici!!!!
+            // TODO: Gag: si le case est impure, on va le bind *et* on va mettre le rhs ici!!!!
+            CodeRes(rhsUnpl.terminal, rhsUnpl.terminalHasLambdaDef, ctx, Usages.empty, rhsUnpl.env)
           case SimplifiedCases.Cases(newCases) =>
             val newMatch = codeOfSig(mkMatchExpr(scrut, newCases), tpe)
             cr.derived(newMatch)
@@ -1733,6 +1803,7 @@ trait OCBSL extends Definitions {
     }
   }
 
+  /*
   // TODO: Commentaire à propos de code potentiel dans les labels qui ne sont pas transform
   class CodeTransformer {
     type Extra
@@ -1754,6 +1825,7 @@ trait OCBSL extends Definitions {
 
     def canSubstLet(c: Code): Boolean = !isLambda(c)
 
+    // TODO: revoir si tout est en ordre pour les ctx
     def transformImpl(sig: Signature, tpe: Type, repl: Map[Code, Code], extra: Extra)(using env: OEnv, inLambda: InLambda): CodeRes = sig match {
       case Signature(Label.Var(v), Seq()) =>
         val res = substByLet(v).getOrElse(codeOfVarId(v))
@@ -1803,6 +1875,7 @@ trait OCBSL extends Definitions {
             val newEnv = rdisj.env.withCond(negCodeOf(rdisjPlugged))
             (newEnv, hasLamDefAcc || rdisj.terminalHasLambdaDef, usgsAcc ++ usgs, rdisjsAcc :+ rdisjPlugged)
         }
+        // TODO: Faire comme codeOfDisj
         val cOr = codeOfSig(mkOr(unOrCodes(rdisjs)), tpe)
         val ctx = combinedBindingCtx(cOr, hasLamDef)(Seq(idCtx))(_ ++ usgs)
         CodeRes(cOr, hasLamDef, ctx, usgs ++ Usages.of(cOr), env)
@@ -1867,6 +1940,7 @@ trait OCBSL extends Definitions {
       }
     }
   }
+  */
 
   class CodeTryFolder[E, T](val depthLimit: Option[Int] = None) {
     type Extra
