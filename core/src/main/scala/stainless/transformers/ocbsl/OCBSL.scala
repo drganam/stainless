@@ -21,7 +21,8 @@ trait OCBSL extends Definitions {
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
   case class OEnv(conditions: Set[Code],
-                  letDef: Map[VarId, (Code, Boolean)]) {
+                  letDef: Map[VarId, (Code, Boolean)],
+                  forceBinding: Boolean) {
     def withCond(c: Code): OEnv = copy(conditions = conditions + c)
     def withConds(cs: Set[Code]): OEnv = copy(conditions = conditions ++ cs)
 
@@ -31,14 +32,14 @@ trait OCBSL extends Definitions {
 
     def withLetBounds(vs: Seq[(VarId, Code)])(canSubst: (VarId, Code) => Boolean): OEnv = {
       assert(letDef.keySet.intersect(vs.map(_._1).toSet).isEmpty)
-      OEnv(conditions, letDef ++ vs.map { case (v, c) => v -> (c, canSubst(v, c)) })
+      OEnv(conditions, letDef ++ vs.map { case (v, c) => v -> (c, canSubst(v, c)) }, forceBinding)
     }
 
     def isBound(c: Code): Boolean = letDef.exists(_._2._1 == c)
   }
 
   object OEnv {
-    def empty: OEnv = OEnv(Set.empty, Map.empty)
+    def empty: OEnv = OEnv(Set.empty, Map.empty, false)
   }
 
   case class InLambda(v: Boolean) {
@@ -204,16 +205,15 @@ trait OCBSL extends Definitions {
 
   // TODO: Pk ce truc est fait dans codeOf mais pas dans pDisj?
   // TODO: Et les assms???
-  def simplifiedDisjunction(disj0: Seq[Code])(using OEnv, InLambda): Code = {
+  def simplifiedDisjunction(disj0: Seq[Code], mayDrop: Boolean, mayReorder: Boolean)(using OEnv, InLambda): Code = {
     assert(disj0.forall(c => codeTpe(c) == BoolTy))
     val disj = unOrCodes(disj0)
-    lazy val purity = fold(disj.map(codePurity))
     val disj1 = disj.filter(_ != falseCode).distinct
     if (disj1.isEmpty) falseCode
     else if (disj1.size == 1) disj1.head
-    else if (purity.isPure && (disj1.contains(trueCode) || checkForContradiction(disj1))) trueCode
+    else if (mayDrop && (disj1.contains(trueCode) || checkForContradiction(disj1))) trueCode
     else {
-      val disj2 = if (purity.isPure) disj1.sorted else disj1
+      val disj2 = if (mayReorder) disj1.sorted else disj1
       codeOfSig(mkOr(disj2), BoolTy)
     }
 //    codeOfSig(mkOr(disj), BoolTy)
@@ -224,16 +224,19 @@ trait OCBSL extends Definitions {
     code2sig(terminal) match {
       case Signature(Label.Lit(_) | Label.Var(_), _) => false
       case _ =>
-        lazy val isPure = codePurity(terminal).isPure
-        occ match {
-          case Occurrence.Many => true
-          case Occurrence.Zero => !isPure // Si une expr impure n'apparait pas dans le body, on ne peut pas l'éliminer, il faut donc le bind
-          case Occurrence.Once(_, inLambda) if isPure => inLambda && terminalHasLambdaDef
-          case Occurrence.Once(inEnv, inLambda) =>
-            // inEnv représente l'env. actif lors de l'occurrence de `terminal` dans le trou que l'on s'apprête à compléter.
-            // S'il est différent de l'env ou `terminal` est introduit, alors on a besoin de let-bind, car inline
-            // une expr impure après un PC est incorrect.
-            (inEnv != env) || inLambda
+        if (env.forceBinding) true
+        else {
+          lazy val isPure = codePurity(terminal).isPure
+          occ match {
+            case Occurrence.Many => true
+            case Occurrence.Zero => !isPure // Si une expr impure n'apparait pas dans le body, on ne peut pas l'éliminer, il faut donc le bind
+            case Occurrence.Once(_, inLambda) if isPure => inLambda && terminalHasLambdaDef
+            case Occurrence.Once(inEnv, inLambda) =>
+              // inEnv représente l'env. actif lors de l'occurrence de `terminal` dans le trou que l'on s'apprête à compléter.
+              // S'il est différent de l'env ou `terminal` est introduit, alors on a besoin de let-bind, car inline
+              // une expr impure après un PC est incorrect.
+              (inEnv != env) || inLambda
+          }
         }
     }
   }
@@ -627,10 +630,6 @@ trait OCBSL extends Definitions {
   }
 
   def checkForContradiction(disj: Seq[Code])(using OEnv, InLambda): Boolean = {
-    if (disj.exists(c => !codePurity(c).isPure)) {
-      return false
-    }
-
     // TODO: Relativement different par rapport à l'orig
     val (pos, neg) = disj.foldLeft((Set.empty[Code], Set.empty[Code])) {
       case ((posAcc, negAcc), c) =>
@@ -678,7 +677,8 @@ trait OCBSL extends Definitions {
         val newEnv = re.env.withCond(negCodeOf(rePlugged))
         (newEnv, hasLamDefAcc || re.terminalHasLambdaDef, usgsAcc ++ usgs, cArgsAcc :+ rePlugged)
     }
-    val cOr = simplifiedDisjunction(cArgs) // codeOfSig(mkOr(cArgs), tpe)
+    val isPure = cArgs.forall(c => codePurity(c).isPure)
+    val cOr = simplifiedDisjunction(cArgs, mayDrop = isPure, mayReorder = isPure) // codeOfSig(mkOr(cArgs), tpe)
     val ctx = combinedBindingCtx(cOr, hasLamDef)(Seq(idCtx))(_ ++ usgs)
     // Remarque: on retourne l'env original car les PCs des ors ne sont pas retenues hors des disjunctions.
     // P.ex. dans val x = b1 || b2 || b3 il serait insensé d'avoir !b1 && !b2 && !b3 dans le env de x.
@@ -749,8 +749,10 @@ trait OCBSL extends Definitions {
       // TODO: Quid pureté de rhs???
       // TODO: Pourrait-on envisager de cache env.condition?
       // a ==> b === a && b = a
-      val lhsConj = conjunct(env.conditions.toSeq) // TODO: Set to Seq ok?
-      val rhsLhsConj = conjunct(Seq(lhsConj, rhs))
+      // TODO: Drop+Reorder ok?
+      // TODO: Set to Seq ok?
+      val lhsConj = conjunct(env.conditions.toSeq, mayDrop = true, mayReorder = true)
+      val rhsLhsConj = conjunct(Seq(lhsConj, rhs), mayDrop = true, mayReorder = true)
       rhsLhsConj == lhsConj
     }
   }
@@ -795,9 +797,21 @@ trait OCBSL extends Definitions {
   }
   def varTpe(v: VarId): Type = varId2Var(v).tpe
 
-  def conjunct(conj: Seq[Code])(using OEnv, InLambda): Code = negCodeOf(negatedConjunction(conj))
+  // TODO: Renommer, risque de confusion...
+  def conjunct(conj: Seq[Code])(using OEnv, InLambda): Code = {
+    val isPure = conj.forall(c => codePurity(c).isPure)
+    conjunct(conj, isPure, isPure)
+  }
 
-  def negatedConjunction(conj: Seq[Code])(using OEnv, InLambda): Code= simplifiedDisjunction(conj.map(negCodeOf))
+  def conjunct(conj: Seq[Code], mayDrop: Boolean, mayReorder: Boolean)(using OEnv, InLambda): Code = negCodeOf(negatedConjunction(conj, mayDrop, mayReorder))
+
+  def negatedConjunction(conj: Seq[Code], mayDrop: Boolean, mayReorder: Boolean)(using OEnv, InLambda): Code= simplifiedDisjunction(conj.map(negCodeOf), mayDrop, mayReorder)
+
+  // TODO: Renommer, risque de confusion...
+  def negatedConjunction(conj: Seq[Code])(using OEnv, InLambda): Code= {
+    val isPure = conj.forall(c => codePurity(c).isPure)
+    negatedConjunction(conj, isPure, isPure)
+  }
 
   def codeOfIntLit(lit: BigInt, tpe: Type): Code = codeOfSig(mkLit(intLitOfType(lit, tpe)), tpe)
 
@@ -1088,7 +1102,7 @@ trait OCBSL extends Definitions {
           // TODO: Différencier:
           //    -outer assms et local assms
           //    -outer open bound et local open bound
-          given OEnv = OEnv.empty
+          given OEnv = OEnv.empty.copy(forceBinding = true)
           given InLambda = InLambda(false)
           assert(!visiting.contains(fn))
           assert(!fnBlockedBy.contains(fn))
@@ -1195,8 +1209,8 @@ trait OCBSL extends Definitions {
 
   private val sigPurity = new SigPurity
 
-  def codePurity(c: Code)(using OEnv, InLambda): Purity = sigPurity.codePurity(c)
-  def sigPurity(sig: Signature, tpe: Type)(using OEnv, InLambda): Purity = sigPurity.sigPurity(sig, tpe)
+  def codePurity(c: Code)(using env: OEnv, inLambda: InLambda): Purity = sigPurity.codePurity(c)(using env.copy(forceBinding = true))
+  def sigPurity(sig: Signature, tpe: Type)(using env: OEnv, inLambda: InLambda): Purity = sigPurity.sigPurity(sig, tpe)(using env.copy(forceBinding = true))
 
   // TODO: Peut importe la pureté pour les simplifs, parce que les ctx vont garantir un bind si nécessaire, n'est-ce pas?
   // TODO: Peut importe la pureté pour les simplifs, parce que les ctx vont garantir un bind si nécessaire, n'est-ce pas?
@@ -1419,7 +1433,7 @@ trait OCBSL extends Definitions {
     lazy val isRhsPure = codePurity(matchCase.rhs)(using env.withConds(caseConds.toSet)).isPure
 
     if (caseConds.forall(c => codePurity(c).isPure)) { // TODO: Calcul de la pureté imprécis, on devrait les accumuler...
-      val caseCondsConj = conjunct(caseConds)
+      val caseCondsConj = conjunct(caseConds, mayDrop = true, mayReorder = true) // Puisque tout est pur
       if (caseCondsConj == trueCode) SimplifiedCase.Covered
       else if (caseCondsConj == falseCode && isRhsPure) SimplifiedCase.Unreachable
       else SimplifiedCase.Unchanged(caseConds)
@@ -1551,6 +1565,8 @@ trait OCBSL extends Definitions {
   class SigPurity extends CodeTryFolder[Unit, Purity] {
     override type Extra = Unit
 
+    private val visiting = mutable.Set.empty[Code]
+
     override def tryFoldImpl(sig: Signature, tpe: Type, acc: Purity, extra: Unit)(using env: OEnv, inLambda: InLambda): Either[Unit, Purity] = {
       val p = acc ++ codePurity(codeOfSig(sig, tpe)) // sigPurity(sig, tpe) // Remarque: ++ est lazy sur sa droite, donc si acc est impure, on ne va pas calculer sigPurityIn
       if (p == Impure) Left(())
@@ -1563,6 +1579,10 @@ trait OCBSL extends Definitions {
       // TODO: On pourrait utiliser un "revLetDef" dans env
       if (env.letDef.exists(_._2._1 == c)) Pure
       else {
+        if (visiting(c)) {
+          println(s"!!! Already visited $c  =  ${code2sig(c)}")
+        }
+        visiting += c
         val purity = sigPurity(code2sig(c), codeTpe(c))
         // TODO: Temporaire
         // TODO: Est-ce ok???
@@ -1576,6 +1596,7 @@ trait OCBSL extends Definitions {
               blocking += blocker -> (blockedFns, blockedCodes + c)
             }
         }
+        visiting -= c
         purity
       }
     }
