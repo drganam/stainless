@@ -178,6 +178,18 @@ trait Definitions {
         case Label.Choose(v) => Label.Choose(f(v))
         case Label.Forall(vs) => Label.Forall(vs.map(f))
       }
+      def params: Seq[VarId] = LambdaLike.unapply(l)
+      def replacedParams(newParams: Seq[VarId]): LambdaLike = l match {
+        case Label.Lambda(old) =>
+          assert(old.size == newParams.size)
+          Label.Lambda(newParams)
+        case Label.Choose(_) =>
+          assert(newParams.size == 1)
+          Label.Choose(newParams.head)
+        case Label.Forall(old) =>
+          assert(old.size == newParams.size)
+          Label.Forall(newParams)
+      }
     }
   }
 
@@ -199,6 +211,14 @@ trait Definitions {
       case Lit(_, _) => Seq.empty
       case Unapply(_, _, _, _, sub) => sub.flatMap(_.allPatterns)
     })
+
+    def withBinding(bdg: Option[VarId]): LabelledPattern = this match {
+      case Wildcard(_) => Wildcard(bdg)
+      case ADT(_, id, tps, sub) => ADT(bdg, id, tps, sub)
+      case TuplePattern(_, sub) => TuplePattern(bdg, sub)
+      case Lit(_, lit) => Lit(bdg, lit)
+      case Unapply(_, recs, id, tps, sub) => Unapply(bdg, recs, id, tps, sub)
+    }
   }
 
   case class LabMatchCase(pattern: LabelledPattern, guard: Code, rhs: Code)

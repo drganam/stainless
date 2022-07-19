@@ -1684,52 +1684,59 @@ trait OCBSL extends Definitions {
 
     (new InlineWrapperImpl).transformImpl(in, Map.empty, ())
   }
+  */
 
   // TODO: Cette histoire de assume(...) en début de lambda????
   // TODO: Cette histoire de assume(...) en début de lambda????
   // TODO: Cette histoire de assume(...) en début de lambda????
   // TODO: remarque sur subst dans l'ordre (repr. l'inlining d'argument)
-  def inlineLambda(argsSubst: Seq[(VarId, Code)], body: Code)(using env: OEnv): Code = {
+  def inlineLambda(argsSubst: Seq[(VarId, Code)], body: CodeRes)(using env: OEnv, inLambda: InLambda): CodeRes = {
     // Essentiellement un freshener + simplifyTopLvl a chaque step
-    class InlinerImpl extends CodeTransformer(depthLimit = None) {
+    class InlinerImpl extends CodeTransformer {
       override type Extra = Unit
 
-      override def transformImpl(sig: Signature, tpe: Type, repl: Map[Code, Code], extra: Unit)(using env: OEnv): Signature = sig match {
+      override def transformImpl(sig: Signature, tpe: Type, repl: Map[Code, Code], extra: Unit)(using env: OEnv, inLambda: InLambda): CodeRes = sig match {
         case Signature(Label.Let(v), Seq(e, b)) =>
-          val re = transform(e, repl, ())
           val freshV = freshened(v)
-          val newEnv = env.withLetBound(freshV, re, canSubst = !isLambda(re))
-          val rb = transformImpl(b, repl + (codeOfVarId(v) -> codeOfVarId(freshV)), ())(using newEnv)
-          simplifyTopLvl(mkLet(freshV, re, rb), tpe)
+          // CodeTransformer va se charger de faire la substitution
+          val rec = super.transformImpl(mkLet(freshV, e, b), tpe, repl + (codeOfVarId(v) -> codeOfVarId(freshV)), ())
+          simplifyTopLvl(rec)
 
-        case Signature(Label.Lambda(params), Seq(body)) =>
-          val freshParams = params.map(v => v -> freshened(v))
-          val freshParamsRepl = freshParams.map { case (old, nw) => codeOfVarId(old) -> codeOfVarId(nw) }
-          val rbody = transform(body, repl ++ freshParamsRepl, ())
-          simplifyTopLvl(mkLambda(freshParams.map(_._2), rbody), tpe)
+        case Signature(lab: Label.LambdaLike, Seq(body)) =>
+          val freshParams = lab.params.map(v => v -> freshened(v))
+          val freshParamsRepl = freshParams.map { case (old, nw) => codeOfVarId(old) -> codeOfVarId(nw) }.toMap
+          val newLab = lab.replacedParams(freshParams.map(_._2))
+          val rec = super.transformImpl(mkLambdaLike(newLab, body), tpe, repl ++ freshParamsRepl, ())
+          simplifyTopLvl(rec)
 
-        case Signature(Label.Forall(params), Seq(pred)) =>
-          val freshParams = params.map(v => v -> freshened(v))
-          val freshParamsRepl = freshParams.map { case (old, nw) => codeOfVarId(old) -> codeOfVarId(nw) }
-          val rpred = transform(pred, repl ++ freshParamsRepl, ())
-          simplifyTopLvl(mkForall(freshParams.map(_._2), rpred), tpe)
-
-        case Signature(Label.Choose(v), Seq(pred)) =>
-          val freshV = freshened(v)
-          val rpred = transform(pred, repl + (codeOfVarId(v) -> codeOfVarId(freshV)), ())
-          simplifyTopLvl(mkWickedChoose(freshV, rpred), tpe)
-
-        // Remarque: pas de freshening à faire pour Match parce qu'il n'y a pas de binding à proprement parler
+        case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
+          assert(2 * pats.size == guardRhs.size)
+          // TODO: Ok????
+          // TODO: Ok????
+          // TODO: Ok????
+          // TODO: Ok????
+          // TODO: A tester!!!!
+          // TODO: A tester!!!!
+          // TODO: A tester!!!!
+          // TODO: A tester!!!!
+          val (newPats, freshBdgs) = pats.map(pat => pat.bdg match {
+            case Some(bdg) =>
+              val freshBdg = freshened(bdg)
+              (pat.withBinding(Some(freshBdg)), Some(codeOfVarId(bdg) -> codeOfVarId(freshBdg)))
+            case None => (pat, None)
+          }).unzip
+          val newSig = Signature(Label.MatchExpr(newPats), scrut +: guardRhs)
+          val rec = super.transformImpl(newSig, tpe, repl ++ freshBdgs.flatten.toMap, ())
+          simplifyTopLvl(rec)
 
         case Signature(_, _) =>
-          val rsig = super.transformImpl(sig, tpe, repl, ())
-          simplifyTopLvl(rsig, tpe)
+          val rec = super.transformImpl(sig, tpe, repl, ())
+          simplifyTopLvl(rec)
       }
     }
 
     // TODO: Remarque: inline une lambda peut donner lieu a une expr impure...
-    // TODO: Pureté?
-    val bodyTpe = codeTpe(body)
+    val bodyTpe = codeTpe(body.terminal)
     val freshVars = argsSubst.map { case (v, _) => v -> freshened(v) }
     val freshVarsMap = freshVars.toMap
     val argsSubstMap = argsSubst.toMap
@@ -1742,16 +1749,20 @@ trait OCBSL extends Definitions {
     // TODO: Ok ça va se faire replace, mais ensuite??? Il n'y a pas la subst de letbind qui se fait!!!!
     //    -> Devrait être ok (CodeTransformer se charge)
     val initRepl = freshVars.map { case (old, nw) => codeOfVarId(old) -> codeOfVarId(nw) }.toMap
-    val inlined = (new InlinerImpl).transform(body, initRepl, ())(using initEnv)
-
-    assert(codeTpe(inlined) == bodyTpe)
-    argsSubst.foldRight(inlined) {
-      case ((oldV, arg), rest) =>
-        val newV = freshVarsMap(oldV)
-        codeOfSig(mkLet(newV, arg, rest), bodyTpe)
-    }
+    val inlined = (new InlinerImpl).transform(body.terminal, initRepl, ())(using initEnv)
+    assert(codeTpe(inlined.terminal) == bodyTpe)
+    ???
+    /*
+    // TODO: !!!!! Env incorrect, il faut ajouter les bdgs au fur et à mesure !!!!
+    val bdgsCtx = Ctxs(argsSubst.map { case (oldV, arg) =>
+      val newV = freshVarsMap(oldV)
+      // TODO: Usage ok???
+      // TODO: env ok???
+      Ctx.Let(newV, arg, isLambda(arg), Usages.of(arg), env, isLambda(arg))
+    })
+    CodeRes(inlined.terminal, inlined.terminalHasLambdaDef, bdgsCtx ++ body.ctxs, Usages.empty, inlined.env)
+    */
   }
-  */
 
   def substByLet(v: VarId)(using env: OEnv): Option[Code] = env.letDef.get(v).filter(_._2).map(_._1)
 
@@ -1897,7 +1908,11 @@ trait OCBSL extends Definitions {
 
     def transformImpl(sig: Signature, tpe: Type, repl: Map[Code, Code], extra: Extra)(using env: OEnv, inLambda: InLambda): CodeRes = sig match {
       case Signature(Label.Var(v), Seq()) =>
-        val res = substByLet(v).getOrElse(codeOfVarId(v))
+        // SubstByLet l'emporte sur repl dans le cas où il y a substitution à faire et repl. du code à faire
+        val res = substByLet(v).getOrElse {
+          val c = codeOfVarId(v)
+          repl.getOrElse(c, c)
+        }
         CodeRes.of(res, termHasLambdaDef = false)
 
       case Signature(Label.Let(v), Seq(e, b)) =>
@@ -1914,11 +1929,11 @@ trait OCBSL extends Definitions {
         val rels = transform(els, repl, extra)(using envEls)
         CodeRes.ifExpr(rcond, rthenn, rels, tpe)
 
-      case Signature(lab@(Label.Lambda(_) | Label.Choose(_) | Label.Forall(_)), Seq(body)) =>
+      case Signature(lab: Label.LambdaLike, Seq(body)) =>
         val rbody = transform(body, repl, extra)(using env, inLambda || lab.isLambda)
         CodeRes.lambdaLike(lab, rbody, tpe)
 
-      case Signature(lab@(Label.Assume | Label.Assert | Label.Require | Label.Decreases), Seq(pred, body)) =>
+      case Signature(lab: Label.AssumeLike, Seq(pred, body)) =>
         val rpred = transform(pred, repl, extra)
         val bodyEnv = {
           if (lab.isDecreases) rpred.env
