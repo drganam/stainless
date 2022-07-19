@@ -721,7 +721,8 @@ trait OCBSL extends Definitions {
       case MatchExpr(scrut, cases) =>
         // Ici, on fait qqchose de similaire au IfExpr
         val rscrut = codeOfExpr(scrut)
-        val rcases = signatureOfCases(rscrut.terminal, scrut.getType, cases, Seq.empty)(using rscrut.env)
+        assert(codeTpe(rscrut.terminal) == scrut.getType, s"${codeTpe(rscrut.terminal)} != ${scrut.getType}")
+        val rcases = signatureOfCases(rscrut.terminal, cases, Seq.empty)(using rscrut.env)
         CodeRes.matchExpr(rscrut, rcases, tpe)
 
       case e =>
@@ -731,44 +732,45 @@ trait OCBSL extends Definitions {
     simplifyTopLvl(res)
   }
 
-  def signatureOfPatternExpr(subScrut: Code, scrutTpe: Type, pat: Pattern)(using env: OEnv, inLambda: InLambda): (LabelledPattern, Seq[(VarId, Code)], Seq[Code]) = {
-    val vBinder = idOfVariable(pat.binder.getOrElse(ValDef.fresh("dummyBinder", scrutTpe)).toVariable)
-    val bdgs1 = Seq((vBinder, subScrut))
+  def signatureOfPatternExpr(scrut: Code, pat: Pattern)(using env: OEnv, inLambda: InLambda): (LabelledPattern, Seq[(VarId, Code)], Seq[Code]) = {
+    val bdg: Option[VarId] = pat.binder.map(vd => idOfVariable(vd.toVariable))
+    val bdgs1 = bdg.map(v => Seq((v, scrut))).getOrElse(Seq.empty)
     pat match {
-      case WildcardPattern(_) => (LabelledPattern.Wildcard(subScrut), bdgs1, Seq.empty)
+      case WildcardPattern(_) => (LabelledPattern.Wildcard(bdg), bdgs1, Seq.empty)
 
       case ADTPattern(_, id, tps, subps) =>
         val adt = ADTType(id, tps)
-        val tcons = getConstructor(id, tps)
-        assert(tcons.fields.size == subps.size)
         val conds1 = {
-          if (isConstructor(subScrut, adt,id) == Some(true)) Seq.empty[Code]
-          else Seq(codeOfSig(mkIsCtor(subScrut, adt, id), BoolTy))
+          if (isConstructor(scrut, adt,id) == Some(true)) Seq.empty[Code]
+          else Seq(codeOfSig(mkIsCtor(scrut, adt, id), BoolTy))
         }
-        val (labSubPats, bdgs2, conds2) = tcons.fields.zip(subps).foldLeft((Seq.empty[LabelledPattern], bdgs1, conds1)) {
+        val subscruts = adtSubscrutinees(scrut, adt)
+        assert(subscruts.size == subps.size)
+
+        val (labSubPats, bdgs2, conds2) = subscruts.zip(subps).foldLeft((Seq.empty[LabelledPattern], bdgs1, conds1)) {
           // TODO: Annoté en dropvc?
-          case ((labSubPatAcc, bdgsAcc, condsAcc), (fld, subpat)) =>
-            val newScrut = codeOfSig(mkADTSelector(subScrut, adt, tcons, fld.id), fld.getType)
+          case ((labSubPatAcc, bdgsAcc, condsAcc), (subscrut, subpat)) =>
             // TODO: Env avec conds accumulées ok?
-            val (labSubPat, newBdgs, newConds) = signatureOfPatternExpr(newScrut, fld.getType, subpat)(using env.withConds(condsAcc.toSet))
+            val (labSubPat, newBdgs, newConds) = signatureOfPatternExpr(subscrut, subpat)(using env.withConds(condsAcc.toSet))
             (labSubPatAcc :+ labSubPat, bdgsAcc ++ newBdgs, condsAcc ++ newConds)
         }
-        (LabelledPattern.ADT(subScrut, id, tps, labSubPats), bdgs2, conds2)
+        (LabelledPattern.ADT(bdg, id, tps, labSubPats), bdgs2, conds2)
 
       case TuplePattern(_, subps) =>
-        val TupleType(bases) = scrutTpe
+        val tt@TupleType(bases) = codeTpe(scrut)
         assert(bases.size == subps.size)
-        val (labSubPats, bdgs2, conds) = subps.zipWithIndex.foldLeft((Seq.empty[LabelledPattern], bdgs1, Seq.empty[Code])) {
-          case ((labSubPatAcc, bdgsAcc, condsAcc), (subpat, i)) =>
-            val newScrutTpe = bases(i)
-            val newScrut = codeOfSig(mkTupleSelect(subScrut, i + 1), newScrutTpe)
+        val subscruts = tupleSubscrutinees(scrut, tt)
+        assert(subscruts.size == subps.size)
+
+        val (labSubPats, bdgs2, conds) = subscruts.zip(subps).foldLeft((Seq.empty[LabelledPattern], bdgs1, Seq.empty[Code])) {
+          case ((labSubPatAcc, bdgsAcc, condsAcc), (subscrut, subpat)) =>
             // TODO: Env avec conds accumulées ok?
-            val (labSubPat, newBdgs, newConds) = signatureOfPatternExpr(newScrut, newScrutTpe, subpat)(using env.withConds(condsAcc.toSet))
+            val (labSubPat, newBdgs, newConds) = signatureOfPatternExpr(subscrut, subpat)(using env.withConds(condsAcc.toSet))
             (labSubPatAcc :+ labSubPat, bdgsAcc ++ newBdgs, condsAcc ++ newConds)
         }
-        (LabelledPattern.TuplePattern(subScrut, labSubPats), bdgs2, conds)
+        (LabelledPattern.TuplePattern(bdg, labSubPats), bdgs2, conds)
 
-      case LiteralPattern(_, lit) => (LabelledPattern.Lit(subScrut ,lit), bdgs1, Seq.empty)
+      case LiteralPattern(_, lit) => (LabelledPattern.Lit(bdg ,lit), bdgs1, Seq.empty)
 
       case UnapplyPattern(_, recs, id, tps, subps) =>
         // TODO: !!!! Si on utilise codeOf, ne pas oublier d'utiliser le subst approprié !!!
@@ -776,17 +778,9 @@ trait OCBSL extends Definitions {
     }
   }
 
-  def signatureOfCase(cScrut: Code, scrutTpe: Type, mc: MatchCase)(using env: OEnv, inLambda: InLambda): (CodeResMatchCase, Seq[Code]) = {
+  def signatureOfCase(cScrut: Code, mc: MatchCase)(using env: OEnv, inLambda: InLambda): (CodeResMatchCase, Seq[Code]) = {
     // patConds: sans le guard!
-    val (labPat, bdgs, patConds) = signatureOfPatternExpr(cScrut, scrutTpe, mc.pattern)
-    // TODO: Env bdgs ok????
-    // TODO: Env bdgs ok????
-    // TODO: Env bdgs ok????
-    // TODO: Env bdgs ok????
-    // TODO: Env bdgs ok????
-    // TODO: Env bdgs ok????
-    // TODO: canSubst?
-    // TODO: !!! Si canSubst = false, il faudra faire un freshen d'identifiant p.ex. dans inlineLambda !!!
+    val (labPat, bdgs, patConds) = signatureOfPatternExpr(cScrut, mc.pattern)
     val guardEnv = env.withLetBounds(bdgs, canSubst = true).withConds(patConds.toSet)
     // TODO: On pourrait conserver le ctx des guard pour le body? En gros, qu'on plug le body dans le ctx de guard
 
@@ -803,13 +797,13 @@ trait OCBSL extends Definitions {
     (CodeResMatchCase(labMc, usgsGuard ++ usgsRhs, rrhs.terminalHasLambdaDef), patConds :+ cGuard)
   }
 
-  def signatureOfCases(cScrut: Code, scrutTpe: Type, mcs: Seq[MatchCase], acc: Seq[CodeResMatchCase])
+  def signatureOfCases(cScrut: Code, mcs: Seq[MatchCase], acc: Seq[CodeResMatchCase])
                       (using env: OEnv, inLambda: InLambda): Seq[CodeResMatchCase] = {
     if (mcs.isEmpty) acc
     else {
-      val (newMatchCase, caseConds) = signatureOfCase(cScrut, scrutTpe, mcs.head)
+      val (newMatchCase, caseConds) = signatureOfCase(cScrut, mcs.head)
       val negCaseConds = negatedConjunction(caseConds)
-      signatureOfCases(cScrut, scrutTpe, mcs.tail, acc :+ newMatchCase)(using env.withCond(negCaseConds))
+      signatureOfCases(cScrut, mcs.tail, acc :+ newMatchCase)(using env.withCond(negCaseConds))
     }
   }
 
@@ -1170,34 +1164,26 @@ trait OCBSL extends Definitions {
       case Signature(Label.MatchExpr(pats), cScrut +: cGuardRhs) =>
         assert(2 * pats.size == cGuardRhs.size)
 
-        def convertPattern(pat: LabelledPattern, vds: Map[Code, ValDef]): Pattern = {
-          val bdg = vds.get(pat.scrut)
+
+        def convertPattern(pat: LabelledPattern, usedBdgs: Set[VarId]): Pattern = {
+          val bdg = pat.bdg.filter(usedBdgs).map(v => new ValDef(varId2Var(v)))
           pat match {
             case LabelledPattern.Wildcard(_) => WildcardPattern(bdg)
-            case LabelledPattern.ADT(_, id, tps, sub) => ADTPattern(bdg, id, tps, sub.map(convertPattern(_, vds)))
-            case LabelledPattern.TuplePattern(_, sub) => TuplePattern(bdg, sub.map(convertPattern(_, vds)))
+            case LabelledPattern.ADT(_, id, tps, sub) => ADTPattern(bdg, id, tps, sub.map(convertPattern(_, usedBdgs)))
+            case LabelledPattern.TuplePattern(_, sub) => TuplePattern(bdg, sub.map(convertPattern(_, usedBdgs)))
             case LabelledPattern.Lit(_, lit) => LiteralPattern(bdg, lit)
             case LabelledPattern.Unapply(_, recs, id, tps, sub) => ???
           }
         }
 
         def uncodeOfCase(pat: LabelledPattern, cGuard: Code, cRhs: Code): (Pattern, RevRes, RevRes) = {
-          val allPats = pat.allPatterns
-          val scrutBdgs = allPats.zipWithIndex.map {
-            case (pat, i) =>
-              val vId = idOfVariable(Variable.fresh(s"bdg$i", codeTpe(pat.scrut)))
-              vId -> pat.scrut
-          }
+          val scrutBdgs = allScrutinees(cScrut, pat)
           val newRenv = renv.withLetBounds(scrutBdgs)
           val guard = uncodeOf(cGuard)(using newRenv)
           val rhs = uncodeOf(cRhs)(using newRenv)
           // On retire les scrut. binding qui sont inutiles.
-          val scrutVds = scrutBdgs.filter { case (v, _) => guard.used(v) || rhs.used(v) }
-            .map { case (v, c) =>
-              val vd = new ValDef(varId2Var(v))
-              c -> vd
-            }.toMap
-          (convertPattern(pat, scrutVds), guard, rhs)
+          val usedBdgs = scrutBdgs.map(_._1).filter(v => guard.used(v) || rhs.used(v)).toSet
+          (convertPattern(pat, usedBdgs), guard, rhs)
         }
         val (guards, rhss) = cGuardRhs.grouped(2).map { case Seq(guard, rhs) => (guard, rhs) }.toSeq.unzip
         val scrut = uncodeOf(cScrut)
@@ -1348,12 +1334,49 @@ trait OCBSL extends Definitions {
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+//  def adtSubscrutinee(scrut: Code, adt: ADTType, fld: ValDef): Code = {
+//    val tcons = getConstructor(adt.id, adt.tps)
+//    assert(tcons.fields.contains(fld))
+//    codeOfSig(mkADTSelector(scrut, adt, tcons, fld.id), fld.getType)
+//  }
+
+  def adtSubscrutinees(scrut: Code, adt: ADTType): Seq[Code] = {
+    val tcons = getConstructor(adt.id, adt.tps)
+    tcons.fields.map(fld => codeOfSig(mkADTSelector(scrut, adt, tcons, fld.id), fld.getType))
+  }
+
+  def tupleSubscrutinees(scrut: Code, tt: TupleType): Seq[Code] = {
+    tt.bases.zipWithIndex.map { case (base, i) => codeOfSig(mkTupleSelect(scrut, i + 1), base) }
+  }
+
+  def allScrutinees(scrut: Code, pat: LabelledPattern): Seq[(VarId, Code)] = {
+    val slf = pat.bdg.map(_ -> scrut).toSeq
+    pat match {
+      case LabelledPattern.Wildcard(_) | LabelledPattern.Lit(_, _) => slf
+      case LabelledPattern.ADT(_, id, tps, subps) =>
+        val subscruts = adtSubscrutinees(scrut, ADTType(id, tps))
+        assert(subscruts.size == subps.size)
+        slf ++ subscruts.zip(subps).flatMap {
+          case (subscrut, subp) => allScrutinees(subscrut, subp)
+        }
+      case LabelledPattern.TuplePattern(_, subps) =>
+        val tt@TupleType(bases) = codeTpe(scrut)
+        assert(bases.size == subps.size)
+        val subscruts = tupleSubscrutinees(scrut, tt)
+        assert(subscruts.size == subps.size)
+        slf ++ subscruts.zip(subps).flatMap {
+          case (subscrut, subp) => allScrutinees(subscrut, subp)
+        }
+      case LabelledPattern.Unapply(scrut0, recs, id, tps, sub) => sys.error("Oh non, un Unapply :(")
+    }
+  }
+
   // TODO: Ordre ok???
   // TODO: Ordre ok???
   // TODO: Ordre ok???
-  def collectPatternConds(pat: LabelledPattern, recursive: Boolean)(using env: OEnv, inLambda: InLambda): Seq[Code] = pat match {
-    case LabelledPattern.Wildcard(_) => Seq.empty
-    case LabelledPattern.ADT(scrut, id, tps, subps) =>
+  def collectPatternConds(scrut: Code, pat: LabelledPattern, recursive: Boolean)(using env: OEnv, inLambda: InLambda): Seq[Code] = pat match {
+    case LabelledPattern.Wildcard(_) | LabelledPattern.Lit(_, _) => Seq.empty
+    case LabelledPattern.ADT(_, id, tps, subps) =>
       val adt = ADTType(id, tps)
       val tcons = getConstructor(id, tps)
       assert(tcons.fields.size == subps.size)
@@ -1362,16 +1385,31 @@ trait OCBSL extends Definitions {
         else Seq(codeOfSig(mkIsCtor(scrut, adt, id), BoolTy))
       }
       val subconds = {
-        // TODO: env with cond ok?
-        if (recursive)
-          subps.flatMap(collectPatternConds(_, true)(using env.withConds(patConds.toSet)))
-        else Seq.empty
+        if (recursive) {
+          val subscruts = adtSubscrutinees(scrut, adt)
+          assert(subscruts.size == subps.size)
+          subscruts.zip(subps).flatMap {
+            // TODO: env with cond ok?
+            // TODO: Il faut accumuler les conds dans env!!!
+            case (subscrut, subpat) =>
+              collectPatternConds(subscrut, subpat, true)(using env.withConds(patConds.toSet))
+          }
+        } else Seq.empty
       }
       patConds ++ subconds
     case LabelledPattern.TuplePattern(_, subps) =>
-      if (recursive) subps.flatMap(collectPatternConds(_, true))
+      if (recursive) {
+        val tt@TupleType(bases) = codeTpe(scrut)
+        assert(bases.size == subps.size)
+        val subscruts = tupleSubscrutinees(scrut, tt)
+        assert(subscruts.size == subps.size)
+        subscruts.zip(subps).flatMap {
+          // TODO: Il faut accumuler les conds dans env!!!
+          case (subscrut, subpat) =>
+            collectPatternConds(subscrut, subpat, true)
+        }
+      }
       else Seq.empty
-    case LabelledPattern.Lit(_, _) => Seq.empty
     case LabelledPattern.Unapply(_, recs, id, tps, subps) =>
       sys.error(s"Does not know how to handle $pat")
   }
@@ -1394,17 +1432,18 @@ trait OCBSL extends Definitions {
   }
 
   def replaceIn(pat: LabelledPattern, repl: Map[Code, Code]): LabelledPattern = {
-    val newScrut = replaceIn(pat.scrut, repl)
-    pat match {
-      case LabelledPattern.Wildcard(_) => LabelledPattern.Wildcard(newScrut)
-      case LabelledPattern.ADT(_, id, tps, subps) =>
-        LabelledPattern.ADT(newScrut, id, tps, subps.map(replaceIn(_, repl)))
-      case LabelledPattern.TuplePattern(_, subps) =>
-        LabelledPattern.TuplePattern(newScrut, subps.map(replaceIn(_, repl)))
-      case LabelledPattern.Lit(_, lit) => LabelledPattern.Lit(newScrut, lit)
-      case LabelledPattern.Unapply(_, recs, id, tps, subps) =>
-        sys.error(s"Does not know how to handle $pat")
-    }
+    ???
+//    val newScrut = replaceIn(pat.scrut, repl)
+//    pat match {
+//      case LabelledPattern.Wildcard(_) => LabelledPattern.Wildcard(newScrut)
+//      case LabelledPattern.ADT(_, id, tps, subps) =>
+//        LabelledPattern.ADT(newScrut, id, tps, subps.map(replaceIn(_, repl)))
+//      case LabelledPattern.TuplePattern(_, subps) =>
+//        LabelledPattern.TuplePattern(newScrut, subps.map(replaceIn(_, repl)))
+//      case LabelledPattern.Lit(_, lit) => LabelledPattern.Lit(newScrut, lit)
+//      case LabelledPattern.Unapply(_, recs, id, tps, subps) =>
+//        sys.error(s"Does not know how to handle $pat")
+//    }
   }
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1632,7 +1671,7 @@ trait OCBSL extends Definitions {
         val cases = pats.zip(guards).zip(rhss).map {
           case ((pat, guard), rhs) => LabMatchCase(pat, guard, rhs)
         }
-        simplifyCases(cases) match {
+        simplifyCases(scrut, cases) match {
           case SimplifiedCases.Empty => sys.error("ah bah là, je sais pas quoi faire...")
           case SimplifiedCases.ElidableMatchExpr(rhs) =>
             // TODO: Ok???
@@ -1669,8 +1708,8 @@ trait OCBSL extends Definitions {
     case Cases(res: Seq[LabMatchCase])
   }
 
-  def simplifyCase(matchCase: LabMatchCase)(using env: OEnv, inLambda: InLambda): SimplifiedCase = {
-    val patConds = collectPatternConds(matchCase.pattern, recursive = true)
+  def simplifyCase(scrut: Code, matchCase: LabMatchCase)(using env: OEnv, inLambda: InLambda): SimplifiedCase = {
+    val patConds = collectPatternConds(scrut, matchCase.pattern, recursive = true)
     val caseConds = patConds :+ matchCase.guard
     lazy val isRhsPure = codePurity(matchCase.rhs)(using env.withConds(caseConds.toSet)).isPure
 
@@ -1686,17 +1725,17 @@ trait OCBSL extends Definitions {
     } else SimplifiedCase.Unchanged(caseConds)
   }
 
-  def simplifyCases(cases: Seq[LabMatchCase])(using OEnv, InLambda): SimplifiedCases = {
+  def simplifyCases(scrut: Code, cases: Seq[LabMatchCase])(using OEnv, InLambda): SimplifiedCases = {
     def rec(cases: Seq[LabMatchCase], acc: Seq[LabMatchCase])(using env: OEnv): SimplifiedCases = {
       if (cases.isEmpty) {
         if (acc.isEmpty) SimplifiedCases.Empty
         else SimplifiedCases.Cases(acc)
-      } else simplifyCase(cases.head) match {
+      } else simplifyCase(scrut, cases.head) match {
         case SimplifiedCase.Unreachable => rec(cases.tail, acc)
         case SimplifiedCase.Covered =>
           if (acc.isEmpty) SimplifiedCases.ElidableMatchExpr(cases.head.rhs)
           else {
-            val wildcard = LabMatchCase(LabelledPattern.Wildcard(cases.head.pattern.scrut), cases.head.guard, cases.head.rhs)
+            val wildcard = LabMatchCase(LabelledPattern.Wildcard(cases.head.pattern.bdg), cases.head.guard, cases.head.rhs)
             SimplifiedCases.Cases(acc :+ wildcard)
           }
         case SimplifiedCase.Unchanged(caseConds) =>
@@ -2119,7 +2158,7 @@ trait OCBSL extends Definitions {
         val rscrut = tryFold(scrut, acc, extra)
         pats.zip(guards).zip(rhss).foldLeft(rscrut.map((_, env))) {
           case (Right((acc, env)), ((pat, guard), rhs)) =>
-            val patConds = collectPatternConds(pat, recursive = true)
+            val patConds = collectPatternConds(scrut, pat, recursive = true)
             for {
               rpat <- tryFoldSeq(patConds, acc, extra)
               rguard <- tryFold(guard, rpat, extra)(using env.withConds(patConds.toSet))

@@ -165,15 +165,13 @@ trait Definitions {
 
   case class Signature(label: Label, children: Seq[Code])
 
-  // TODO: "scrut" sert à la fois de scrut et de binder. En gros, cela réfère au node qui est scrutineed
-  //  (pour les subpattern, ce sera un node a.c. un ADTSelector/TupleSelect etc.)
-  enum LabelledPattern(val scrut: Code) {
-    case Wildcard(scrut0: Code) extends LabelledPattern(scrut0)
-    case ADT(scrut0: Code, id: Identifier, tps: Seq[Type], sub: Seq[LabelledPattern]) extends LabelledPattern(scrut0)
-    case TuplePattern(scrut0: Code, sub: Seq[LabelledPattern]) extends LabelledPattern(scrut0)
-    case Lit[T](scrut0: Code, lit: Literal[T]) extends LabelledPattern(scrut0)
+  enum LabelledPattern(val bdg: Option[VarId]) {
+    case Wildcard(scrut0: Option[VarId]) extends LabelledPattern(scrut0)
+    case ADT(scrut0: Option[VarId], id: Identifier, tps: Seq[Type], sub: Seq[LabelledPattern]) extends LabelledPattern(scrut0)
+    case TuplePattern(scrut0: Option[VarId], sub: Seq[LabelledPattern]) extends LabelledPattern(scrut0)
+    case Lit[T](scrut0: Option[VarId], lit: Literal[T]) extends LabelledPattern(scrut0)
     // TODO: What is recs???
-    case Unapply(scrut0: Code, recs: Seq[Code], id: Identifier, tps: Seq[Type], sub: Seq[LabelledPattern]) extends LabelledPattern(scrut0)
+    case Unapply(scrut0: Option[VarId], recs: Seq[Code], id: Identifier, tps: Seq[Type], sub: Seq[LabelledPattern]) extends LabelledPattern(scrut0)
 
     import LabelledPattern._
     def allPatterns: Seq[LabelledPattern] = Seq(this) ++ (this match {
