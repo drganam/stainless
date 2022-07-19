@@ -159,6 +159,9 @@ trait Definitions {
       case _ => false
     }
   }
+  object Label {
+    type AssumeLike = Label.Assume.type | Label.Assert.type | Label.Require.type | Label.Decreases.type
+  }
 
   case class Signature(label: Label, children: Seq[Code])
 
@@ -310,4 +313,6 @@ trait Definitions {
 
   def mkError(tpe: Type, description: String): Signature = Signature(Label.Error(tpe, description), Seq.empty)
   def mkNoTree(tpe: Type): Signature = Signature(Label.NoTree(tpe), Seq.empty)
+
+  def mkAssumeLike(kind: Label.AssumeLike, pred: Code, body: Code): Signature = Signature(kind, Seq(pred, body))
 }
