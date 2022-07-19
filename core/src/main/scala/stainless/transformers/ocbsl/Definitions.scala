@@ -161,6 +161,24 @@ trait Definitions {
   }
   object Label {
     type AssumeLike = Label.Assume.type | Label.Assert.type | Label.Require.type | Label.Decreases.type
+
+    type LambdaLike = Label.Lambda | Label.Choose | Label.Forall
+
+    object LambdaLike {
+      def unapply(l: LambdaLike): Seq[VarId] = l match {
+        case Label.Lambda(vs) => vs
+        case Label.Choose(v) => Seq(v)
+        case Label.Forall(vs) => vs
+      }
+    }
+
+    extension (l: LambdaLike) {
+      def map(f: VarId => VarId) = l match {
+        case Label.Lambda(vs) => Label.Lambda(vs.map(f))
+        case Label.Choose(v) => Label.Choose(f(v))
+        case Label.Forall(vs) => Label.Forall(vs.map(f))
+      }
+    }
   }
 
   case class Signature(label: Label, children: Seq[Code])
@@ -313,4 +331,5 @@ trait Definitions {
   def mkNoTree(tpe: Type): Signature = Signature(Label.NoTree(tpe), Seq.empty)
 
   def mkAssumeLike(kind: Label.AssumeLike, pred: Code, body: Code): Signature = Signature(kind, Seq(pred, body))
+  def mkLambdaLike(kind: Label.LambdaLike, body: Code): Signature = Signature(kind, Seq(body))
 }
