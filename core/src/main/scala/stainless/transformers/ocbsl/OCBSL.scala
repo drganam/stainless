@@ -61,6 +61,7 @@ trait OCBSL extends Definitions {
 
   enum Ctx {
     case Id
+    // TODO: Renommer "canSubst" en "substed" ou du moins qqchose pour indiquer si on utilise vId ou eTerm dans le body
     case Let(vId: VarId, eTerminal: Code, eTerminalHasLambda: Boolean, eUsgs: Usages, eEnv: OEnv, canSubst: Boolean)
     case UnboundExpr(terminal: Code, subUsgs: Usages)
     case AssumeLike(lab: Label.AssumeLike, predTerminal: Code, predUsgs: Usages)
@@ -553,7 +554,6 @@ trait OCBSL extends Definitions {
       case v: Variable =>
         val vId = idOfVariable(v)
         val c = substByLet(vId).getOrElse(codeOfVarId(vId))
-        // TODO: termHasLambdaDef ok??? et si v est une ref. à une lambda???
         CodeRes.of(c, termHasLambdaDef = false)
 
       case l: Literal[_] => CodeRes.of(codeOfSig(mkLit(l), tpe), false)
@@ -1529,13 +1529,12 @@ trait OCBSL extends Definitions {
           case _ => cr
         }
 
-      // TODO: A revisiter une fois qu'on aura inlineLambda
       case Signature(Label.Application, callee +: args) =>
         code2sig(callee) match {
-//          case Signature(Label.Lambda(params), Seq(body)) =>
-//            assert(args.size == params.size)
-//            val inlined = inlineLambda(params.zip(args), body)
-//            code2sig(inlined)
+          case Signature(Label.Lambda(params), Seq(body)) =>
+            assert(args.size == params.size)
+            val bodyUnpl = unplugMap(body)._1
+            inlineLambda(cr.ctxs, params.zip(args), bodyUnpl)
           case _ => cr
         }
 
@@ -1694,36 +1693,38 @@ trait OCBSL extends Definitions {
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-  /*
   // TODO: Cette histoire de assume(...) en début de lambda????
   // TODO: Cette histoire de assume(...) en début de lambda????
   // TODO: Cette histoire de assume(...) en début de lambda????
-  def inlineLetBoundLambda(lam: VarId, in: Code)(using env: OEnv): Code = {
-    val (cLam, _) = env.letDef.getOrElse(lam, sys.error("Treachery!!! Lambda not in env!!!"))
+  def inlineLetBoundLambda(lam: VarId, in: Code)(using env: OEnv, inLambda: InLambda): CodeRes = {
+    /*
+    val (cLam, _) = env.letDefMap.getOrElse(lam, sys.error("Trahison!!! Lambda pas dans env!!!"))
     val lamVarIdCode = codeOfVarId(lam)
     val Signature(Label.Lambda(params), Seq(body)) = code2sig(cLam)
+    val bodyUnpl = unplugMap(body)._1
 
-    class InlineWrapperImpl extends CodeTransformer(depthLimit = None) {
+    class InlineWrapperImpl extends CodeTransformer {
       override type Extra = Unit
 
       // TODO: Ok par rapport à repl + let-bound canSubst truc?
-      override def transformImpl(sig: Signature, tpe: Type, repl: Map[Code, Code], extra: Unit)(using env: OEnv): Signature = sig match {
+      override def transformImpl(sig: Signature, tpe: Type, repl: Map[Code, Code], extra: Unit)(using env: OEnv, inLambda: InLambda): CodeRes = sig match {
         case Signature(Label.Application, `lamVarIdCode` +: args) =>
           assert(params.size == args.size)
-          code2sig(inlineLambda(params.zip(args), body))
+          inlineLambda(params.zip(args), bodyUnpl)
         case _ => super.transformImpl(sig, tpe, repl, ())
       }
     }
 
-    (new InlineWrapperImpl).transformImpl(in, Map.empty, ())
+    (new InlineWrapperImpl).transform(in, Map.empty, ())
+    */
+    ???
   }
-  */
 
   // TODO: Cette histoire de assume(...) en début de lambda????
   // TODO: Cette histoire de assume(...) en début de lambda????
   // TODO: Cette histoire de assume(...) en début de lambda????
   // TODO: remarque sur subst dans l'ordre (repr. l'inlining d'argument)
-  def inlineLambda(argsSubst: Seq[(VarId, Code)], body: CodeRes)(using env: OEnv, inLambda: InLambda): CodeRes = {
+  def inlineLambda(outerCtxs: Ctxs, argsSubst: Seq[(VarId, Code)], body: CodeRes)(using env: OEnv, inLambda: InLambda): CodeRes = {
     // Essentiellement un freshener + simplifyTopLvl a chaque step
     class InlinerImpl extends CodeTransformer {
       override type Extra = Unit
@@ -1771,30 +1772,27 @@ trait OCBSL extends Definitions {
     // TODO: Remarque: inline une lambda peut donner lieu a une expr impure...
     val bodyTpe = codeTpe(body.terminal)
     val freshVars = argsSubst.map { case (v, _) => v -> freshened(v) }
-    val freshVarsMap = freshVars.toMap
     val argsSubstMap = argsSubst.toMap
     // Bind the argument to fresh variables
-    val initEnvBindings = freshVars.map {
+    val envsBdgs = freshVars.map {
       case (oldV, newV) => newV -> argsSubstMap(oldV)
     }
-    val initEnv = env.withLetBounds(initEnvBindings)((_, c) => !isLambda(c))
+
+    // TODO: Env par defaut et pas celui du body?
+    val (initEnv, bdgsCtx) = envsBdgs.foldLeft((env, Ctxs.empty)) {
+      case ((env, ctxsAcc), (v, arg)) =>
+        given OEnv = env
+        val isLam = isLambda(arg)
+        // TODO: Usages ok???
+        val ctx = Ctx.Let(v, arg, isLam, Usages.of(arg), env, !isLam)
+        (env.withLetBound(v, arg, !isLam), ctxsAcc :+ ctx)
+    }
     // Map to replace all occurrences of the old parameter with the fresh bindings variables.
-    // TODO: Ok ça va se faire replace, mais ensuite??? Il n'y a pas la subst de letbind qui se fait!!!!
-    //    -> Devrait être ok (CodeTransformer se charge)
     val initRepl = freshVars.map { case (old, nw) => codeOfVarId(old) -> codeOfVarId(nw) }.toMap
     val inlined = (new InlinerImpl).transform(body.terminal, initRepl, ())(using initEnv)
     assert(codeTpe(inlined.terminal) == bodyTpe)
-    ???
-    /*
-    // TODO: !!!!! Env incorrect, il faut ajouter les bdgs au fur et à mesure !!!!
-    val bdgsCtx = Ctxs(argsSubst.map { case (oldV, arg) =>
-      val newV = freshVarsMap(oldV)
-      // TODO: Usage ok???
-      // TODO: env ok???
-      Ctx.Let(newV, arg, isLambda(arg), Usages.of(arg), env, isLambda(arg))
-    })
-    CodeRes(inlined.terminal, inlined.terminalHasLambdaDef, bdgsCtx ++ body.ctxs, Usages.empty, inlined.env)
-    */
+    // TODO: Quel ctxs rajouter???
+    CodeRes(inlined.terminal, inlined.terminalHasLambdaDef, outerCtxs ++ bdgsCtx ++ body.ctxs ++ inlined.ctxs, Usages.empty, inlined.env)
   }
 
   def substByLet(v: VarId)(using env: OEnv): Option[Code] = env.letDefMap.get(v).filter(_._2).map(_._1)
