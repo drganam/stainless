@@ -1376,10 +1376,7 @@ trait OCBSL extends Definitions {
       sys.error(s"Does not know how to handle $pat")
   }
 
-  def isLambda(c: Code): Boolean = code2sig(c) match {
-    case Signature(Label.Lambda(_), _) => true
-    case _ => false
-  }
+  def isLambda(c: Code): Boolean = code2sig(c).label.isLambda
 
   /*
   // TODO: Dire que dans le graphe, cela equivaut a update les references selon repl.
