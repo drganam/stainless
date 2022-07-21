@@ -158,6 +158,11 @@ trait Definitions {
       case Decreases => true
       case _ => false
     }
+
+    def isLiteral: Boolean = this match {
+      case Lit(_) => true
+      case _ => false
+    }
   }
   object Label {
     type AssumeLike = Label.Assume.type | Label.Assert.type | Label.Require.type | Label.Decreases.type
