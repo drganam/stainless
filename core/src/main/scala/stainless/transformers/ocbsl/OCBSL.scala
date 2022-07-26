@@ -40,7 +40,17 @@ trait OCBSL extends Definitions {
       assert(letDefMap.keySet.intersect(vs.map(_._1).toSet).isEmpty)
       // assert(letDefMap.values.map(_._1).toSet.intersect(vs.map(_._2).toSet).isEmpty)
       // val kept = vs.filterNot { case (_, c) => boundSet((c, canSubst)) }.distinctBy(_._2)
-      copy(letDef = letDef ++ vs.map { case (v, c) => (v, c, canSubst) })
+//      val kept = vs.filterNot { case (_, c) => code2sig(c).label.isLitOrVar }
+      val remapped = vs.map { case (v, c) =>
+        code2sig(c) match {
+          // TODO: Non non non, car cela peut générer des let-bind inutiles!!!
+          case Signature(Label.Var(v2), Seq()) if letDefMap.contains(v2) =>
+            val (resC, resCanSubst) = letDefMap(v2)
+            (v, resC, resCanSubst)
+          case _ => (v, c, canSubst)
+        }
+      }
+      copy(letDef = letDef ++ remapped)
     }
 
     def init: OEnv = copy(letDef = letDef.init)
@@ -127,7 +137,7 @@ trait OCBSL extends Definitions {
 //          println("FINISHED INLINING")
           plugged
         } else {
-          assert(!eOcc.isMany)
+          assert(!eOcc.isMany || code2sig(eTerminal).label.isLitOrVar)
           val u2 = {
             if (eOcc.isZero) u
             else u ++ eUsgs
@@ -335,19 +345,26 @@ trait OCBSL extends Definitions {
         }
         CodeRes(newTerminal, newTermHasLambdaDef, ctxs, newUsgs, env)
       } else {
-        assert(!env.isBound(newTerminal))
+        // TODO
+//        assert(!env.isBound(newTerminal))
         val (newCtx, newEnv) = newSig match {
           case Signature(Label.Lambda(_) | Label.Choose(_) | Label.Forall(_) | Label.Ensuring, _) =>
             // val (bodyUnpl, bodyUsgs) = unplugMap(body)  // TODO: bodyUsgs comprend body dans les usages. ok?
             // combinedUnboundCtx(newTerminal)(Seq(ctx))(_ ++ newUsgs)
-            (Ctx.UnboundExpr(newTerminal, newUsgs), env)
+            (Ctxs(Ctx.UnboundExpr(newTerminal, newUsgs)), env)
           case Signature(_, _) =>
-            val bdg = freshVarId("bdg", codeTpe(newTerminal))
-            val newCtx = Ctx.Let(bdg, newTerminal, newTermHasLambdaDef, newUsgs, env, canSubst = true)
-            (newCtx, env.withLetBound(bdg, newTerminal, canSubst = true))
+            // TODO: Pas si une variable/literal
+            // TODO: Ou bien?
+            if (newSig.label.isLitOrVar) {
+              (Ctxs.empty, env)
+            } else {
+              val bdg = freshVarId("bdg", codeTpe(newTerminal))
+              val newCtx = Ctx.Let(bdg, newTerminal, newTermHasLambdaDef, newUsgs, env, canSubst = true)
+              (Ctxs(newCtx), env.withLetBound(bdg, newTerminal, canSubst = true))
+            }
           // combinedBindingCtx(newTerminal, newTermHasLambdaDef)(Seq(ctx))(_ ++ newUsgs)
         }
-        CodeRes(newTerminal, newTermHasLambdaDef, ctxs :+ newCtx, newUsgs, newEnv)
+        CodeRes(newTerminal, newTermHasLambdaDef, ctxs ++ newCtx, newUsgs, newEnv)
       }
     }
   }
@@ -480,7 +497,7 @@ trait OCBSL extends Definitions {
               // 3. Pas dans une lambda
               if (!inLambda && noNewConds && newBdgsArePure) BindingCase.Inlinable
               else {
-                println("Oh non :(")
+//                println("Oh non :(")
                 BindingCase.MustBind
               }
           }
@@ -566,9 +583,14 @@ trait OCBSL extends Definitions {
     def let(vId: VarId, e: CodeRes, b: CodeRes, canSubst: Boolean)(using InLambda): CodeRes = {
       // assert(b.env.letDefMap.get(vId).exists(_._1 == e.terminal), s"${b.env} ne contient pas $vId -> ${e.terminal}")
       assert(!e.env.letDefMap.contains(vId)) // Il ne peut pas contenir vId puisque `e` a été crée sans ce bdg. Mais il peut contenir `e.terminal`
+//      assert(code2sig(e.terminal).label.isLitOrVar || b.env.isBound(e.terminal), s"${b.env} ne bind pas ${e.terminal}")
       assert(b.env.isBound(e.terminal), s"${b.env} ne bind pas ${e.terminal}")
 
-//      if (code2sig(e.terminal).label.isLitOrVar) return b.copy(ctxs = e.ctxs ++ b.ctxs)
+//      if (code2sig(e.terminal).label.isLitOrVar) {
+//        assert(!e.env.isBound(e.terminal), s"${e.terminal}  (${asExplicitSig(e.terminal)}) is bound, it should not")
+//        assert(!e.ctxs.contains(e.terminal), s"${e.terminal}  (${asExplicitSig(e.terminal)}) contained in ctxs, it should not")
+//        return b.copy(ctxs = e.ctxs ++ b.ctxs)
+//      }
 
 //      val alreadyBound = e.env.letDef.exists {
 //        case (_, candC, candCanSubst) => candC == e.terminal && candCanSubst == canSubst
@@ -582,7 +604,7 @@ trait OCBSL extends Definitions {
           Ctxs(e.ctxs.ctxs.init :+ Ctx.Let(vId, eTerm, eTermHasLam, eUsgs, eEnv, canSubst))
 //        case _ => e.ctxs :+ Ctx.Let(vId, e.terminal, e.terminalHasLambdaDef, e.usages, e.env, canSubst)
         case Some(Ctx.UnboundExpr(eTerm, usgs)) if eTerm == e.terminal =>
-          // TODO: Faudrait-il aussi bind tout ce qui est unbound?
+          // TODO: Faudrait-il aussi bind tout ce qui est ds unbound?
 //          println("BAAH BAAH BAAH "+vId +"  "+eTerm + "   "+e.usages)
           assert(e.usages == usgs)
           Ctxs(e.ctxs.ctxs.init :+ Ctx.Let(vId, e.terminal, true, e.usages, e.env, canSubst))
@@ -610,7 +632,7 @@ trait OCBSL extends Definitions {
 
     // For Lambda, Choose and Forall
     def lambdaLike(lab: Label.LambdaLike, body: CodeRes, tpe: Type)(using env: OEnv, inLambda: InLambda): CodeRes = {
-      val (usgs, cBody) = body.selfPlugged
+      val (usgs, cBody) = body.selfPlugged // TODO: Remarque: usgs comprend body.terminal
       val cLamLike = codeOfSig(mkLambdaLike(lab, cBody), tpe)
       // TODO: Ok?
       val ctxs = Ctxs(Ctx.UnboundExpr(cLamLike, usgs))
@@ -1053,7 +1075,7 @@ trait OCBSL extends Definitions {
       varId2Var += vId -> v
       vId
   }
-  def varTpe(v: VarId): Type = varId2Var(v).tpe
+  def varTpe(v: VarId): Type = varId2Var(v).getType // TODO: Apparemment, il y a une difference entre .getType et .tpe (pour les refinement type)
 
   // TODO: Renommer, risque de confusion...
   def conjunct(conj: Seq[Code])(using OEnv, InLambda): Code = {
@@ -1347,6 +1369,7 @@ trait OCBSL extends Definitions {
       purityCache.get(fn) match {
         case Some(true) => Pure
         case Some(false) => Impure
+        case None if fnBlockedBy.contains(fn) => Delayed(fnBlockedBy(fn))
         case None =>
           // TODO: Quid condition venant du simplifier (s'il y en as???)?
           // TODO: Différencier:
@@ -2040,7 +2063,7 @@ trait OCBSL extends Definitions {
     final def transform(c: Code, repl: Map[Code, Code], extra: Extra)(using env: OEnv, inLambda: InLambda): CodeRes = {
       repl.get(c) match {
         case Some(cc) =>
-          assert(env.isBound(cc), "repl fait référence à un code qui n'est pas let-bound!!!")
+          // assert(env.isBound(cc), "repl fait référence à un code qui n'est pas let-bound!!!") // TODO: Et alors?
           // Si cc est une var à un enclosing let, on le remplace par sa définition (pr autant que cela est permis)
           val res = code2sig(cc) match {
             case Signature(Label.Var(v), Seq()) => substByLet(v).getOrElse(cc)
