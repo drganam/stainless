@@ -168,6 +168,11 @@ trait Definitions {
       case Lit(_) | Var(_) => true
       case _ => false
     }
+
+    def isVar: Boolean = this match {
+      case Var(_) => true
+      case _ => false
+    }
   }
   object Label {
     type AssumeLike = Label.Assume.type | Label.Assert.type | Label.Require.type | Label.Decreases.type

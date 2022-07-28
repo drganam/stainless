@@ -25,25 +25,14 @@ trait OCBSLSimplifier { self =>
 //    println("SIMPLIFY:")
 //    println(e)
     val oc = ocbslTL.get()
+    given oc.OEnv = oc.OEnv.empty
+    given oc.Ctxs = oc.Ctxs.empty
 
-    val resE = oc.codeOfExpr(e)(using oc.OEnv.empty, oc.InLambda(false))
-    val codeE = resE.selfPlugged._2
-    //    println("Got code:")
-    //    println(oc.asExplicitSig(code))
+    val resE = oc.codeOfExpr(e)
+    val codeE = resE.selfPlugged(oc.Ctxs.empty)._2
     val res = oc.uncodeOf(codeE)(using oc.RevEnv.empty).expr.copiedFrom(e)
     vcNum += 1
     res
-
-    /*
-    val code = oc.codeOfExpr(e)(using oc.OEnv.empty)
-//    println("Got code:")
-//    println(oc.asExplicitSig(code))
-    val res0 = oc.uncodeOf(code)(using oc.RevEnv.empty)
-    assert(res0.holed.holes.isEmpty, s"Result has holes: ${res0.holed.holes.toSeq.sortBy(_._1)}")
-    val res = res0.holed.expr(Map.empty).copiedFrom(e)
-    vcNum += 1
-    res
-    */
   }
 }
 object OCBSLSimplifier {
