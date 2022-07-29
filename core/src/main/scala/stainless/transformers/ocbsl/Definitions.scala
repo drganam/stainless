@@ -154,6 +154,16 @@ trait Definitions {
       case _ => false
     }
 
+    def isEnsuring: Boolean = this match {
+      case Ensuring => true
+      case _ => false
+    }
+
+    def isLambdaLike: Boolean = this match {
+      case _: Label.LambdaLike => true
+      case _ => false
+    }
+
     def isDecreases: Boolean = this match {
       case Decreases => true
       case _ => false
@@ -173,6 +183,9 @@ trait Definitions {
       case Var(_) => true
       case _ => false
     }
+
+    lazy val hc: Int = java.util.Objects.hash(this.ordinal)
+    override def hashCode(): Int = hc
   }
   object Label {
     type AssumeLike = Label.Assume.type | Label.Assert.type | Label.Require.type | Label.Decreases.type
@@ -208,7 +221,10 @@ trait Definitions {
     }
   }
 
-  case class Signature(label: Label, children: Seq[Code])
+  case class Signature(label: Label, children: Seq[Code]) {
+    lazy val hc: Int = java.util.Objects.hash(label, children)
+    override def hashCode(): Int = hc
+  }
 
   enum LabelledPattern(val bdg: Option[VarId]) {
     case Wildcard(scrut0: Option[VarId]) extends LabelledPattern(scrut0)

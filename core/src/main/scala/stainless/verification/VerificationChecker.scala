@@ -367,19 +367,20 @@ trait VerificationChecker { self =>
         reporter.debug(prettify(simplifiedVC.condition).asString)
       } else {
         reporter.whenDebug(DebugSectionFullVC) { debug =>
-          debug(s"")
-          debug(s" - Original VC:")
-          debug(indent(prettify(origVC.condition).asString, 3))
-          debug(s"")
-          debug(s" - Simplified VC:")
-          debug(indent(prettify(simplifiedVC.condition).asString, 3))
-          debug(s"")
-          debug(s" - Vanilla Simplified VC:")
+          println(s"")
+          println(s" - Original VC:")
+          // debug(indent(prettify(origVC.condition).asString, 3))
+          println(indent(prettify(simplifyLets(removeAssertions(origVC.condition))).asString, 3))
+          println(s"")
+          println(s" - Simplified VC:")
+          println(indent(prettify(simplifiedVC.condition).asString, 3))
+          println(s"")
+          println(s" - Vanilla Simplified VC:")
           val simp = simplifyExpr(
             simplifyLets(removeAssertions(origVC.condition))
           )(using PurityOptions.assumeChecked)
-          debug(indent(prettify(simp).asString, 3))
-          debug(s"")
+          println(indent(prettify(simp).asString, 3))
+          println(s"")
         }
       }
     }
