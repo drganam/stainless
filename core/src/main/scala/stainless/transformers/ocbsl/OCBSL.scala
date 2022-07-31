@@ -64,33 +64,33 @@ trait OCBSL extends Definitions { ocbsl =>
 
   enum Ctx {
     case Id
-    case BoundDef(vId: VarId, terminal: Code, composition: Occurrences)
+    case BoundDef(vId: VarId, terminal: Code)
 //    case UnboundDef(terminal: Code, composition: Occurrences)
     case AssumeLike(lab: Label.AssumeLike, predTerminal: Code)
     case Assumed(cond: Code) // TODO: Dire que c'est p.ex. apres if (cond), où le assume(cond) ds la branche n'est pas nécessaire (car impliqué)
 
     lazy val hc: Int = this match {
       case Ctx.Id => 31
-      case Ctx.BoundDef(v, t, c) => java.util.Objects.hash(v, t, c)
+      case Ctx.BoundDef(v, t) => java.util.Objects.hash(v, t)
       case Ctx.AssumeLike(l, p) => java.util.Objects.hash(l, p)
       case Ctx.Assumed(c) => java.util.Objects.hash(c)
     }
     override def hashCode(): Int = hc
 
     def isBoundDef(c: Code): Boolean = this match {
-      case Ctx.BoundDef(_, c2, _) => c == c2
+      case Ctx.BoundDef(_, c2) => c == c2
       case _ => false
     }
 
     def bindingOf(c: Code): Option[BoundDef] = this match {
-      case b@Ctx.BoundDef(_, c2, _) if c == c2 => Some(b)
+      case b@Ctx.BoundDef(_, c2) if c == c2 => Some(b)
       case _ => None
     }
 
     def varBindingOf(c: Code): Option[VarId] = bindingOf(c).map(_.vId)
 
     def boundTo(v: VarId): Option[Code] = this match {
-      case Ctx.BoundDef(v2, c, _) if v == v2 => Some(c)
+      case Ctx.BoundDef(v2, c) if v == v2 => Some(c)
       case _ => None
     }
   }
@@ -98,12 +98,12 @@ trait OCBSL extends Definitions { ocbsl =>
   case class Ctxs(ctxs: Seq[Ctx]) {
     assert(
       ctxs.forall {
-        case Ctx.BoundDef(_, terminal, _) => !code2sig(terminal).label.isLitOrVar
+        case Ctx.BoundDef(_, terminal) => !code2sig(terminal).label.isLitOrVar
         case _ => true
       }, "Binding de var ou lit")
     assert(
       ctxs.collect {
-        case bd@Ctx.BoundDef(_, _, _) => bd
+        case bd@Ctx.BoundDef(_, _) => bd
       }.groupBy(_.terminal).forall(_._2.size == 1),
       "Double binding")
 
@@ -118,7 +118,7 @@ trait OCBSL extends Definitions { ocbsl =>
     lazy val allCondsSet: Set[Code] = allConds.toSet
 
     lazy val bindings: Seq[(VarId, Code)] = ctxs.collect {
-      case Ctx.BoundDef(v, c, _) => (v, c)
+      case Ctx.BoundDef(v, c) => (v, c)
     }
 
     def pop: Option[(Ctxs, Ctx)] = {
@@ -129,7 +129,7 @@ trait OCBSL extends Definitions { ocbsl =>
 
     def withRemovedBinding(v: VarId): Ctxs = {
       Ctxs(ctxs.filterNot {
-        case Ctx.BoundDef(`v`, _, _) => true
+        case Ctx.BoundDef(`v`, _) => true
         case _ => false
       })
     }
@@ -140,41 +140,43 @@ trait OCBSL extends Definitions { ocbsl =>
 
       def plugCtx(curr: Ctxs, prev: Ctxs, toPlug: Ctx, u: Occurrences, c: Code): (Occurrences, Code) = {
         assert(curr.ctxs == prev.ctxs :+ toPlug)
+        val expl = asExplicitSig(c)
         val uuu = occurrencesOf(c)(using env, curr)
-//        if (u != uuu) {
-//          println("!!! Pas d'égalité")
-//        }
+        if (u != uuu) {
+          val eq = u.c2u.toSet.intersect(uuu.c2u.toSet)
+          val diff = (u.c2u.toSet ++ uuu.c2u.toSet) -- eq
+          println("!!! Pas d'égalité")
+        }
 
         val (u2, c2) = toPlug match {
           case Ctx.Id | Ctx.Assumed(_) => (u, c)
 
-          case Ctx.BoundDef(vId, terminal, composition) =>
+          case Ctx.BoundDef(vId, terminal) =>
             assert(!code2sig(terminal).label.isLitOrVar)
-            assert(composition(terminal).isZero)
-            val expl = asExplicitSig(c)
+            val composition = occurrencesOf(terminal)(using env, prev) // Avec terminal
+            assert(composition(terminal).isOnce)
+            val compWoTerm = composition - terminal
             val isLam = isLambda(terminal)
             // Rappel: pr les lambdas, le code utilisé est celui de vId, pas de e.terminal!
             val defnCode = if (!isLam) terminal else codeOfVarId(vId)
-            assert(composition(defnCode).isZero)
             val definitionOccurrence = u(defnCode)
-            val bdgCase = needsBinding(vId, terminal, composition, definitionOccurrence)(using env, prev)
+            val bdgCase = needsBinding(vId, terminal, compWoTerm, definitionOccurrence)(using env, prev)
 
             val ccc = codeOfVarId(vId)
             val nme = varId2Var(vId).toString
 
-            if (bdgCase == BindingCase.MustBind || isLam) {
+            if (bdgCase == BindingCase.MustBind) {
               val cLet = codeOfSig(mkLet(vId, terminal, c), codeTpe(c))
               // TODO: pr le setTo: y-a-t-il tjrs un sens à cela? parce que de toute façon, on est sensé bind "tout en haut" non?
               // TODO: inCtx: avec ou sans le binding?
-              val u2 = composition ++ u.setTo(defnCode, Occurrence.Once(prev, env.inLambda)) // TODO: Hmm est-ce "vrai"?
+              // TODO: defn ou terminal? Hmm, ce serait plutot terminal, meme pr lambda non?
+              val u2 = compWoTerm ++ u.setTo(terminal, Occurrence.Once(prev, env.inLambda)) // TODO: Hmm est-ce "vrai"?
               (u2, cLet)
             } else if (bdgCase == BindingCase.Inlinable && isLam) {
               println("inlining "+vId + "   " + varId2Var(vId))
               val res = inlineLetBoundLambda(vId, terminal, c)(using env, prev)
               assert(prev.isPrefixOf(res.ctxs))
-              //          val plugged = res.ctxs.plugged(, res.terminal)
-              val (u2, c2) = res.selfPlugged(prev) // .ctxs.plugged(, res.terminal)
-              //          println("FINISHED INLINING")
+              val (u2, c2) = res.selfPlugged(prev)
 //              val u3 = Occurrences(u2.c2u.map {
 //                case (c, Occurrence.Once(inCtxs, inLambda)) =>
 //                  c -> Occurrence.Once(inCtxs.withRemovedBinding(vId), inLambda)
@@ -185,15 +187,18 @@ trait OCBSL extends Definitions { ocbsl =>
               assert(!definitionOccurrence.isMany)
               val u2 = {
                 if (definitionOccurrence.isZero) u
-                else u ++ composition
+                else u ++ compWoTerm
               }
               // TODO: Remettre
-//              val u3 = Occurrences(u2.c2u.map {
-//                case (c, Occurrence.Once(inCtxs, inLambda)) =>
-//                  c -> Occurrence.Once(inCtxs.withRemovedBinding(vId), inLambda)
-//                case (c, occ) => c -> occ
-//              })
-              (u2, c)
+              val u3 = Occurrences(u2.c2u.map {
+                case (c, Occurrence.Once(inCtxs, inLambda)) =>
+                  if (inCtxs != curr && inCtxs != prev) {
+                    println("Hmm ce n'est pas les meme")
+                  }
+                  c -> Occurrence.Once(inCtxs.withRemovedBinding(vId), inLambda)
+                case (c, occ) => c -> occ
+              })
+              (u3, c)
             }
 
           case Ctx.AssumeLike(lab, predTerminal) =>
@@ -201,12 +206,6 @@ trait OCBSL extends Definitions { ocbsl =>
             val c2 = codeOfSig(mkAssumeLike(lab, predTerminal, c), codeTpe(c))
             (u ++ Occurrences.of(predTerminal)(using env, prev), c2)
         }
-//        val u3 = Occurrences(u2.c2u.map {
-//          case (c, Occurrence.Once(inCtxs, inLambda)) =>
-//            // assert(inCtxs == curr || inCtxs == prev)
-//            c -> Occurrence.Once(prev, inLambda) // TODO: !!!! pas si apparait "plus loin" !!!
-//          case (c, occ) => c -> occ
-//        })
         (u2, c2)
       }
 
@@ -235,20 +234,9 @@ trait OCBSL extends Definitions { ocbsl =>
 
     def isPrefixOf(that: Ctxs): Boolean = ocbsl.isPrefixOf(ctxs, that.ctxs)
 
-    def addBoundDef(v: VarId, df: Code, composition: Occurrences): Ctxs = {
-      assert(composition(df).isZero)
-
-      if (isBoundDef(df)) {
-        assert(ctxs.exists {
-          case Ctx.BoundDef(_, otherTerm, otherComp) =>
-            // Pour comp: slmt les codes car les counts peuvent être différents
-            otherTerm == df && otherComp.c2u.keySet == composition.c2u.keySet
-          case _ => false
-        })
-        this
-      } else {
-        Ctxs(ctxs :+ Ctx.BoundDef(v, df, composition))
-      }
+    def addBoundDef(v: VarId, df: Code): Ctxs = {
+      if (isBoundDef(df)) this
+      else Ctxs(ctxs :+ Ctx.BoundDef(v, df))
     }
 
     def withCond(cond: Code): Ctxs = {
@@ -264,7 +252,7 @@ trait OCBSL extends Definitions { ocbsl =>
       else Ctxs(ctxs ++ toAdd.map(Ctx.Assumed.apply))
     }
 
-    def withAssumeLike(kind: Label.AssumeLike, pred: Code, predComp: Occurrences): Ctxs = {
+    def withAssumeLike(kind: Label.AssumeLike, pred: Code): Ctxs = {
       assert(code2sig(pred).label.isLitOrVar || isBoundDef(pred))
       if (pred == trueCode || (!kind.isDecreases && allCondsSet.contains(pred))) this
       else Ctxs(ctxs :+ Ctx.AssumeLike(kind, pred))
@@ -322,6 +310,8 @@ trait OCBSL extends Definitions { ocbsl =>
 
     def setTo(c: Code, o: Occurrence): Occurrences = Occurrences(c2u + (c -> o))
 
+    def -(c: Code): Occurrences = Occurrences(c2u - c)
+
     // TODO: What is this name!!!!
     def manyied: Occurrences = Occurrences(c2u.map {
       case (c, Occurrence.Zero) => (c, Occurrence.Zero) // TODO: Should we just filter these out?
@@ -360,6 +350,14 @@ trait OCBSL extends Definitions { ocbsl =>
 //        val pluggedCtxs = Ctxs(ctxs.ctxs.drop(inCtxs.ctxs.size))
 //        val (u2, c) = pluggedCtxs.plugged(u, terminal)
         val (u2, c) = ctxs.plugged(inCtxs, u, terminal)
+        val expected = occurrencesOf(c)(using env, inCtxs)
+        // TODO: Régler cette affaire
+        if (expected != u2) {
+          val eq = u2.c2u.toSet.intersect(expected.c2u.toSet)
+          val diff = (u2.c2u.toSet ++ expected.c2u.toSet) -- eq
+          // if (!env.forceBinding) println("owie, not the same :(")
+        }
+        // TODO: Assert un truc ici par rapport à la comp.
         assert(codeTpe(terminal) == codeTpe(c), s"${codeTpe(terminal)} != ${codeTpe(c)}")
 //        assert(unplugMap.get((c, env)).forall(_ == (this, u2))) // TODO
         unplugMap += (c, env) -> (this, u2)
@@ -372,7 +370,7 @@ trait OCBSL extends Definitions { ocbsl =>
       if (code2sig(newTerminal).label.isLitOrVar) derivedVarOrLit(newTerminal)
       else {
         ctxs.bindingOf(newTerminal) match {
-          case Some(Ctx.BoundDef(_, _, comp)) => derived(newTerminal, comp)
+          case Some(Ctx.BoundDef(_, _)) => derived(newTerminal, Occurrences.empty) // TODO: Rm
           case None => sys.error(s"Trahison! Trahison! On nous avait promis que $newTerminal se trouverait dans $ctxs :(")
         }
       }
@@ -396,33 +394,8 @@ trait OCBSL extends Definitions { ocbsl =>
         derivedVarOrLit(newTerminal)
       } else {
         val bdg = freshVarId("derivedBdg", codeTpe(newTerminal))
-        CodeRes(newTerminal, newTerminalComposition, ctxs.addBoundDef(bdg, newTerminal, newTerminalComposition))
+        CodeRes(newTerminal, newTerminalComposition, ctxs.addBoundDef(bdg, newTerminal))
       }
-
-//      if (ctxs.isBoundDef(newTerminal)) {
-//        CodeRes(newTerminal, newTerminalComposition, ctxs)
-//      } else {
-//        // TODO
-////        assert(!env.isBound(newTerminal))
-//        val (newCtx, newEnv) = newSig match {
-//          case Signature(Label.Lambda(_) | Label.Choose(_) | Label.Forall(_) | Label.Ensuring, _) =>
-//            // val (bodyUnpl, bodyUsgs) = unplugMap(body)  // TODO: bodyUsgs comprend body dans les usages. ok?
-//            // combinedUnboundCtx(newTerminal)(Seq(ctx))(_ ++ newUsgs)
-//            (Ctxs(Ctx.UnboundDef(newTerminal, newUsgs)), env)
-//          case Signature(_, _) =>
-//            // TODO: Pas si une variable/literal
-//            // TODO: Ou bien?
-//            if (newSig.label.isLitOrVar) {
-//              (Ctxs.empty, env)
-//            } else {
-//              val bdg = freshVarId("bdg", codeTpe(newTerminal))
-//              val newCtx = Ctx.BoundDef(bdg, newTerminal, newTermHasLambdaDef, newUsgs, env, canSubst = true)
-//              (Ctxs(newCtx), env.withLetBound(bdg, newTerminal, canSubst = true))
-//            }
-//          // combinedBindingCtx(newTerminal, newTermHasLambdaDef)(Seq(ctx))(_ ++ newUsgs)
-//        }
-//        CodeRes(newTerminal, newTermHasLambdaDef, ctxs ++ newCtx, newUsgs, newEnv)
-//      }
     }
   }
 
@@ -522,6 +495,7 @@ trait OCBSL extends Definitions { ocbsl =>
 
     code2sig(terminal) match {
       case Signature(Label.Lit(_) | Label.Var(_), _) => BindingCase.Elidable
+      case Signature(Label.Ensuring, _) => BindingCase.Inlinable
       case _ =>
         if (env.forceBinding) BindingCase.MustBind
         else {
@@ -540,7 +514,7 @@ trait OCBSL extends Definitions { ocbsl =>
             case Occurrence.Once(inCtxs, inLambda) if isPure =>
               assert(prefix.isPrefixOf(inCtxs))
               assert(prefix.ctxs.size + 1 <= inCtxs.ctxs.size)
-              assert(inCtxs.ctxs(prefix.ctxs.size) == Ctx.BoundDef(v, terminal, terminalComposition))
+              assert(inCtxs.ctxs(prefix.ctxs.size) == Ctx.BoundDef(v, terminal))
               if (inLambda && terminalComposition.hasLambda) BindingCase.MustBind
               else BindingCase.Inlinable
             case Occurrence.Once(inCtxs, inLambda) =>
@@ -551,7 +525,7 @@ trait OCBSL extends Definitions { ocbsl =>
               assert(prefix.isPrefixOf(inCtxs))
               // Dans inCtxs, on nécessairement le binding v -> terminal juste après prefix
               assert(prefix.ctxs.size + 1 <= inCtxs.ctxs.size)
-              assert(inCtxs.ctxs(prefix.ctxs.size) == Ctx.BoundDef(v, terminal, terminalComposition))
+              assert(inCtxs.ctxs(prefix.ctxs.size) == Ctx.BoundDef(v, terminal))
 
               // TODO: inEnv.letDef.drop(env.letDef.size + 1)
               // Pour qu'on puisse inline cette expression impure...
@@ -568,13 +542,13 @@ trait OCBSL extends Definitions { ocbsl =>
                   else extras.head match {
                     case Ctx.Id => sys.error("Les Id devraient être filtré!!!")
                     case Ctx.Assumed(_) | Ctx.AssumeLike(_, _) => false // Condition supplémentaire; donc impure
-                    case Ctx.BoundDef(bdg, defn, comp) =>
+                    case Ctx.BoundDef(bdg, defn) =>
                       codePurity(defn)(using env, running).isPure &&
-                        rec(extras.tail, running.addBoundDef(bdg, defn, comp))
+                        rec(extras.tail, running.addBoundDef(bdg, defn))
                   }
                 }
                 val extras = inCtxs.ctxs.drop(prefix.ctxs.size + 1) // +1 car c'est après ce binding
-                rec(extras, prefix.addBoundDef(v, terminal, terminalComposition))
+                rec(extras, prefix.addBoundDef(v, terminal))
               }
 
               if (!inLambda && isPureSuffix) BindingCase.Inlinable
@@ -628,7 +602,7 @@ trait OCBSL extends Definitions { ocbsl =>
     val bdg = lb.getOrFresh()
     val ccc = varId2Var(bdg)
     val nme = ccc.toString
-    CodeRes(terminal, composition, ctxs.addBoundDef(bdg, terminal, composition))
+    CodeRes(terminal, composition, ctxs.addBoundDef(bdg, terminal))
   }
 
   def combineCodeRes(codeRess: Seq[CodeRes], lb: LetBind)(cons: Seq[Code] => Signature)(using OEnv, Ctxs): CodeRes =
@@ -645,7 +619,7 @@ trait OCBSL extends Definitions { ocbsl =>
   object CodeRes {
     // TODO: Dire qu'est-ce que c'est que ce truc!!!!
     def of(term: Code)(using env: OEnv, ctxs: Ctxs): CodeRes =
-      CodeRes(term, Occurrences.of(term), ctxs)
+      CodeRes(term, Occurrences.of(term), ctxs) // TODO: La composition est erronée
 
     def isTerminal(c: Code): Boolean = code2sig(c) match {
       // TODO: Ensuring?
@@ -663,7 +637,7 @@ trait OCBSL extends Definitions { ocbsl =>
       val terminal = codeOfSig(mkIfExpr(cond.terminal, cThenn, cEls), lb.tpe)
       val composition = occCond ++ compThenn ++ compEls
       val bdg = lb.getOrFresh("bdgIf")
-      CodeRes(terminal, composition, cond.ctxs.addBoundDef(bdg, terminal, composition))
+      CodeRes(terminal, composition, cond.ctxs.addBoundDef(bdg, terminal))
     }
 
     // For Lambda, Choose and Forall
@@ -678,7 +652,7 @@ trait OCBSL extends Definitions { ocbsl =>
           codeOfVarId(ctxs.varBindingOf(terminal).getOrElse(bdg)) // varBindingOf: au cas ou c'est déjà bound
         } else terminal
       }
-      CodeRes(returned, composition, ctxs.addBoundDef(bdg, terminal, composition))
+      CodeRes(returned, composition, ctxs.addBoundDef(bdg, terminal))
 
       /*
       lb.v match {
@@ -714,7 +688,7 @@ trait OCBSL extends Definitions { ocbsl =>
       val terminal = codeOfSig(mkMatchExpr(scrut.terminal, cases.map(_.mc)), lb.tpe)
       val comp = cases.foldLeft(Occurrences.of(scrut.terminal)(using env, scrut.ctxs))(_ ++ _.composition)
       val bdg = lb.getOrFresh("bdgMatch")
-      CodeRes(terminal, comp, scrut.ctxs.addBoundDef(bdg, terminal, comp))
+      CodeRes(terminal, comp, scrut.ctxs.addBoundDef(bdg, terminal))
     }
   }
 
@@ -758,19 +732,23 @@ trait OCBSL extends Definitions { ocbsl =>
       case Let(vd, e, body) =>
         val vId = idOfVariable(vd.toVariable)
         val re = codeOfExpr(e, LetBind.of(vId))
+        assert(code2sig(re.terminal).label.isLitOrVar || re.ctxs.isBoundDef(re.terminal)) // la recursion bind le resultat (pas besoin de faire addBoundDef)
         assert(!code2sig(re.terminal).label.isEnsuring)
         val bodyEnv = code2sig(re.terminal).label match {
           case Label.Var(rvid) if rvid == vId =>
+            // C'est une lambda (car lambdaLike retourne la var du let bdg)
             assert(re.ctxs.boundTo(rvid).exists(isLambda))
             env
           case Label.Var(rvid) =>
+            // P-e aussi etre une lambda, si e existe deja
+            // (p.ex. val x = lam1; val y = lam1 -> on remplace les occ. de y par x)
             env.addVarSubst(vId, rvid)
           case Label.Lit(l) =>
             env.addLitSubst(vId, l)
           case _ =>
             re.ctxs.varBindingOf(re.terminal) match {
               case Some(`vId`) => env
-              case Some(other) => env.addVarSubst(vId, other)
+              case Some(other) => env.addVarSubst(vId, other) // car les stainless tree utilise vd, donc il faut dire qu'il faut utilise other
               case None => sys.error("Menteur :(")
             }
         }
@@ -784,7 +762,7 @@ trait OCBSL extends Definitions { ocbsl =>
           case Decreases(measure, body) => (Label.Decreases, measure, body)
         }
         val rpred = codeOfExpr(pred)
-        codeOfExpr(body, lb)(using env, rpred.ctxs.withAssumeLike(lab, rpred.terminal, rpred.terminalComposition))
+        codeOfExpr(body, lb)(using env, rpred.ctxs.withAssumeLike(lab, rpred.terminal))
 
       case Ensuring(body, pred) =>
         // TODO: Ok?
@@ -1034,7 +1012,7 @@ trait OCBSL extends Definitions { ocbsl =>
         // TODO: Et la composition alors??? Si tout est simplifié, il faudrait retourner Occ.empty non???
         // TODO: Et la composition alors??? Si tout est simplifié, il faudrait retourner Occ.empty non???
         val actualComp = composition
-        CodeRes(cOr, actualComp, outerCtxs.addBoundDef(bdg, cOr, actualComp))
+        CodeRes(cOr, actualComp, outerCtxs.addBoundDef(bdg, cOr))
     }
   }
 
@@ -1536,7 +1514,7 @@ trait OCBSL extends Definitions { ocbsl =>
       case (ctxs, (v, c)) =>
         // TODO: Rework match scrut bdgs
         if (code2sig(c).label.isLitOrVar) ctxs
-        else ctxs.addBoundDef(v, c, Occurrences.of(c)(using env, ctxs))
+        else ctxs.addBoundDef(v, c)
     }
   }
 
@@ -1667,7 +1645,7 @@ trait OCBSL extends Definitions { ocbsl =>
               val (prevCtxs, ifCtx) = cr.ctxs.popOrId
               assert(prevCtxs.isPrefixOf(branch.ctxs))
               assert(ifCtx match {
-                case Ctx.BoundDef(_, term, _) => term == cr.terminal
+                case Ctx.BoundDef(_, term) => term == cr.terminal
                 case _ => false
               }, s"Trahison! Trahison! On a $ifCtx !!!")
               // TODO: On ne prend *pas* Usages de unplug, n'est-ce pas?
@@ -1838,7 +1816,7 @@ trait OCBSL extends Definitions { ocbsl =>
             // TODO: Ok???
             val (prevCtxs, matchCtx) = cr.ctxs.popOrId
             assert(matchCtx match {
-              case Ctx.BoundDef(_, term, _) => term == cr.terminal
+              case Ctx.BoundDef(_, term) => term == cr.terminal
               case _ => false
             }, s"Trahison! Trahison! On a $matchCtx !!!")
             val rhsUnpl = unplugged(rhs).get._1
@@ -2005,7 +1983,7 @@ trait OCBSL extends Definitions { ocbsl =>
             val newV = freshVarsMap(oldV)
             // TODO: Il faudra s'assurer que les oldV se font subst par newV qui se font subst par arg
             // TODO: Comp ok???
-            (env.addVarSubst(oldV, newV), ctxs.addBoundDef(newV, arg, Occurrences.of(arg)))
+            (env.addVarSubst(oldV, newV), ctxs.addBoundDef(newV, arg))
         }
     }
 
@@ -2014,28 +1992,6 @@ trait OCBSL extends Definitions { ocbsl =>
     val inlined = (new InlinerImpl).transform(body, lb, initRepl, ())(using initEnv, initCtxs)
     assert(codeTpe(inlined.terminal) == bodyTpe)
     inlined
-
-//    // Bind the argument to fresh variables
-//    val envsBdgs = freshVars.map {
-//      case (oldV, newV) => newV -> argsSubstMap(oldV)
-//    }
-//
-//    // TODO: Env par defaut et pas celui du body?
-//    val (initEnv, bdgsCtx) = envsBdgs.foldLeft((env, Ctxs.empty)) {
-//      case ((env, ctxsAcc), (v, arg)) =>
-//        given OEnv = env
-//        val isLam = isLambda(arg)
-//        // TODO: Usages ok???
-//        val ctx = Ctx.BoundDef(v, arg, isLam, Occurrences.of(arg), env, !isLam)
-//        (env.withLetBound(v, arg, !isLam), ctxsAcc :+ ctx)
-//    }
-//    // Map to replace all occurrences of the old parameter with the fresh bindings variables.
-//    val initRepl = freshVars.map { case (old, nw) => codeOfVarId(old) -> codeOfVarId(nw) }.toMap
-//    val inlined = (new InlinerImpl).transform(body.terminal, initRepl, ())(using initEnv)
-//    assert(codeTpe(inlined.terminal) == bodyTpe)
-//    // TODO: Quel ctxs rajouter???
-//    // TODO: Usages ok?
-//    CodeRes(inlined.terminal, inlined.terminalHasLambdaDef, outerCtxs ++ bdgsCtx ++ inlined.ctxs, inlined.usages, inlined.env)
   }
 
   // TODO: Nom de fn: aussi selon env.varSubst...
@@ -2150,35 +2106,48 @@ trait OCBSL extends Definitions { ocbsl =>
   def occurrencesOf(c: Code)(using env: OEnv, ctxs: Ctxs): Occurrences =
     codeOcc.tryFold(c, Occurrences.empty, ()).getOrElse(sys.error("impossible"))
 
-    // TODO: Cette histoire de acc... ça à l'air faux!!!
   class CodeOccurrences extends CodeTryFolder[Unit, Occurrences] {
     override type Extra = Unit
 
-    // TODO: C'est faux: c'est slmt par rapport aux children!
-    // TODO: C'est faux: c'est slmt par rapport aux children!
-    // TODO: C'est faux: c'est slmt par rapport aux children!
     override def tryFoldImpl(c: Code, acc: Occurrences, extra: Unit)(using env: OEnv, ctxs: Ctxs): Either[Unit, Occurrences] = {
-      code2sig(c).label match {
-        case Label.Lit(_) =>
-          return Right(acc)
-        case Label.Var(v) =>
-          assert(!env.varSubst.contains(v))
-          return Right(acc ++ Occurrences.of(c)) // TODO: Non, la composition d'une var, c'est empty
-        case _ => ()
-      }
       if (ctxs.isBoundDef(c)) Right(acc ++ Occurrences.of(c))
       else {
+        val slf = Occurrences.of(c)
         code2sig(c) match {
+          case Signature(Label.Lit(_), Seq()) =>
+            assert(slf.c2u.isEmpty)
+            Right(acc)
+
+          case Signature(Label.Var(v), Seq()) =>
+            assert(!env.varSubst.contains(v))
+            Right(acc ++ slf)
+
           case Signature(Label.Let(v), Seq(e, b)) =>
-            val occE = occurrencesOf(e)
-            val occB = occurrencesOf(b)(using env, ctxs.addBoundDef(v, e, occE))
-            val defnCode = if (isLambda(e)) codeOfVarId(v) else e
-            // TODO: Ou devrait aller acc?
-            Right(occE ++ (acc ++ occB).setTo(defnCode, Occurrence.Once(ctxs, env.inLambda)))
+            assert(!code2sig(e).label.isLitOrVar)
+            assert(!ctxs.isBoundDef(e))
+            val occE = tryFold(e, acc, ()).toOption.get
+            assert(occE(e).isOnce)
+            val occB = tryFold(b, occE, ())(using env, ctxs.addBoundDef(v, e)).toOption.get
+            Right(occB.setTo(e, Occurrence.Once(ctxs, env.inLambda)))
+//            val defnCode = if (isLambda(e)) codeOfVarId(v) else e
+//            Right(occB.setTo(defnCode, Occurrence.Once(ctxs, env.inLambda)))
+
+          case Signature(l: Label.AssumeLike, Seq(pred, body)) =>
+            val occPred = tryFold (pred, acc, ()).toOption.get
+            tryFold(body, occPred, ())(using env, ctxs.withAssumeLike(l, pred))
+
+          // TODO: Match, IfExpr, Ensuring?
+
+          case Signature(Label.Ensuring, Seq(body, pred)) =>
+            assert(acc.c2u.isEmpty)
+            // TODO: Ok?
+            // TODO: Remarque: ici, on ne thread pas l'occurrence
+            val occBody = tryFold(body, Occurrences.empty, ()).toOption.get
+            val occPred = tryFold(pred, Occurrences.empty, ()).toOption.get
+            Right(slf ++ occBody ++ occPred)
 
           case _ =>
-            // TODO: Match? Assume?
-            super.tryFoldImpl(c, acc, ())
+            super.tryFoldImpl(c, acc ++ slf, ())
         }
       }
     }
@@ -2206,6 +2175,7 @@ trait OCBSL extends Definitions { ocbsl =>
           transformImpl(c, lb, repl, extra)
       }
       assert(ctxs.isPrefixOf(res.ctxs))
+      assert(isLambda(c) == isLambda(res.terminal))
       res
     }
 
@@ -2220,11 +2190,44 @@ trait OCBSL extends Definitions { ocbsl =>
           CodeRes.of(res)
 
         case Signature(Label.Let(v), Seq(e, b)) =>
+          assert(!ctxs.isBoundDef(e))
           val re = transform(e, LetBind.of(v), repl, extra)
-          // TODO: OK par rapport au var, lit etc.?
-          // TODO: Remarque: pas besoin de modifier env.varSubst car subsumed par repl, qui est plus général
-          transform(b, lb, repl + (e -> re.terminal), extra)(using env, re.ctxs.addBoundDef(v, re.terminal, re.terminalComposition))
+          assert(!code2sig(re.terminal).label.isLitOrVar)
+          assert(re.ctxs.isBoundDef(re.terminal)) // la recursion bind le resultat (pas besoin de faire addBoundDef)
 
+          if (isLambda(e)) {
+            assert(isVar(re.terminal))
+            val Signature(Label.Var(rv), Seq()) = code2sig(re.terminal)
+            assert(re.ctxs.boundTo(rv).exists(isLambda))
+            val bodyEnv = if (rv == v) {
+              // la lambda transformé est "nvlle" (pas vu auparavant)
+              env
+            } else {
+              // la lambda transformée a déjà été vue (donc déjà bound)
+              env.addVarSubst(v, rv)
+            }
+            transform(b, lb, repl, extra)(using bodyEnv, re.ctxs)
+          } else {
+            assert(!code2sig(re.terminal).label.isLitOrVar)
+            transform(b, lb, repl + (e -> re.terminal), extra)(using env, re.ctxs)
+          }
+          /*
+          code2sig(re.terminal).label match {
+            case Label.Var(rvid) if rvid == v =>
+              // C'est une lambda (car lambdaLike retourne la var du let bdg)
+              assert(re.ctxs.boundTo(rvid).exists(isLambda))
+              assert(isLambda(e))
+              env
+            case Label.Var(rvid) =>
+              env.addVarSubst(v, rvid)
+            case Label.Lit(l) =>
+              env.addLitSubst(v, l)
+            case _ =>
+
+          }
+          // TODO: Remarque: pas besoin de modifier env.varSubst car subsumed par repl, qui est plus général
+          transform(b, lb, repl + (e -> re.terminal), extra)(using env, re.ctxs.addBoundDef(v, re.terminal))
+          */
         case Signature(Label.IfExpr, Seq(cond, thenn, els)) =>
           val rcond = transform(cond, repl, extra)
           val thennCtxs = rcond.ctxs.withCond(rcond.terminal)
@@ -2239,7 +2242,7 @@ trait OCBSL extends Definitions { ocbsl =>
 
         case Signature(lab: Label.AssumeLike, Seq(pred, body)) =>
           val rpred = transform(pred, repl, extra)
-          transform(body, lb, repl, extra)(using env, rpred.ctxs.withAssumeLike(lab, rpred.terminal, rpred.terminalComposition))
+          transform(body, lb, repl, extra)(using env, rpred.ctxs.withAssumeLike(lab, rpred.terminal))
 
         case Signature(Label.Ensuring, Seq(body, pred)) =>
           // TODO: Ok?
@@ -2278,7 +2281,7 @@ trait OCBSL extends Definitions { ocbsl =>
               // TODO: Et la composition alors??? Si tout est simplifié, il faudrait retourner Occ.empty non???
               // TODO: Et la composition alors??? Si tout est simplifié, il faudrait retourner Occ.empty non???
               val actualComp = composition
-              CodeRes(ror, actualComp, outerCtxs.addBoundDef(bdg, ror, actualComp))
+              CodeRes(ror, actualComp, outerCtxs.addBoundDef(bdg, ror))
           }
 
         // TODO: Quid lb???
@@ -2365,8 +2368,7 @@ trait OCBSL extends Definitions { ocbsl =>
       case Signature(Label.Let(v), Seq(e, b)) =>
         for {
           re <- tryFold(e, acc, extra)
-          // TODO: Pour les occurrences, comme on ne l'utilise pas, on met empty...
-          rb <- tryFold(b, re, extra)(using env, ctxs.addBoundDef(v, e, Occurrences.empty))
+          rb <- tryFold(b, re, extra)(using env, ctxs.addBoundDef(v, e))
         } yield rb
 
       case Signature(Label.Assert | Label.Assume | Label.Require, Seq(pred, body)) =>
