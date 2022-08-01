@@ -226,30 +226,22 @@ trait Definitions {
     override def hashCode(): Int = hc
   }
 
-  enum LabelledPattern(val bdg: Option[VarId]) {
-    case Wildcard(scrut0: Option[VarId]) extends LabelledPattern(scrut0)
-    case ADT(scrut0: Option[VarId], id: Identifier, tps: Seq[Type], sub: Seq[LabelledPattern]) extends LabelledPattern(scrut0)
-    case TuplePattern(scrut0: Option[VarId], sub: Seq[LabelledPattern]) extends LabelledPattern(scrut0)
-    case Lit[T](scrut0: Option[VarId], lit: Literal[T]) extends LabelledPattern(scrut0)
+  enum LabelledPattern {
+    case Wildcard extends LabelledPattern
+    case ADT(id: Identifier, tps: Seq[Type], sub: Seq[LabelledPattern]) extends LabelledPattern
+    case TuplePattern(sub: Seq[LabelledPattern]) extends LabelledPattern
+    case Lit[T](lit: Literal[T]) extends LabelledPattern
     // TODO: What is recs???
-    case Unapply(scrut0: Option[VarId], recs: Seq[Code], id: Identifier, tps: Seq[Type], sub: Seq[LabelledPattern]) extends LabelledPattern(scrut0)
+    case Unapply(recs: Seq[Code], id: Identifier, tps: Seq[Type], sub: Seq[LabelledPattern]) extends LabelledPattern
 
     import LabelledPattern._
     def allPatterns: Seq[LabelledPattern] = Seq(this) ++ (this match {
-      case Wildcard(_) => Seq.empty
-      case ADT(_, _, _, sub) => sub.flatMap(_.allPatterns)
-      case TuplePattern(_, sub) => sub.flatMap(_.allPatterns)
-      case Lit(_, _) => Seq.empty
-      case Unapply(_, _, _, _, sub) => sub.flatMap(_.allPatterns)
+      case Wildcard => Seq.empty
+      case ADT(_, _, sub) => sub.flatMap(_.allPatterns)
+      case TuplePattern(sub) => sub.flatMap(_.allPatterns)
+      case Lit(_) => Seq.empty
+      case Unapply(_, _, _, sub) => sub.flatMap(_.allPatterns)
     })
-
-    def withBinding(bdg: Option[VarId]): LabelledPattern = this match {
-      case Wildcard(_) => Wildcard(bdg)
-      case ADT(_, id, tps, sub) => ADT(bdg, id, tps, sub)
-      case TuplePattern(_, sub) => TuplePattern(bdg, sub)
-      case Lit(_, lit) => Lit(bdg, lit)
-      case Unapply(_, recs, id, tps, sub) => Unapply(bdg, recs, id, tps, sub)
-    }
   }
 
   case class LabMatchCase(pattern: LabelledPattern, guard: Code, rhs: Code)
