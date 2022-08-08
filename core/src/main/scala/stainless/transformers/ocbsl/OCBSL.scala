@@ -1883,9 +1883,11 @@ trait OCBSL extends Definitions { ocbsl =>
         case Signature(Label.Var(`lam`), Seq()) =>
           assert(!ctxs.varSubstMap.contains(lam))
           CodeRes(cLam, ctxs)
-        case Signature(Label.Lambda(params), Seq(body)) =>
+        case Signature(Label.Lambda(params), Seq(body)) if lb.v.isEmpty =>
           // Don't add back a binding in ctxs for lambdas, otherwise we will undo the inlining we did before!
-          // TODO: Est-ce ok?
+          // TODO: Est-ce ok????
+          // TODO: Est-ce ok????
+          // TODO: Est-ce ok????
           val rbody = transform(body, repl, extra)(using env.copy(true))
           assert(ctxs.isPrefixOf(rbody.ctxs))
           val (_, cBody) = rbody.selfPlugged(ctxs)
@@ -2050,9 +2052,22 @@ trait OCBSL extends Definitions { ocbsl =>
             fold(args.map(codePurity)) ++ fnPurity(id)
 
           case Signature(Label.Application, callee +: args) =>
+            // TODO: L'orig ignore callee, mais si on fait ça, on risque de faire du reordering dans certains cas (comme ContMonad)
             // TODO: Dans SWP: quid pureté callee???
             // TODO: Pureté ok? Après tout, un inline de lambda peut donner lieu à impure...
-            assmChkPurity ++ codePurity(callee) ++ fold(args.map(codePurity))
+            lazy val calleePurity = code2sig(callee) match {
+              case Signature(Label.Var(v), Seq()) =>
+                ctxs.boundTo(v).map { calleeDef =>
+                  val Signature(Label.Lambda(params), Seq(body)) = code2sig(calleeDef)
+                  assert(params.size == args.size)
+                  codePurity(body)
+                }.getOrElse(Impure)
+              case Signature(Label.Lambda(params), Seq(body)) =>
+                assert(params.size == args.size)
+                codePurity(body)
+              case _ => Impure
+            }
+            assmChkPurity ++ calleePurity ++ fold(args.map(codePurity))
 
           case Signature(Label.Choose(v), Seq(pred)) =>
             if (pred == trueCode && hasInstance(varTpe(v)) == Some(true)) Pure
