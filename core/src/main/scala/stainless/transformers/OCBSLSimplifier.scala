@@ -20,7 +20,7 @@ trait OCBSLSimplifier { self =>
   private val vcNum: AtomicInteger = new AtomicInteger(0)
 
   def simplify(e: Expr): Expr = {
-//    if (vcNum.get() <= 70) {
+//    if (vcNum.get() <= 32) {
 //      vcNum.incrementAndGet()
 //      return BooleanLiteral(true)
 //    }

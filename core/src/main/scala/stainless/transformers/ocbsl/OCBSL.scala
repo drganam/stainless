@@ -128,6 +128,13 @@ trait OCBSL extends Definitions { ocbsl =>
       })
     }
 
+//    def ++(that: Ctxs): Ctxs = {
+//      assert(varSubstMap.keySet.intersect(that.varSubstMap.keySet).forall(v => varSubstMap(v) == that.varSubstMap(v)))
+//      val resVarSubst = varSubst ++ that.varSubst.filter { case (v, _) => !varSubstMap.contains(v) }
+//
+//      ???
+//    }
+
     // En gros: On plug jusqu'à ce que l'on atteigne inCtxs
     def plugged(inCtxs: Ctxs, u: Occurrences, c: Code)(using env: OEnv): (Occurrences, Code) = {
       assert(inCtxs.isPrefixOf(this))
@@ -232,12 +239,54 @@ trait OCBSL extends Definitions { ocbsl =>
 
     def boundTo(v: VarId): Option[Code] = findMap(ctxs)(_.boundTo(v))
 
-    def isPrefixOf(that: Ctxs): Boolean =
-      ocbsl.isPrefixOf(varSubst, that.varSubst) && ocbsl.isPrefixOf(ctxs, that.ctxs)
+    def isPrefixOf(that: Ctxs): Boolean = {
+      object equiv extends CodeTransformer {
+        override type Extra = Unit
+        def apply(lhs: Code, rhs: Code, repl: Map[Code, Code]): Boolean =
+          lhs == rhs || (repl.nonEmpty && lhs == transform(rhs, repl, ())(using OEnv.empty, Ctxs.empty))
+      }
+      def ctxEquiv(lhs: Ctx, rhs: Ctx, repl: Map[Code, Code]): Option[Map[Code, Code]] = (lhs, rhs) match {
+        case (Ctx.Id, Ctx.Id) => Some(repl)
+        case (Ctx.BoundDef(lhsV, lhsTerm), Ctx.BoundDef(rhsV, rhsTerm)) =>
+          if (equiv(lhsTerm, rhsTerm, repl)) {
+            if (lhsV == rhsV) Some(repl)
+            else Some(repl + (codeOfVarId(rhsV) -> codeOfVarId(lhsV)))
+          } else None
+        case (Ctx.AssumeLike(lhsLab, lhsPred), Ctx.AssumeLike(rhsLab, rhsPred)) =>
+          if (lhsLab == rhsLab && equiv(lhsPred, rhsPred, repl)) Some(repl)
+          else None
+        case (Ctx.Assumed(lhsCond), Ctx.Assumed(rhsCond)) =>
+          if (equiv(lhsCond, rhsCond, repl)) Some(repl)
+          else None
+        case _ => None
+      }
+      def isPrefixOfModuloVar(lhs: Seq[Ctx], rhs: Seq[Ctx], repl: Map[Code, Code]): Boolean = (lhs, rhs) match {
+        case (Seq(), _) => true
+        case (lhsH +: lhsRest, rhsH +: rhsRest) =>
+//          ctxEquiv(lhsH, rhsH, repl) match {
+//            case Some(repl2) => isPrefixOfModuloVar(lhsRest, rhsRest, repl2)
+//            case _ => false
+//          }
+          val res = ctxEquiv(lhsH, rhsH, repl)
+          res.map { repl2 =>
+            val rest = isPrefixOfModuloVar(lhsRest, rhsRest, repl2)
+            rest
+          }.getOrElse(false)
+        case _ => sys.error("impossible")
+      }
 
-    def addVarSubst(from: VarId, to: VarId): Ctxs = Ctxs(varSubst :+ (from -> codeOfVarId(to)), ctxs)
+      ocbsl.isPrefixOf(varSubst, that.varSubst) && ctxs.size <= that.ctxs.size && isPrefixOfModuloVar(ctxs, that.ctxs, Map.empty)
+    }
 
-    def addLitSubst[T](v: VarId, l: Literal[T]): Ctxs = Ctxs(varSubst :+ (v -> codeOfLit(l)), ctxs)
+    def addVarSubst(from: VarId, to: VarId): Ctxs = {
+      assert(!varSubstMap.contains(from))
+      Ctxs(varSubst :+ (from -> codeOfVarId(to)), ctxs)
+    }
+
+    def addLitSubst[T](v: VarId, l: Literal[T]): Ctxs = {
+      assert(!varSubstMap.contains(v))
+      Ctxs(varSubst :+ (v -> codeOfLit(l)), ctxs)
+    }
 
     def addBoundDef(df: Code): Ctxs = addBoundDef(freshVarId("bdg", codeTpe(df)), df)
 
@@ -790,7 +839,7 @@ trait OCBSL extends Definitions { ocbsl =>
       case and @ And(_) =>
         val ands = unAnd(and)
         codeOfExpr(Not(Or(ands.map(Not.apply))), lb)
-      case or @ Or(_) => codeOfDisjunction(unOr(or), lb)
+      case or @ Or(_) => transformDisjunction(unOr(or), lb)(codeOfExpr)
       case Not(e) => negExprOf(e, lb)
 
       case Implies(e1, e2) => codeOfExpr(Or(Not(e1), e2), lb)
@@ -951,35 +1000,39 @@ trait OCBSL extends Definitions { ocbsl =>
 //    }
 //  }
 
-  def codeOfDisjunction(disjs: Seq[Expr], lb: LetBind)(using env: OEnv, outerCtxs: Ctxs): CodeRes = {
-    assert(disjs.forall(_.getType == BoolTy))
-    assert(lb.tpe == BoolTy)
-    val (_, cArgs) = disjs.foldLeft((outerCtxs, Seq.empty[Code])) {
-      // Remarque: ctxs ne contient que les negations accumulées, pas de binding!
-      case ((ctxs, cArgsAcc), e) =>
+  def transformDisjunction[T](disjs: Seq[T], lb: LetBind)(f: Ctxs ?=> T => CodeRes)(using env: OEnv, outerCtxs: Ctxs): CodeRes = {
+    def rec(disjs: Seq[T], rdisjsAcc: Seq[Code])(using ctxs: Ctxs): Seq[Code] = {
+      if (disjs.isEmpty) rdisjsAcc
+      else {
         assert(outerCtxs.isPrefixOf(ctxs))
         assert(outerCtxs.bindings == ctxs.bindings)
-
-        given Ctxs = ctxs
-        val re = codeOfExpr(e)
+        val re = f(disjs.head)
         assert(codeTpe(re.terminal) == BoolTy, s"Got ${codeTpe(re.terminal)}")
         // TODO: Essayer d'extraire autant que possible ici
         // Remarque: c'est bien le ctxs d'origine qu'on utilise,
         // pas celui de re car celui-ci contient des bdgs et d'autres conds (qui ne sont pas carry over)
         val (_, rePlugged) = re.selfPlugged(outerCtxs)
-        // Ditto ici
-        val newCtxs = outerCtxs.withCond(negCodeOf(rePlugged))
-        (newCtxs, cArgsAcc :+ rePlugged)
+        val neg = negCodeOf(rePlugged)
+        if (neg == falseCode) rdisjsAcc :+ rePlugged // Pas besoin d'aller plus loin, car on couvre tous les cas
+        else rec(disjs.tail, rdisjsAcc :+ rePlugged)(using outerCtxs.withCond(neg)) // Ditto
+      }
     }
-    val isPure = cArgs.forall(c => codePurity(c).isPure)
-    val cOr = simplifiedDisjunction(cArgs, mayDrop = isPure, mayReorder = isPure)
-    unplugged(cOr) match {
-      case Some((cr, _)) => cr // TODO: Mais c'est dégueulasse !!!! Et c'est quoi la justification au juste?????
-      case None =>
-        // Remarque: on retourne le ctx original car les PCs des ors ne sont pas retenues hors des disjunctions.
-        // P.ex. dans val x = b1 || b2 || b3 il serait insensé d'avoir !b1 && !b2 && !b3 dans le env de x.
-        val bdg = lb.getOrFresh("orBdg")
-        CodeRes(cOr, outerCtxs.addBoundDef(bdg, cOr))
+
+    assert(lb.tpe == BoolTy)
+    val rdisjs = rec(disjs, Seq.empty)
+    val isPure = rdisjs.forall(c => codePurity(c).isPure)
+    val ror = simplifiedDisjunction(rdisjs, mayDrop = isPure, mayReorder = isPure) // rooooaaaaarr... ah non c'est pas ça...
+
+    if (rdisjs.contains(ror)) {
+      // rdisjs a été simplifié en un seul disjunct qui a été selfPlugged. On le deplug et le retourne
+      val Some((cr, _)) = unplugged(ror)
+      assert(outerCtxs.isPrefixOf(cr.ctxs))
+      cr
+    } else {
+      // Remarque: on retourne le ctx original car les PCs des ors ne sont pas retenues hors des disjunctions.
+      // P.ex. dans val x = b1 || b2 || b3 il serait insensé d'avoir !b1 && !b2 && !b3 dans le env de x.
+      val bdg = lb.getOrFresh("orBdg")
+      CodeRes(ror, outerCtxs.addBoundDef(bdg, ror))
     }
   }
 
@@ -1019,7 +1072,7 @@ trait OCBSL extends Definitions { ocbsl =>
         val rchild = codeOfExpr(child)
         val negChild = negCodeOf(rchild.terminal)
         rchild.derived(negChild)
-      }
+    }
   }
 
   def freshened(v: VarId): VarId = idOfVariable(varId2Var(v).freshen)
@@ -2341,32 +2394,7 @@ trait OCBSL extends Definitions { ocbsl =>
           CodeRes.ensuring(rbody, rpred, lb.tpe)
 
         case Signature(Label.Or, disjs) =>
-          // TODO: copié collé adapté de codeOfDisjunction...
-          val outerCtxs = ctxs
-          val (_, rdisjs) = unOrCodes(disjs).foldLeft((outerCtxs, Seq.empty[Code])) {
-            case ((ctxs, rdisjsAcc), disj) =>
-              assert(outerCtxs.isPrefixOf(ctxs))
-              assert(outerCtxs.bindings == ctxs.bindings)
-
-              given Ctxs = ctxs
-              val rdisj = transform(disj, repl, extra)
-              // Remarque: c'est bien le ctxs d'origine qu'on utilise,
-              // pas celui de re car celui-ci contient des bdgs et d'autres conds (qui ne sont pas carry over)
-              val (_, rdisjPlugged) = rdisj.selfPlugged(outerCtxs)
-              // Ditto ici
-              val newCtxs = outerCtxs.withCond(negCodeOf(rdisjPlugged))
-              (newCtxs, rdisjsAcc :+ rdisjPlugged)
-          }
-          val isPure = rdisjs.forall(c => codePurity(c).isPure)
-          val ror = simplifiedDisjunction(rdisjs, mayDrop = isPure, mayReorder = isPure) // rooooaaaaarr... ah non c'est pas ça...
-          unplugged(ror) match {
-            case Some((cr, _)) => cr // TODO: Mais c'est dégueulasse !!!! Et c'est quoi la justification au juste?????
-            case None =>
-              // Remarque: on retourne le ctx original car les PCs des ors ne sont pas retenues hors des disjunctions.
-              // P.ex. dans val x = b1 || b2 || b3 il serait insensé d'avoir !b1 && !b2 && !b3 dans le env de x.
-              val bdg = lb.getOrFresh("orBdg")
-              CodeRes(ror, outerCtxs.addBoundDef(bdg, ror))
-          }
+          transformDisjunction(disjs, lb)(transform(_, repl, extra))
 
         case Signature(Label.Error(ofTpe, descr), Seq()) =>
           CodeRes.err(ofTpe, descr, lb)
