@@ -1876,16 +1876,24 @@ trait OCBSL extends Definitions { ocbsl =>
 
     class InlineWrapperImpl extends CodeTransformer {
       override type Extra = Unit
-
+      // TODO: Test inline lambda dans lambda?
       // TODO: Ok par rapport à repl + let-bound canSubst truc?
       override def transformImpl(c: Code, lb: LetBind, repl: Map[Code, Code], extra: Unit)
                                 (using env: OEnv, ctxs: Ctxs): CodeRes = code2sig(c) match {
         case Signature(Label.Var(`lam`), Seq()) =>
           assert(!ctxs.varSubstMap.contains(lam))
           CodeRes(cLam, ctxs)
+        case Signature(Label.Lambda(params), Seq(body)) =>
+          // Don't add back a binding in ctxs for lambdas, otherwise we will undo the inlining we did before!
+          // TODO: Est-ce ok?
+          val rbody = transform(body, repl, extra)(using env.copy(true))
+          assert(ctxs.isPrefixOf(rbody.ctxs))
+          val (_, cBody) = rbody.selfPlugged(ctxs)
+          val terminal = codeOfSig(mkLambda(params, cBody), lb.tpe)
+          CodeRes(terminal, ctxs)
         case Signature(Label.Application, `lamVarIdCode` +: args) =>
           assert(params.size == args.size)
-          inlineLambda(ctxs, params.zip(args), body, lb)
+          inlineLambda(ctxs, params.zip(args), body, lb) // TODO: Devrait-on faire le "dont add back a binding" aussi?
         case _ => super.transformImpl(c, lb, repl, ())
       }
     }

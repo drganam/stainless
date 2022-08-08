@@ -3,6 +3,8 @@ package transformers
 
 import inox.solvers
 
+import java.util.concurrent.atomic.AtomicInteger
+
 // Wrapper that sets up a thread-local ocbsl algo instance
 trait OCBSLSimplifier { self =>
   val trees: ast.Trees
@@ -15,11 +17,12 @@ trait OCBSLSimplifier { self =>
   private val ocbslTL: ThreadLocal[ocbsl.OCBSL{val trees: self.trees.type; val symbols: self.symbols.type}] =
     ThreadLocal.withInitial(() => ocbsl.OCBSL(trees, symbols, opts))
 
-  private var vcNum: Int = 1
+  private val vcNum: AtomicInteger = new AtomicInteger(0)
 
   def simplify(e: Expr): Expr = {
-//    if (vcNum >= 10) {
-//      ???
+//    if (vcNum.get() <= 70) {
+//      vcNum.incrementAndGet()
+//      return BooleanLiteral(true)
 //    }
 //    println("")
 //    println("SIMPLIFY:")
@@ -31,7 +34,7 @@ trait OCBSLSimplifier { self =>
     val resE = oc.codeOfExpr(e)
     val codeE = resE.selfPlugged(oc.Ctxs.empty)._2
     val res = oc.uncodeOf(codeE)(using oc.RevEnv.empty).expr.copiedFrom(e)
-    vcNum += 1
+    vcNum.incrementAndGet()
     res
   }
 }
