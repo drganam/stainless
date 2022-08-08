@@ -204,7 +204,7 @@ trait OCBSL extends Definitions { ocbsl =>
             }
 
           case Ctx.AssumeLike(lab, predTerminal) =>
-            assert(prev.isBoundDefOrSubsted(predTerminal))
+            assert(isVar(predTerminal) || prev.isBoundDefOrSubsted(predTerminal))
             val c2 = codeOfSig(mkAssumeLike(lab, predTerminal, c), codeTpe(c))
             (u ++ Occurrences.of(predTerminal)(using env, prev), c2)
         }
@@ -324,7 +324,7 @@ trait OCBSL extends Definitions { ocbsl =>
     }
 
     def withAssumeLike(kind: Label.AssumeLike, pred: Code): Ctxs = {
-      assert(isBoundDefOrSubsted(pred))
+      assert(isVar(pred) || isBoundDefOrSubsted(pred))
       if (pred == trueCode || (!kind.isDecreases && allCondsSet.contains(pred))) this
       else Ctxs(varSubst, ctxs :+ Ctx.AssumeLike(kind, pred))
     }
@@ -805,7 +805,7 @@ trait OCBSL extends Definitions { ocbsl =>
           case Decreases(measure, body) => (Label.Decreases, measure, body)
         }
         val rpred = codeOfExpr(pred)
-        assert(rpred.ctxs.isBoundDefOrSubsted(rpred.terminal))
+        assert(isVar(rpred.terminal) || rpred.ctxs.isBoundDefOrSubsted(rpred.terminal))
         codeOfExpr(body, lb)(using env, rpred.ctxs.withAssumeLike(lab, rpred.terminal))
 
       case Ensuring(body, pred) =>
