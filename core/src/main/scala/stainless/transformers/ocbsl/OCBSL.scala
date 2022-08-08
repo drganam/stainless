@@ -141,6 +141,7 @@ trait OCBSL extends Definitions { ocbsl =>
 
       def plugCtx(curr: Ctxs, prev: Ctxs, toPlug: Ctx, u: Occurrences, c: Code): (Occurrences, Code) = {
         assert(curr.ctxs == prev.ctxs :+ toPlug)
+        // TODO: Modulo var binding
 //        val u = occurrencesOf(c)(using env, curr)
 //        val expl = asExplicitSig(c)
 //        val uuu = occurrencesOf(c)(using env, curr)
@@ -263,15 +264,10 @@ trait OCBSL extends Definitions { ocbsl =>
       def isPrefixOfModuloVar(lhs: Seq[Ctx], rhs: Seq[Ctx], repl: Map[Code, Code]): Boolean = (lhs, rhs) match {
         case (Seq(), _) => true
         case (lhsH +: lhsRest, rhsH +: rhsRest) =>
-//          ctxEquiv(lhsH, rhsH, repl) match {
-//            case Some(repl2) => isPrefixOfModuloVar(lhsRest, rhsRest, repl2)
-//            case _ => false
-//          }
-          val res = ctxEquiv(lhsH, rhsH, repl)
-          res.map { repl2 =>
-            val rest = isPrefixOfModuloVar(lhsRest, rhsRest, repl2)
-            rest
-          }.getOrElse(false)
+          ctxEquiv(lhsH, rhsH, repl) match {
+            case Some(repl2) => isPrefixOfModuloVar(lhsRest, rhsRest, repl2)
+            case _ => false
+          }
         case _ => sys.error("impossible")
       }
 
@@ -400,9 +396,9 @@ trait OCBSL extends Definitions { ocbsl =>
   }
 
   private val pluggedMap = mutable.Map.empty[(CodeRes, Ctxs, OEnv), (Occurrences, Code)]
-  private val unplugMap = mutable.Map.empty[(Code, OEnv), (CodeRes, Occurrences)]
+  private val unplugMap = mutable.Map.empty[(Code, OEnv), (CodeRes, Occurrences, Ctxs)]
 
-  def unplugged(c: Code)(using env: OEnv): Option[(CodeRes, Occurrences)] = unplugMap.get((c, env))
+  def unplugged(c: Code)(using env: OEnv): Option[(CodeRes, Occurrences, Ctxs)] = unplugMap.get((c, env))
 
   case class CodeRes(terminal: Code, ctxs: Ctxs) {
     assert(CodeRes.isTerminal(terminal), s"Gag: $terminal n'est pas un terminal (est un ${code2sig(terminal)})")
@@ -420,6 +416,7 @@ trait OCBSL extends Definitions { ocbsl =>
 //        val pluggedCtxs = Ctxs(ctxs.ctxs.drop(inCtxs.ctxs.size))
 //        val (u2, c) = pluggedCtxs.plugged(u, terminal)
         val (u2, c) = ctxs.plugged(inCtxs, u, terminal)
+        // TODO: Modulo var binding
 //        val expected = occurrencesOf(c)(using env, inCtxs)
 //        // TODO: Régler cette affaire
 //        if (expected != u2) {
@@ -430,7 +427,8 @@ trait OCBSL extends Definitions { ocbsl =>
         // TODO: Assert un truc ici par rapport à la comp.
         assert(codeTpe(terminal) == codeTpe(c), s"${codeTpe(terminal)} != ${codeTpe(c)}")
 //        assert(unplugMap.get((c, env)).forall(_ == (this, u2))) // TODO
-        unplugMap += (c, env) -> (this, u2)
+        // TODO: Dire pk inCtxs est une value et pas une key.
+        unplugMap += (c, env) -> (this, u2, inCtxs)
         (u2, c)
       })
     }
@@ -506,8 +504,8 @@ trait OCBSL extends Definitions { ocbsl =>
 //    sigOfExpr(e)
 //  }
 
-  // TODO: !!!! Si un OEnv est ajouté, penser à regarder que toutes les refs soient correctes !!!!
-  def negCodeOf(c: Code): Code = {
+  // TODO: !!!! Si un Ctxs est ajouté, penser à regarder que toutes les refs soient correctes !!!!
+  def negCodeOf(c: Code)(using OEnv): Code = {
     assert(codeTpe(c) == BoolTy, s"Got ${codeTpe(c)}")
     code2sig(c) match {
       case Signature(Label.Not, Seq(cc)) => cc
@@ -516,7 +514,16 @@ trait OCBSL extends Definitions { ocbsl =>
       case Signature(Label.GreaterEquals, Seq(lhs, rhs)) => codeOfSig(mkLessThan(lhs, rhs), BoolTy)
       case Signature(Label.GreaterThan, Seq(lhs, rhs)) => codeOfSig(mkLessEquals(lhs, rhs), BoolTy)
       case Signature(Label.LessEquals, Seq(lhs, rhs)) => codeOfSig(mkGreaterThan(lhs, rhs), BoolTy)
-      case _ => codeOfSig(mkNot(c), BoolTy)
+      case _ =>
+        if (CodeRes.isTerminal(c)) codeOfSig(mkNot(c), BoolTy)
+        else {
+          // Unplugging a terminal gives the terminal itself, hence we have the above guard.
+          unplugged(c) match {
+            case Some((cr, _, inCtxs)) =>
+              cr.derived(negCodeOf(cr.terminal)).selfPlugged(inCtxs)._2
+            case _ => codeOfSig(mkNot(c), BoolTy)
+          }
+        }
     }
   }
 
@@ -1025,7 +1032,7 @@ trait OCBSL extends Definitions { ocbsl =>
 
     if (rdisjs.contains(ror)) {
       // rdisjs a été simplifié en un seul disjunct qui a été selfPlugged. On le deplug et le retourne
-      val Some((cr, _)) = unplugged(ror)
+      val Some((cr, _, _)) = unplugged(ror)
       assert(outerCtxs.isPrefixOf(cr.ctxs))
       cr
     } else {
@@ -1209,16 +1216,16 @@ trait OCBSL extends Definitions { ocbsl =>
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-  case class RevEnv(revLetDefs: Map[Code, VarId]) {
+  case class RevEnv(revLetDefs: Map[Code, VarId], inLambda: Boolean) {
     def withLetBounds(vs: Seq[(VarId, Code)]): RevEnv =
-      RevEnv(revLetDefs ++ vs.map { case (v, c) => c -> v }.toMap)
+      RevEnv(revLetDefs ++ vs.map { case (v, c) => c -> v }.toMap, inLambda)
 
     def withLetBounds(v: VarId, c: Code): RevEnv =
-      RevEnv(revLetDefs + (c -> v))
+      RevEnv(revLetDefs + (c -> v), inLambda)
   }
 
   object RevEnv {
-    def empty: RevEnv = RevEnv(Map.empty)
+    def empty: RevEnv = RevEnv(Map.empty, false)
   }
 
   case class RevRes(expr: Expr, used: Set[VarId])
@@ -1258,7 +1265,7 @@ trait OCBSL extends Definitions { ocbsl =>
       case Signature(Label.IfExpr, Seq(cond, thn, els)) => recHelper(cond, thn, els)(IfExpr.apply)
       case Signature(Label.Lambda(params), Seq(body)) =>
         val vds = params.map(v => new ValDef(varId2Var(v)))
-        recHelper(body)(Lambda(vds, _))
+        recHelper(body)(Lambda(vds, _))(using renv.copy(inLambda = true))
       case Signature(Label.Choose(v), Seq(pred)) => recHelper(pred)(Choose(new ValDef(varId2Var(v)), _))
       case Signature(Label.Forall(params), Seq(pred)) =>
         val vds = params.map(v => new ValDef(varId2Var(v)))
@@ -1267,7 +1274,9 @@ trait OCBSL extends Definitions { ocbsl =>
       case Signature(Label.Or, args) => recHelper(args)(Or.apply)
       case Signature(Label.Not, Seq(c)) =>
         code2sig(c) match {
-          case Signature(Label.Or, disjs) => recHelper(disjs.map(negCodeOf))(And.apply)
+          case Signature(Label.Or, disjs) =>
+            given OEnv = OEnv(renv.inLambda, forceBinding = false)
+            recHelper(disjs.map(negCodeOf))(And.apply)
           case _ => recHelper(c)(Not.apply)
         }
       case Signature(Label.Equals, Seq(c1, c2)) => recHelper(c1, c2)(Equals.apply)
