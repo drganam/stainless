@@ -30,6 +30,7 @@ trait OCBSLSimplifier { self =>
     val oc = ocbslTL.get()
     given oc.OEnv = oc.OEnv.empty
     given oc.Ctxs = oc.Ctxs.empty
+    given oc.LetValSubst = oc.LetValSubst.empty
 
     val resE = oc.codeOfExpr(e)
     val codeE = resE.selfPlugged(oc.Ctxs.empty)._2

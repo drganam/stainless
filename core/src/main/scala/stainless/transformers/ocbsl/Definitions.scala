@@ -57,9 +57,8 @@ trait Definitions {
 
   // TODO: S'assurer que les position ou autre info n'influence pas == sur Label
   enum Label {
-//    case Var(v: Variable)
     case Var(v: VarId)
-    case Let(v: VarId)
+    case Let
     case Tuple
     case ADT(id: Identifier, tps: Seq[Type])
     // TODO: Trimbaler ce ctor n'est pas très joli non?
@@ -279,7 +278,7 @@ trait Definitions {
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
   def mkVar(v: VarId): Signature = Signature(Label.Var(v), Seq.empty)
-  def mkLet(v: VarId, e: Code, body: Code): Signature = Signature(Label.Let(v), Seq(e, body))
+  def mkLet(e: Code, body: Code): Signature = Signature(Label.Let, Seq(e, body))
   def mkTuple(args: Seq[Code]): Signature = {
     assert(args.size >= 2)
     Signature(Label.Tuple, args)
