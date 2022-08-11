@@ -26,15 +26,22 @@ trait OCBSL extends Definitions { ocbsl =>
     if (as.isEmpty) None
     else f(as.head).orElse(findMap(as.tail)(f))
 
-  case class OEnv(inLambda: Boolean, forceBinding: Boolean)
-
-  object OEnv {
-    def empty: OEnv = OEnv(false, false)
+  case class OEnv(nesting: LambdaNesting, forceBinding: Boolean) {
+    def inc: OEnv = OEnv(nesting.inc, forceBinding)
+    def incIf(lab: Label.LambdaLike) = OEnv(nesting.incIf(lab), forceBinding)
   }
 
-  case class InLambda(v: Boolean) {
-    def ||(other: Boolean): InLambda = InLambda(v || other)
-    def ||(other: InLambda): InLambda = InLambda(v || other.v)
+  object OEnv {
+    def empty: OEnv = OEnv(LambdaNesting(0), false)
+  }
+
+  case class LambdaNesting(level: Int) {
+    require(level >= 0)
+
+    def inAnyLambda: Boolean = level > 0
+    def inc: LambdaNesting = LambdaNesting(level + 1)
+    def incIf(lab: Label.LambdaLike): LambdaNesting =
+      if (lab.isLambda) inc else this
   }
 
   enum Ctx {
@@ -161,7 +168,7 @@ trait OCBSL extends Definitions { ocbsl =>
               // TODO: pr le setTo: y-a-t-il tjrs un sens à cela? parce que de toute façon, on est sensé bind "tout en haut" non?
               // TODO: inCtx: avec ou sans le binding?
               // TODO: defn ou terminal? Hmm, ce serait plutot terminal, meme pr lambda non?
-              val u2 = compWoTerm ++ u.setTo(terminal, Occurrence.Once(prev, env.inLambda)) // TODO: Hmm est-ce "vrai"?
+              val u2 = compWoTerm ++ u.setTo(terminal, Occurrence.Once(prev, env.nesting)) // TODO: Hmm est-ce "vrai"?
               (u2, cLet, inlinedLet)
             } else if (bdgCase == BindingCase.Inlinable && isLambda(terminal)) {
               val res = inlineAppliedLambda(terminal, c)(using env, prev)
@@ -174,8 +181,8 @@ trait OCBSL extends Definitions { ocbsl =>
             } else {
               val u2 = definitionOccurrence match {
                 case Occurrence.Zero => u
-                case Occurrence.Once(inCtxs, inLambda) =>
-                  u ++ compWoTerm.withInlinedOccurrences(inCtxs.withRemovedBinding(terminal), inLambda)
+                case Occurrence.Once(inCtxs, nesting) =>
+                  u ++ compWoTerm.withInlinedOccurrences(inCtxs.withRemovedBinding(terminal), nesting)
                 case Occurrence.Many => sys.error("cannot happen (would have fallen under 'MustBind' case)")
               }
               // TODO: Dire pk: en gros parce que ce bdg est removed
@@ -261,7 +268,7 @@ trait OCBSL extends Definitions { ocbsl =>
 
   enum Occurrence {
     case Zero
-    case Once(inCtxs: Ctxs, inLambda: Boolean)
+    case Once(inCtxs: Ctxs, nesting: LambdaNesting)
     case Many
 
     def ++(that: Occurrence): Occurrence = (this, that) match {
@@ -315,11 +322,14 @@ trait OCBSL extends Definitions { ocbsl =>
       case _ => true
     }
 
-    def withInlinedOccurrences(newInCtxs: Ctxs, inLambda: Boolean): Occurrences = {
+    def withInlinedOccurrences(newInCtxs: Ctxs, nesting: LambdaNesting)(using env: OEnv): Occurrences = {
+      assert(env.nesting.level <= nesting.level)
       Occurrences(c2u.map {
-        case (c, Occurrence.Once(prevInCtxs, inLambda2)) =>
+        case (c, Occurrence.Once(prevInCtxs, nesting2)) =>
+          assert(env.nesting.level <= nesting2.level)
+          val nbNestedLambdas = nesting2.level - env.nesting.level
           val ctxs = prevInCtxs.movedAfter(newInCtxs)
-          c -> Occurrence.Once(ctxs, inLambda || inLambda2)
+          c -> Occurrence.Once(ctxs, LambdaNesting(nesting.level + nbNestedLambdas))
         case (c, occ) => c -> occ
       })
     }
@@ -338,7 +348,7 @@ trait OCBSL extends Definitions { ocbsl =>
 
     def of(c: Code)(using env: OEnv, ctxs: Ctxs): Occurrences = {
       if (code2sig(c).label.isLiteral) Occurrences.empty
-      else Occurrences(Map(c -> Occurrence.Once(ctxs, env.inLambda)))
+      else Occurrences(Map(c -> Occurrence.Once(ctxs, env.nesting)))
     }
   }
 
@@ -526,13 +536,15 @@ trait OCBSL extends Definitions { ocbsl =>
               // Si une expr impure n'apparait pas dans le body, on ne peut pas l'éliminer, il faut donc le bind
               if (!isPure) BindingCase.MustBind
               else BindingCase.Elidable
-            case Occurrence.Once(inCtxs, inLambda) if isPure =>
+            case Occurrence.Once(inCtxs, nesting) if isPure =>
+              assert(env.nesting.level <= nesting.level)
               assert(prefix.isPrefixOf(inCtxs))
               assert(prefix.ctxs.size + 1 <= inCtxs.ctxs.size)
               assert(inCtxs.ctxs(prefix.ctxs.size) == Ctx.BoundDef(terminal))
-              if (inLambda && terminalComposition.hasLambda) BindingCase.MustBind
+              if (nesting.inAnyLambda && terminalComposition.hasLambda) BindingCase.MustBind
               else BindingCase.Inlinable
-            case Occurrence.Once(inCtxs, inLambda) =>
+            case Occurrence.Once(inCtxs, nesting) =>
+              assert(env.nesting.level <= nesting.level)
               // TODO: Expliquer cette daube
               // inEnv représente l'env. actif lors de l'occurrence de `terminal` dans le trou que l'on s'apprête à compléter.
               // S'il est différent de l'env ou `terminal` est introduit, alors on a besoin de let-bind, car inline
@@ -549,7 +561,7 @@ trait OCBSL extends Definitions { ocbsl =>
               // 3. Tous les bindings supplémentaires (*après celui-ci*) sont pures
               // 2 et 3 sont gérés par isPureSuffix
 
-              val isPureSuffix: Boolean = {
+              lazy val isPureSuffix: Boolean = {
                 def rec(extras: Seq[Ctx], running: Ctxs): Boolean = {
                   assert(extras.forall(ex => !running.ctxs.contains(ex)))
                   assert(running.isPrefixOf(inCtxs))
@@ -566,7 +578,7 @@ trait OCBSL extends Definitions { ocbsl =>
                 rec(extras, prefix.addBoundDef(terminal))
               }
 
-              if (!inLambda && isPureSuffix) BindingCase.Inlinable
+              if (env.nesting == nesting && isPureSuffix) BindingCase.Inlinable
               else BindingCase.MustBind
           }
         }
@@ -705,7 +717,7 @@ trait OCBSL extends Definitions { ocbsl =>
             val vParams = params.map(vd => idOfVariable(vd.toVariable))
             (Label.Forall(vParams), pred)
         }
-        val rbody = codeOfExpr(body)(using env.copy(inLambda = env.inLambda || lab.isLambda))
+        val rbody = codeOfExpr(body)(using env.incIf(lab))
         CodeRes.lambdaLike(lab, rbody, tpe)
 
       case Let(vd, e, body) =>
@@ -1131,16 +1143,18 @@ trait OCBSL extends Definitions { ocbsl =>
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-  case class RevEnv(revLetDefs: Map[Code, VarId], inLambda: Boolean) {
+  case class RevEnv(revLetDefs: Map[Code, VarId], nesting: LambdaNesting) {
     def withLetBounds(vs: Seq[(VarId, Code)]): RevEnv =
-      RevEnv(revLetDefs ++ vs.map { case (v, c) => c -> v }.toMap, inLambda)
+      RevEnv(revLetDefs ++ vs.map { case (v, c) => c -> v }.toMap, nesting)
 
     def withLetBounds(v: VarId, c: Code): RevEnv =
-      RevEnv(revLetDefs + (c -> v), inLambda)
+      RevEnv(revLetDefs + (c -> v), nesting)
+
+    def inc: RevEnv = RevEnv(revLetDefs, nesting.inc)
   }
 
   object RevEnv {
-    def empty: RevEnv = RevEnv(Map.empty, false)
+    def empty: RevEnv = RevEnv(Map.empty, LambdaNesting(0))
   }
 
   case class RevRes(expr: Expr, used: Set[VarId])
@@ -1181,7 +1195,7 @@ trait OCBSL extends Definitions { ocbsl =>
       case Signature(Label.IfExpr, Seq(cond, thn, els)) => recHelper(cond, thn, els)(IfExpr.apply)
       case Signature(Label.Lambda(params), Seq(body)) =>
         val vds = params.map(v => new ValDef(varId2Var(v)))
-        recHelper(body)(Lambda(vds, _))(using renv.copy(inLambda = true))
+        recHelper(body)(Lambda(vds, _))(using renv.inc)
       case Signature(Label.Choose(v), Seq(pred)) => recHelper(pred)(Choose(new ValDef(varId2Var(v)), _))
       case Signature(Label.Forall(params), Seq(pred)) =>
         val vds = params.map(v => new ValDef(varId2Var(v)))
@@ -1191,7 +1205,7 @@ trait OCBSL extends Definitions { ocbsl =>
       case Signature(Label.Not, Seq(c)) =>
         code2sig(c) match {
           case Signature(Label.Or, disjs) =>
-            given OEnv = OEnv(renv.inLambda, forceBinding = false)
+            given OEnv = OEnv(renv.nesting, forceBinding = false)
             recHelper(disjs.map(negCodeOf))(And.apply)
           case _ => recHelper(c)(Not.apply)
         }
@@ -1394,7 +1408,7 @@ trait OCBSL extends Definitions { ocbsl =>
           // TODO: Différencier:
           //    -outer assms et local assms
           //    -outer open bound et local open bound
-          given OEnv = OEnv(inLambda = false, forceBinding = true)
+          given OEnv = OEnv(LambdaNesting(0), forceBinding = true)
           given Ctxs = Ctxs.empty
           given LetValSubst = LetValSubst.empty
           assert(!visiting.contains(fn))
@@ -2015,7 +2029,7 @@ trait OCBSL extends Definitions { ocbsl =>
           val occE = occurrencesOf(e)
           assert(occE(e).isOnce)
           val occB = occurrencesOf(b)(using env, ctxs.addBoundDef(e))
-          (occE ++ occB).setTo(e, Occurrence.Once(ctxs, env.inLambda))
+          (occE ++ occB).setTo(e, Occurrence.Once(ctxs, env.nesting))
 
         case Signature(l: Label.AssumeLike, Seq(pred, body)) =>
           assert(CodeRes.isTerminal(pred))
@@ -2024,7 +2038,7 @@ trait OCBSL extends Definitions { ocbsl =>
           occPred ++ occBody
 
         case Signature(lab: Label.LambdaLike, Seq(body)) =>
-          slf ++ occurrencesOf(body)(using env.copy(inLambda = env.inLambda || lab.isLambda), ctxs)
+          slf ++ occurrencesOf(body)(using env.incIf(lab), ctxs)
 
         case Signature(Label.Ensuring, Seq(body, pred)) =>
           slf ++ occurrencesOf(body) ++ occurrencesOf(pred)
@@ -2101,7 +2115,7 @@ trait OCBSL extends Definitions { ocbsl =>
             val occE = occOf(e)
             assert(occE(e).isOnce)
             val occB = occOf(b)(using env, ctxs.addBoundDef(e))
-            Right((acc ++ occE ++ occB).setTo(e, Occurrence.Once(ctxs, env.inLambda)))
+            Right((acc ++ occE ++ occB).setTo(e, Occurrence.Once(ctxs, env.nesting)))
 
           case Signature(l: Label.AssumeLike, Seq(pred, body)) =>
             assert(CodeRes.isTerminal(pred))
@@ -2175,7 +2189,7 @@ trait OCBSL extends Definitions { ocbsl =>
           CodeRes.ifExpr(rcond, rthenn, rels, tpe)
 
         case Signature(lab: Label.LambdaLike, Seq(body)) =>
-          val rbody = transform(body, repl, extra)(using env.copy(inLambda = env.inLambda || lab.isLambda))
+          val rbody = transform(body, repl, extra)(using env.incIf(lab))
           CodeRes.lambdaLike(lab, rbody, tpe)
 
         case Signature(lab: Label.AssumeLike, Seq(pred, body)) =>
@@ -2313,7 +2327,7 @@ trait OCBSL extends Definitions { ocbsl =>
         } yield rpred
 
       case Signature(lab: Label.LambdaLike, Seq(body)) =>
-        tryFold(body, acc, extra)(using env.copy(inLambda = env.inLambda || lab.isLambda), ctxs)
+        tryFold(body, acc, extra)(using env.incIf(lab), ctxs)
 
       case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
         assert(2 * pats.size == guardRhs.size)
