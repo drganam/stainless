@@ -99,6 +99,14 @@ trait OCBSL extends Definitions { ocbsl =>
       })
     }
 
+    def movedAfter(after: Ctxs): Ctxs = {
+      val common = this.ctxs.zip(after.ctxs).takeWhile { case (slf, after) => slf == after }.map(_._1)
+      val suffixThis = this.ctxs.drop(common.size)
+      val suffixAfter = after.ctxs.drop(common.size)
+      val merged = common ++ suffixAfter ++ suffixThis
+      Ctxs(merged)
+    }
+
     // En gros: On plug jusqu'à ce que l'on atteigne inCtxs
     def plugged(inCtxs: Ctxs, u: Occurrences, c: Code)(using env: OEnv): (Occurrences, Code, Set[Code]) = {
       assert(inCtxs.isPrefixOf(this))
@@ -126,14 +134,14 @@ trait OCBSL extends Definitions { ocbsl =>
         }
 
         assert(curr.ctxs == prev.ctxs :+ toPlug)
-        assert(u.allSuffixes(using curr))
+        assert(u.allSuffixes(curr))
 
         val uuu0 = occurrencesOf(c)(using env, curr)
         val uuu = uuu0.withRemovedBindings(inlinedLet)
         if (u != uuu) {
           val eq = u.c2u.toSet.intersect(uuu.c2u.toSet)
           val diff = (u.c2u.toSet ++ uuu.c2u.toSet) -- eq
-          println("!!! Pas d'égalité")
+          assert(false, "!!! Pas d'égalité")
         }
 
         val (u2, c2, inlinedLet2) = toPlug match {
@@ -164,10 +172,11 @@ trait OCBSL extends Definitions { ocbsl =>
               val u3 = u2.withRemovedBindings(inlinedLet + terminal)
               (u3, c2, inlinedLet + terminal)
             } else {
-              assert(!definitionOccurrence.isMany)
-              val u2 = {
-                if (definitionOccurrence.isZero) u
-                else u ++ compWoTerm
+              val u2 = definitionOccurrence match {
+                case Occurrence.Zero => u
+                case Occurrence.Once(inCtxs, inLambda) =>
+                  u ++ compWoTerm.withInlinedOccurrences(inCtxs.withRemovedBinding(terminal), inLambda)
+                case Occurrence.Many => sys.error("cannot happen (would have fallen under 'MustBind' case)")
               }
               // TODO: Dire pk: en gros parce que ce bdg est removed
               val u3 = u2.withRemovedBinding(terminal)
@@ -180,14 +189,14 @@ trait OCBSL extends Definitions { ocbsl =>
             (u ++ Occurrences.of(predTerminal)(using env, prev), c2, inlinedLet)
         }
 
-        assert(u2.allSuffixes(using prev))
+        assert(u2.allSuffixes(prev))
 
         val uuu20 = occurrencesOf(c2)(using env, prev)
         val uuu2 = uuu20.withRemovedBindings(inlinedLet2)
         if (u2 != uuu2) {
           val eq = u2.c2u.toSet.intersect(uuu2.c2u.toSet)
           val diff = (u2.c2u.toSet ++ uuu2.c2u.toSet) -- eq
-          println("!!! Pas d'égalité2")
+          assert(false, "!!! Pas d'égalité2")
         }
 
         (u2, c2, inlinedLet2)
@@ -301,9 +310,18 @@ trait OCBSL extends Definitions { ocbsl =>
       case (c, _) => c -> Occurrence.Many
     })
 
-    def allSuffixes(using ctxs: Ctxs): Boolean = c2u.values.forall {
+    def allSuffixes(ctxs: Ctxs): Boolean = c2u.values.forall {
       case Occurrence.Once(inCtxs, _) => ctxs.isPrefixOf(inCtxs)
       case _ => true
+    }
+
+    def withInlinedOccurrences(newInCtxs: Ctxs, inLambda: Boolean): Occurrences = {
+      Occurrences(c2u.map {
+        case (c, Occurrence.Once(prevInCtxs, inLambda2)) =>
+          val ctxs = prevInCtxs.movedAfter(newInCtxs)
+          c -> Occurrence.Once(ctxs, inLambda || inLambda2)
+        case (c, occ) => c -> occ
+      })
     }
 
     def withRemovedBinding(bound: Code): Occurrences = withRemovedBindings(Set(bound))
@@ -378,7 +396,7 @@ trait OCBSL extends Definitions { ocbsl =>
           val eq = u2.c2u.toSet.intersect(expected.c2u.toSet)
           val diff = (u2.c2u.toSet ++ expected.c2u.toSet) -- eq
           // if (!env.forceBinding)
-          println("owie, not the same :(")
+          assert(false, "owie, not the same :(")
         }
 
         assert(codeTpe(terminal) == codeTpe(c), s"${codeTpe(terminal)} != ${codeTpe(c)}")
@@ -899,6 +917,7 @@ trait OCBSL extends Definitions { ocbsl =>
 //    }
 //  }
 
+  // TODO: Make this work with occurrences
   def transformDisjunction[T](disjs: Seq[T])(f: Ctxs ?=> T => CodeRes)(using env: OEnv, outerCtxs: Ctxs): CodeRes = {
     def rec(disjs: Seq[T], rdisjsAcc: Seq[Code])(using ctxs: Ctxs): Seq[Code] = {
       if (disjs.isEmpty) rdisjsAcc
@@ -912,25 +931,31 @@ trait OCBSL extends Definitions { ocbsl =>
         // pas celui de re car celui-ci contient des bdgs et d'autres conds (qui ne sont pas carry over)
         val (_, rePlugged) = re.selfPlugged(ctxs)
         val neg = negCodeOf(rePlugged)
-        if (neg == falseCode) rdisjsAcc :+ rePlugged // Pas besoin d'aller plus loin, car on couvre tous les cas
-        else rec(disjs.tail, rdisjsAcc :+ rePlugged)(using outerCtxs.withCond(neg)) // Ditto
+//        if (neg == falseCode) rdisjsAcc :+ rePlugged // Pas besoin d'aller plus loin, car on couvre tous les cas
+//        else {
+          val res = rec(disjs.tail, rdisjsAcc :+ rePlugged)(using ctxs.withCond(neg))
+          val noTailRecPls = ctxs.withCond(neg)
+          res
+//        }
       }
     }
 
     val rdisjs = rec(disjs, Seq.empty)
     val isPure = rdisjs.forall(c => codePurity(c).isPure)
-    val ror = simplifiedDisjunction(rdisjs, mayDrop = isPure, mayReorder = isPure) // rooooaaaaarr... ah non c'est pas ça...
-
-    if (rdisjs.contains(ror)) {
-      // rdisjs a été simplifié en un seul disjunct qui a été selfPlugged. On le deplug et le retourne
-      val Some((cr, _, _)) = unplugged(ror)
-      assert(outerCtxs.isPrefixOf(cr.ctxs))
-      cr
-    } else {
-      // Remarque: on retourne le ctx original car les PCs des ors ne sont pas retenues hors des disjunctions.
-      // P.ex. dans val x = b1 || b2 || b3 il serait insensé d'avoir !b1 && !b2 && !b3 dans le env de x.
-      CodeRes(ror, outerCtxs.addBoundDef(ror))
-    }
+    val ror = codeOfSig(mkOr(rdisjs), BoolTy)
+    CodeRes(ror, outerCtxs.addBoundDef(ror))
+//    val ror = simplifiedDisjunction(rdisjs, mayDrop = isPure, mayReorder = isPure) // rooooaaaaarr... ah non c'est pas ça...
+//
+//    if (rdisjs.contains(ror)) {
+//      // rdisjs a été simplifié en un seul disjunct qui a été selfPlugged. On le deplug et le retourne
+//      val Some((cr, _, _)) = unplugged(ror)
+//      assert(outerCtxs.isPrefixOf(cr.ctxs))
+//      cr
+//    } else {
+//      // Remarque: on retourne le ctx original car les PCs des ors ne sont pas retenues hors des disjunctions.
+//      // P.ex. dans val x = b1 || b2 || b3 il serait insensé d'avoir !b1 && !b2 && !b3 dans le env de x.
+//      CodeRes(ror, outerCtxs.addBoundDef(ror))
+//    }
   }
 
   // TODO: Voir si on peut pas faire qqchose pr eviter code dup avec pNegNormal
