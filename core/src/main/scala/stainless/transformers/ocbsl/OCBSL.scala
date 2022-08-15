@@ -499,17 +499,34 @@ trait OCBSL extends Definitions { ocbsl =>
 
   // TODO: Pk ce truc est fait dans codeOf mais pas dans pDisj?
   // TODO: Et les assms???
-  def simplifiedDisjunction(disj0: Seq[Code], mayDrop: Boolean, mayReorder: Boolean)(using OEnv, Ctxs): Code = {
+  def simplifiedDisjunction(disj0: Seq[Code])(using OEnv, Ctxs): Code = {
     assert(disj0.forall(c => codeTpe(c) == BoolTy))
     val disj = unOrCodes(disj0)
-    val disj1 = disj.filter(_ != falseCode).distinct
-    if (disj1.isEmpty) falseCode
-    else if (disj1.size == 1) disj1.head
-    // TODO: mayDrop trop contraignant! On peut utiliser le short circuiting: si on a qqchose de true et que tout ce qu'on a parcouru est pure, on peut tout drop et retourner true
-    else if (mayDrop && (disj1.contains(trueCode) || checkForContradiction(disj1))) trueCode
+    val disjs1 = disj.filter(_ != falseCode).distinct
+    if (disjs1.isEmpty) falseCode
+    else if (disjs1.size == 1) disjs1.head
     else {
-      val disj2 = if (mayReorder) disj1.sorted else disj1
-      codeOfSig(mkOr(disj2), BoolTy)
+      val lastKeptIx = Some(disjs1.indexOf(trueCode)).filter(_ >= 0)
+        .orElse(checkForContradiction(disjs1))
+        .getOrElse(disjs1.length - 1)
+      val purities = disjs1.map(codePurity)
+      if (lastKeptIx == disjs1.length - 1) {
+        // Nothing simplified, so just make the disjunction and return
+        val disjs2 = if (purities.forall(_.isPure)) disjs1.sorted else disjs1
+        codeOfSig(mkOr(disjs2), BoolTy)
+      } else {
+        // Due to short-circuiting, once the disjunction evaluates to true, the remaining disjuncts won't ever be evaluated
+        // so it is safe to drop them -- including impure expressions.
+        val disjs2 = disjs1.take(lastKeptIx + 1)
+        val disjs2Purities = purities.take(lastKeptIx + 1)
+        if (disjs2Purities.forall(_.isPure)) trueCode
+        else {
+          // Add a trailing `true` if not already present (because the disjunction will evaluate to true,
+          // but due to the presence of impure expressions, we are not allowed to simplify the whole expr to true
+          val disjs3 = if (disjs2.contains(trueCode)) disjs2 else disjs2 :+ trueCode
+          codeOfSig(mkOr(disjs3), BoolTy)
+        }
+      }
     }
   }
 
@@ -892,29 +909,54 @@ trait OCBSL extends Definitions { ocbsl =>
     }
   }
 
-  def checkForContradiction(disj: Seq[Code])(using OEnv, Ctxs): Boolean = {
-    // TODO: Relativement different par rapport à l'orig
-    val (pos, neg) = disj.foldLeft((Set.empty[Code], Set.empty[Code])) {
-      case ((posAcc, negAcc), c) =>
-        // TODO: Hmm, il faudrait aussi faire pour les <=, <, >= et > ?
-        // TODO: Hmm, il faudrait aussi faire pour les <=, <, >= et > ?
-        // TODO: Hmm, il faudrait aussi faire pour les <=, <, >= et > ?
-        code2sig(c) match {
-          case Signature(Label.Not, Seq(cc)) => (posAcc, negAcc + cc)
-          case _ => (posAcc + c, negAcc)
-        }
+  def checkForContradiction(disjs0: Seq[Code]): Option[Int] = {
+    // Convert a >= b and a > b to !(a < b) and !(a <= b) respectively.
+    // This will ease the work of for the rest of the fn.
+    // Assumes that disjs is normalized (i.e. we have `a` instead of !!a, a <= b instead of !(a > b) etc.)
+    // so in some sense we are denormalizing parts of the given disjs.
+    // If disjs is not normalized, denormalize may return expressions such as !!(a > b),
+    // which may cause a contradiction to be missed.
+    def denormalize(disjs: Seq[Code]): Seq[Code] = {
+      disjs.map { c => code2sig(c) match {
+        case Signature(Label.GreaterEquals, Seq(a, b)) =>
+          val lt = codeOfSig(mkLessThan(a, b), BoolTy)
+          codeOfSig(mkNot(lt), BoolTy)
+        case Signature(Label.GreaterThan, Seq(a, b)) =>
+          val leq = codeOfSig(mkLessEquals(a, b), BoolTy)
+          codeOfSig(mkNot(leq), BoolTy)
+        case _ => c
+      }}
     }
 
-    if (pos.intersect(neg).nonEmpty) true
-    else {
-      neg.exists { negC =>
-        code2sig(negC) match {
-          case Signature(Label.Or, negDisj) =>
-            // TODO: Est-ce vrai? Quid si un meme code apparait dans un truc negatif?
-            negDisj.forall(disj.contains)
-          case _ => false
+    val disjs = denormalize(disjs0)
+
+    def firstTry(i: Int, pos: Set[Code], neg: Set[Code]): Either[(Set[Code], Set[Code]), Int] = {
+      if (i == disjs.length) Left((pos, neg))
+      else {
+        val c = disjs.head
+        code2sig(c) match {
+          case Signature(Label.Not, Seq(cc)) =>
+            if (pos(cc)) Right(i)
+            else firstTry(i + 1, pos, neg + cc)
+          case _ =>
+            if (neg(c)) Right(i)
+            else firstTry(i + 1, pos + c, neg)
         }
       }
+    }
+
+    firstTry(0, Set.empty, Set.empty) match {
+      case Right(ix) => Some(ix)
+      case Left((_, neg)) =>
+        val found = neg.exists { negC =>
+          code2sig(negC) match {
+            case Signature(Label.Or, negDisj) =>
+              // TODO: Est-ce vrai? Quid si un meme code apparait dans un truc negatif?
+              denormalize(negDisj).forall(disjs.contains)
+            case _ => false
+          }
+        }
+        if (found) Some(disjs.length - 1) else None
     }
   }
 
@@ -953,8 +995,8 @@ trait OCBSL extends Definitions { ocbsl =>
     }
 
     val rdisjs = rec(disjs, Seq.empty)
-    val isPure = rdisjs.forall(c => codePurity(c).isPure)
     val ror = codeOfSig(mkOr(rdisjs), BoolTy)
+//    val ror = simplifiedDisjunction(rdisjs) // rooooaaaaarr... ah non c'est pas ça...
     CodeRes(ror, outerCtxs.addBoundDef(ror))
 //    val ror = simplifiedDisjunction(rdisjs, mayDrop = isPure, mayReorder = isPure) // rooooaaaaarr... ah non c'est pas ça...
 //
@@ -1037,8 +1079,8 @@ trait OCBSL extends Definitions { ocbsl =>
       // a ==> b === a && b = a
       // TODO: Drop+Reorder ok?
       // TODO: C'est un peu bête parce que conjunct utilise ctxs...
-      val lhsConj = conjunct(ctxs.allConds, mayDrop = true, mayReorder = true)
-      val rhsLhsConj = conjunct(Seq(lhsConj, rhs), mayDrop = true, mayReorder = true)
+      val lhsConj = conjunct(ctxs.allConds)
+      val rhsLhsConj = conjunct(Seq(lhsConj, rhs))
       rhsLhsConj == lhsConj
     }
   }
@@ -1083,21 +1125,9 @@ trait OCBSL extends Definitions { ocbsl =>
   }
   def varTpe(v: VarId): Type = varId2Var(v).getType // TODO: Apparemment, il y a une difference entre .getType et .tpe (pour les refinement type)
 
-  // TODO: Renommer, risque de confusion...
-  def conjunct(conj: Seq[Code])(using OEnv, Ctxs): Code = {
-    val isPure = conj.forall(c => codePurity(c).isPure)
-    conjunct(conj, isPure, isPure)
-  }
+  def conjunct(conj: Seq[Code])(using OEnv, Ctxs): Code = negCodeOf(negatedConjunction(conj))
 
-  def conjunct(conj: Seq[Code], mayDrop: Boolean, mayReorder: Boolean)(using OEnv, Ctxs): Code = negCodeOf(negatedConjunction(conj, mayDrop, mayReorder))
-
-  def negatedConjunction(conj: Seq[Code], mayDrop: Boolean, mayReorder: Boolean)(using OEnv, Ctxs): Code= simplifiedDisjunction(conj.map(negCodeOf), mayDrop, mayReorder)
-
-  // TODO: Renommer, risque de confusion...
-  def negatedConjunction(conj: Seq[Code])(using OEnv, Ctxs): Code= {
-    val isPure = conj.forall(c => codePurity(c).isPure)
-    negatedConjunction(conj, isPure, isPure)
-  }
+  def negatedConjunction(conj: Seq[Code])(using OEnv, Ctxs): Code= simplifiedDisjunction(conj.map(negCodeOf))
 
   def codeOfIntLit(lit: BigInt, tpe: Type): Code = codeOfLit(intLitOfType(lit, tpe))
 
@@ -1815,7 +1845,7 @@ trait OCBSL extends Definitions { ocbsl =>
     lazy val isRhsPure = codePurity(matchCase.rhs)(using env, ctxs1.withConds(caseConds)).isPure
 
     if (caseConds.forall(c => codePurity(c).isPure)) { // TODO: Calcul de la pureté imprécis, on devrait les accumuler...
-      val caseCondsConj = conjunct(caseConds, mayDrop = true, mayReorder = true) // Puisque tout est pur
+      val caseCondsConj = conjunct(caseConds)
       if (caseCondsConj == trueCode) SimplifiedCase.Covered
       else if (caseCondsConj == falseCode && isRhsPure) SimplifiedCase.Unreachable
       else SimplifiedCase.Unchanged(caseConds)
