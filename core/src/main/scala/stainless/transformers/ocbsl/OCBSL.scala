@@ -119,9 +119,10 @@ trait OCBSL extends Definitions { ocbsl =>
       assert(inCtxs.isPrefixOf(this))
 
       def plugCtx(curr: Ctxs, prev: Ctxs, toPlug: Ctx, u: Occurrences, c: Code, inlinedLet: Set[Code]): (Occurrences, Code, Set[Code]) = {
+        // TODO: Quid si inline dans un lambda mais pas ailleurs "plus loin"???
         // TODO: Cette histoire de assume(...) en début de lambda????
         // TODO: Dire qu'ici et pas ailleurs car on ne veut pas remettre des ctxs.addBoundDef pr les lambdas
-        def inlineAppliedLambda(cLam: Code, in: Code): (Occurrences, Code) = {
+        def inlineAppliedLambda(cLam: Code, in: Code): (Occurrences, Code, Set[Code]) = {
           val Signature(Label.Lambda(params), Seq(body)) = code2sig(cLam)
           object inliner extends CodeTransformer {
             override type Extra = Unit
@@ -134,6 +135,10 @@ trait OCBSL extends Definitions { ocbsl =>
               case _ => super.transformImpl(c, repl, ())
             }
           }
+
+          ???
+
+          /*
           // TODO: Est-ce ok????
           // TODO: Est-ce ok????
           val inlined = inliner.transform(in, Map.empty, ())(using env, prev)
@@ -142,11 +147,14 @@ trait OCBSL extends Definitions { ocbsl =>
           val inlinedCtxs = inlined.ctxs.withRemovedBindings(inlinedLet + cLam)
           assert(prev.isPrefixOf(inlinedCtxs))
           val inlinedOcc = occurrencesOf(inlined.terminal)(using env, inlinedCtxs)
-          val (u2, c2, rm) = inlinedCtxs.plugged(prev, inlinedOcc, inlined.terminal)
+          val (u2, c2, inlinedLet2) = inlinedCtxs.plugged(prev, inlinedOcc, inlined.terminal)
           // TODO: Dire pk: en gros parce que ce bdg est removed
           // TODO: Dire pk on re-remove les inlinedLet: car res.selfPlugged va revisiter c
-          val u3 = u2.withRemovedBindings(inlinedLet + cLam)
-          (u3, c2)
+//          val allInlined = (inlinedLet ++ inlinedLet2) + cLam
+          val u3 = u2.withRemovedBindings(inlinedLet2 + cLam)
+          assert(u2 == u3)
+          (u3, c2, inlinedLet2 + cLam)
+          */
         }
 
         assert(curr.ctxs == prev.ctxs :+ toPlug)
@@ -167,7 +175,11 @@ trait OCBSL extends Definitions { ocbsl =>
             assert(!isLitOrVar(terminal))
             val composition = occurrencesOf(terminal)(using env, prev) // Avec terminal
             assert(composition(terminal).isOnce)
-            assert(composition.c2u.keySet.intersect(inlinedLet).isEmpty)
+            // TODO: Pas forcément: car on peut avoir dans une lambda, un ifexpr etc. un bdg/definition
+            //  qu'on a également "plus loin" dans le ctx
+            //  p.ex.  (if (cond) ... C(a, b, c) else ...); ...; C(a, b, c)
+            //  Le C(a, b, c) apparaitra 2x. On pourrait faire qqchose pour hoist des expressions pures en dehors de selfPlugged...
+            // assert(composition.c2u.keySet.intersect(inlinedLet).isEmpty)
             val compWoTerm = composition - terminal
             val definitionOccurrence = u(terminal)
             val bdgCase = needsBinding(terminal, compWoTerm, definitionOccurrence)(using env, prev)
@@ -180,8 +192,7 @@ trait OCBSL extends Definitions { ocbsl =>
               val u2 = compWoTerm ++ u.setTo(terminal, Occurrence.Once(prev, env.nesting)) // TODO: Hmm est-ce "vrai"?
               (u2, cLet, inlinedLet)
             } else if (bdgCase == BindingCase.Inlinable && isLambda(terminal)) {
-              val (u2, c2) = inlineAppliedLambda(terminal, c)
-              (u2, c2, inlinedLet + terminal)
+              inlineAppliedLambda(terminal, c)
             } else {
               val u2 = definitionOccurrence match {
                 case Occurrence.Zero => u
@@ -516,16 +527,17 @@ trait OCBSL extends Definitions { ocbsl =>
       val lastKeptIx = Some(disjs1.indexOf(trueCode)).filter(_ >= 0)
         .orElse(checkForContradiction(disjs1))
         .getOrElse(disjs1.length - 1)
-      val purities = disjs1.map(codePurity)
-      if (lastKeptIx == disjs1.length - 1) {
+
+      if (lastKeptIx == disjs1.length - 1 && disjs1.last != trueCode) {
         // Nothing simplified, so just make the disjunction and return
+        // TODO: Sort if "truly pure" and not pure due to binding!
         // val disjs2 = if (purities.forall(_.isPure)) disjs1.sorted else disjs1
         codeOfSig(mkOr(disjs1), BoolTy)
       } else {
         // Due to short-circuiting, once the disjunction evaluates to true, the remaining disjuncts won't ever be evaluated
         // so it is safe to drop them -- including impure expressions.
         val disjs2 = disjs1.take(lastKeptIx + 1)
-        val disjs2Purities = purities.take(lastKeptIx + 1)
+        val disjs2Purities = disjs2.map(codePurity)
         if (disjs2Purities.forall(_.isPure)) trueCode
         else {
           // Add a trailing `true` if not already present (because the disjunction will evaluate to true,
@@ -717,7 +729,7 @@ trait OCBSL extends Definitions { ocbsl =>
     val res = e match {
       case v: Variable =>
         val c = subst.get(v).getOrElse(codeOfVarId(idOfVariable(v)))
-        CodeRes(c, ctxs)
+        return CodeRes(c, ctxs) // C'est un binding, la simplif. a déjà été faite
 
       case l: Literal[_] => CodeRes(codeOfLit(l), ctxs)
 
@@ -987,14 +999,10 @@ trait OCBSL extends Definitions { ocbsl =>
       assert(outerCtxs.isPrefixOf(ctxs))
       if (disjs.isEmpty) rdisjsAcc
       else {
-        val re0: CodeRes = f(disjs.head)
-        assert(codeTpe(re0.terminal) == BoolTy, s"Got ${codeTpe(re0.terminal)}")
-        assert(ctxs.isPrefixOf(re0.ctxs))
-        val neg = negCodeOf(re0.terminal)
-        // TODO: Dire pk addBoundDef et pas cond. pas cond car pr le first, on ne veut pas avoir la cond!
-        //  On ajoute le binding neg pr eviter de faire un double bind dans certains cas
-//        val re = re0.copy(ctxs = re0.ctxs.addBoundDef(neg)) // TODO: Non! Car peut causer des expr impure a etre bound...
-        val re = re0
+        val re: CodeRes = f(disjs.head)
+        assert(codeTpe(re.terminal) == BoolTy, s"Got ${codeTpe(re.terminal)}")
+        assert(ctxs.isPrefixOf(re.ctxs))
+        val neg = negCodeOf(re.terminal)
         if (neg == falseCode) rdisjsAcc :+ re
         else rec(disjs.tail, rdisjsAcc :+ re)(using re.ctxs.withCond(neg))
       }
@@ -1027,48 +1035,6 @@ trait OCBSL extends Definitions { ocbsl =>
       val Some((unplg, _)) = unplugged(allCombined)(using env, pluggedCtxs2(allCombined))
       unplg
     }
-
-
-    /*
-    def rec(disjs: Seq[T], rdisjsAcc: Seq[Code])(using ctxs: Ctxs): Seq[Code] = {
-      if (disjs.isEmpty) rdisjsAcc
-      else {
-        assert(outerCtxs.isPrefixOf(ctxs))
-        assert(outerCtxs.bound == ctxs.bound)
-        val re = f(disjs.head)
-        assert(codeTpe(re.terminal) == BoolTy, s"Got ${codeTpe(re.terminal)}")
-        // TODO: Essayer d'extraire autant que possible ici
-        // Remarque: c'est bien le ctxs d'origine qu'on utilise,
-        // pas celui de re car celui-ci contient des bdgs et d'autres conds (qui ne sont pas carry over)
-        val (_, rePlugged) = re.selfPlugged(ctxs)
-        val neg = negCodeOf(rePlugged)
-        if (neg == falseCode) rdisjsAcc :+ rePlugged // Pas besoin d'aller plus loin, car on couvre tous les cas
-        else {
-          val res = rec(disjs.tail, rdisjsAcc :+ rePlugged)(using ctxs.withCond(neg))
-          val noTailRecPls = ctxs.withCond(neg)
-          res
-        }
-      }
-    }
-
-    val rdisjs = rec(disjs, Seq.empty)
-    val ror = codeOfSig(mkOr(rdisjs), BoolTy)
-//    val ror = simplifiedDisjunction(rdisjs) // rooooaaaaarr... ah non c'est pas ça...
-    CodeRes(ror, outerCtxs.addBoundDef(ror))
-    */
-
-//    val ror = simplifiedDisjunction(rdisjs, mayDrop = isPure, mayReorder = isPure) // rooooaaaaarr... ah non c'est pas ça...
-//
-//    if (rdisjs.contains(ror)) {
-//      // rdisjs a été simplifié en un seul disjunct qui a été selfPlugged. On le deplug et le retourne
-//      val Some((cr, _, _)) = unplugged(ror)
-//      assert(outerCtxs.isPrefixOf(cr.ctxs))
-//      cr
-//    } else {
-//      // Remarque: on retourne le ctx original car les PCs des ors ne sont pas retenues hors des disjunctions.
-//      // P.ex. dans val x = b1 || b2 || b3 il serait insensé d'avoir !b1 && !b2 && !b3 dans le env de x.
-//      CodeRes(ror, outerCtxs.addBoundDef(ror))
-//    }
   }
 
   // TODO: Voir si on peut pas faire qqchose pr eviter code dup avec pNegNormal
@@ -1622,35 +1588,6 @@ trait OCBSL extends Definitions { ocbsl =>
   def isLambdaLike(c: Code): Boolean = code2sig(c).label.isLambdaLike
   def isVar(c: Code): Boolean = code2sig(c).label.isVar
   def isLitOrVar(c: Code): Boolean = code2sig(c).label.isLitOrVar
-
-  /*
-  // TODO: Dire que dans le graphe, cela equivaut a update les references selon repl.
-  //  En particulier on ne duplique pas ("freshen locals") les let, lambda, forall, choose, etc.!!!
-  def replaceIn(c: Code, repl: Map[Code, Code]): Code = {
-    assert(repl.forall { case (old, nw) => codeTpe(old) == codeTpe(nw) })
-    repl.getOrElse(c, {
-      val Signature(lab, children) = code2sig(c)
-      val replChildren = children.map(replaceIn(_, repl))
-      val newSig = Signature(lab, replChildren)
-      codeOfSig(newSig, codeTpe(c))
-    })
-  }
-
-  def replaceIn(pat: LabelledPattern, repl: Map[Code, Code]): LabelledPattern = {
-    ???
-//    val newScrut = replaceIn(pat.scrut, repl)
-//    pat match {
-//      case LabelledPattern.Wildcard(_) => LabelledPattern.Wildcard(newScrut)
-//      case LabelledPattern.ADT(_, id, tps, subps) =>
-//        LabelledPattern.ADT(newScrut, id, tps, subps.map(replaceIn(_, repl)))
-//      case LabelledPattern.TuplePattern(_, subps) =>
-//        LabelledPattern.TuplePattern(newScrut, subps.map(replaceIn(_, repl)))
-//      case LabelledPattern.Lit(_, lit) => LabelledPattern.Lit(newScrut, lit)
-//      case LabelledPattern.Unapply(_, recs, id, tps, subps) =>
-//        sys.error(s"Does not know how to handle $pat")
-//    }
-  }
-  */
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
