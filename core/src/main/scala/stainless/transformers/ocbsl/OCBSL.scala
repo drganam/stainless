@@ -79,6 +79,7 @@ trait OCBSL extends Definitions { ocbsl =>
     lazy val hc: Int = java.util.Objects.hash(ctxs)
     override def hashCode(): Int = hc
 
+    // TODO: Stripped annotation
     lazy val allConds: Seq[Code] = ctxs.foldLeft(Seq.empty[Code]) {
       case (acc, Ctx.AssumeLike(lab, c)) if !lab.isDecreases => acc :+ c
       case (acc, Ctx.Assumed(c)) => acc :+ c
@@ -250,6 +251,14 @@ trait OCBSL extends Definitions { ocbsl =>
 
     def isBoundDef(c: Code): Boolean = ctxs.exists(_.isBoundDef(c))
 
+    def takeUntilDefined(c: Code): Ctxs = {
+      assert(isBoundDef(c))
+      Ctxs(ctxs.takeWhile {
+        case Ctx.BoundDef(c2) => c != c2
+        case _ => true
+      })
+    }
+
     def isLitVarOrBoundDef(c: Code): Boolean = isLitOrVar(c) || isBoundDef(c)
 
     def isPrefixOf(that: Ctxs): Boolean = ocbsl.isPrefixOf(this.ctxs, that.ctxs)
@@ -259,6 +268,7 @@ trait OCBSL extends Definitions { ocbsl =>
       else Ctxs(ctxs :+ Ctx.BoundDef(df))
     }
 
+    // TODO: Stripped annotation
     def withCond(cond: Code): Ctxs = {
       // TODO: Bind si nécessaire (voir autre branche)
       // assert(isLitOrVar(cond) || isBoundDef(cond)) // TODO: Non, c'est que pr les Or, if branch etc.
@@ -266,6 +276,7 @@ trait OCBSL extends Definitions { ocbsl =>
       else Ctxs(ctxs :+ Ctx.Assumed(cond))
     }
 
+    // TODO: Stripped annotation
     def withConds(conds: Seq[Code]): Ctxs = {
       // TODO: Bind si nécessaire (voir autre branche)
       // assert(conds.forall(c => isLitOrVar(c) || isBoundDef(c))) // TODO: Non, c'est que pr les Or, if branch etc.
@@ -274,6 +285,7 @@ trait OCBSL extends Definitions { ocbsl =>
       else Ctxs(ctxs ++ toAdd.map(Ctx.Assumed.apply))
     }
 
+    // TODO: Stripped annotation
     def withAssumeLike(kind: Label.AssumeLike, pred: Code): Ctxs = {
       assert(isLitVarOrBoundDef(pred))
       if (pred == trueCode || (!kind.isDecreases && allCondsSet.contains(pred))) this
@@ -1257,7 +1269,10 @@ trait OCBSL extends Definitions { ocbsl =>
       case Signature(Label.Assert, Seq(pred, body)) => recHelper(pred, body)(Assert(_, None, _))
       case Signature(Label.Require, Seq(pred, body)) => recHelper(pred, body)(Require.apply)
       case Signature(Label.Ensuring, Seq(body, pred)) =>
-        recHelper(body, pred) { case (body, pred: Lambda) => Ensuring(body, pred) }
+        recHelper(body, pred) {
+          case (body, pred: Lambda) => Ensuring(body, pred)
+          case (body, Let(v, lam: Lambda, predBody)) if predBody == v.toVariable => Ensuring(body, lam) // TODO: Slmt pour debug fnPurity
+        }
       case Signature(Label.Decreases, Seq(measure, body)) => recHelper(measure, body)(Decreases.apply)
 
       case Signature(Label.IfExpr, Seq(cond, thn, els)) => recHelper(cond, thn, els)(IfExpr.apply)
@@ -1485,6 +1500,7 @@ trait OCBSL extends Definitions { ocbsl =>
           visiting += fn
           val bodyCodeRes = codeOfExpr(getFunction(fn).fullBody)
           val bodyCode = bodyCodeRes.selfPlugged(Ctxs.empty)._2
+          val uncodedTest = uncodeOf(bodyCode)(using RevEnv(Map.empty, LambdaNesting(0)))
           val purity = codePurity(bodyCode)
           visiting -= fn
           purity match {
@@ -1942,6 +1958,16 @@ trait OCBSL extends Definitions { ocbsl =>
 
     override def foldOverPatternConditions: Boolean = true
 
+    def foldPurity(cs: Seq[Code])(using env: OEnv, ctxs: Ctxs): Purity = {
+      assert(cs.forall(CodeRes.isTerminal))
+      cs.foldLeft((ctxs, Pure)) {
+        case ((ctxs, acc), c) =>
+          given Ctxs = ctxs
+          lazy val purity = codePurity(c)
+          (ctxs.addBoundDef(c), acc ++ purity)
+      }._2
+    }
+
     override def tryFoldImpl(c: Code, acc: Purity, extra: Unit)(using env: OEnv, ctxs: Ctxs): Either[Unit, Purity] = {
       if (acc == Impure) Left(())
       else if (ctxs.isBoundDef(c)) Right(acc)
@@ -1978,24 +2004,29 @@ trait OCBSL extends Definitions { ocbsl =>
               if (opts.assumeChecked || !ctor.sort.definition.hasInvariant) Pure
               else Impure
             }
-            consingPurity ++ fold(args.map(codePurity))
+            consingPurity ++ foldPurity(args)
 
           case Signature(Label.Lambda(_), Seq(_)) => Pure
 
           case Signature(Label.FunctionInvocation(id, _), args) =>
-            fold(args.map(codePurity)) ++ fnPurity(id)
+            foldPurity(args) ++ fnPurity(id)
 
           case Signature(Label.Application, callee +: args) =>
+            assert(ctxs.isLitVarOrBoundDef(callee))
             // TODO: L'orig ignore callee, mais si on fait ça, on risque de faire du reordering dans certains cas (comme ContMonad)
             // TODO: Dans SWP: quid pureté callee???
             // TODO: Pureté ok? Après tout, un inline de lambda peut donner lieu à impure...
             lazy val calleePurity = code2sig(callee) match {
               case Signature(Label.Lambda(params), Seq(body)) =>
                 assert(params.size == args.size)
-                codePurity(body)
+                // Le ctxs où la lambda a été définie: on regarde dans le body,
+                // car si on codePurity sur la lambda elle-même, on aura de toute façon Pure
+                val lambdaCtxs = ctxs.takeUntilDefined(callee)
+                codePurity(body)(using env, lambdaCtxs)
+              case Signature(Label.Var(_), Seq()) => Pure // TODO: Comme c'est une free var et qu'on en sait rien à son sujet...
               case _ => Impure
             }
-            assmChkPurity ++ calleePurity ++ fold(args.map(codePurity))
+            assmChkPurity ++ calleePurity ++ foldPurity(args)
 
           case Signature(Label.Choose(v), Seq(pred)) =>
             if (pred == trueCode && hasInstance(varTpe(v)) == Some(true)) Pure
