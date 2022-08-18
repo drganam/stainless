@@ -166,7 +166,7 @@ trait OCBSL extends Definitions { ocbsl =>
 
         assert(curr.ctxs == prev.ctxs :+ toPlug)
         assert(u.allSuffixes(curr))
-
+        /*
         val uuu0 = occurrencesOf(c)(using env, curr)
         val uuu = uuu0.withRemovedBindings(inlinedLet)
         if (u != uuu) {
@@ -174,6 +174,7 @@ trait OCBSL extends Definitions { ocbsl =>
           val diff = (u.c2u.toSet ++ uuu.c2u.toSet) -- eq
           assert(false, "!!! Pas d'égalité")
         }
+        */
 
         val (u2, c2, inlinedLet2) = toPlug match {
           case Ctx.Id | Ctx.Assumed(_) => (u, c, inlinedLet)
@@ -184,7 +185,7 @@ trait OCBSL extends Definitions { ocbsl =>
             assert(composition(terminal).isOnce)
             // TODO: Pas forcément: car on peut avoir dans une lambda, un ifexpr etc. un bdg/definition
             //  qu'on a également "plus loin" dans le ctx
-            //  p.ex.  (if (cond) ... C(a, b, c) else ...); ...; C(a, b, c)
+            //  p.ex.  val boundDef = (if (cond) ... C(a, b, c) else ...); ...; C(a, b, c)
             //  Le C(a, b, c) apparaitra 2x. On pourrait faire qqchose pour hoist des expressions pures en dehors de selfPlugged...
             // assert(composition.c2u.keySet.intersect(inlinedLet).isEmpty)
             val compWoTerm = composition - terminal
@@ -202,6 +203,7 @@ trait OCBSL extends Definitions { ocbsl =>
               case (BindingCase.Inlinable, Occurrence.Once(_, _, OccurrenceKind.Applied)) if isLambda(terminal) =>
                 inlineAppliedLambda(terminal, c)
               case _ =>
+                // TODO: Hmmm et que se passe-t-il s'il y a plrs binding??? On risque de faire n'importe quoi avec ces removedBindings!!!
                 val u2 = definitionOccurrence match {
                   case Occurrence.Zero => u
                   case Occurrence.Once(inCtxs, nesting, _) =>
@@ -221,7 +223,7 @@ trait OCBSL extends Definitions { ocbsl =>
         }
 
         assert(u2.allSuffixes(prev))
-
+        /*
         val uuu20 = occurrencesOf(c2)(using env, prev)
         val uuu2 = uuu20.withRemovedBindings(inlinedLet2)
         if (u2 != uuu2) {
@@ -229,7 +231,7 @@ trait OCBSL extends Definitions { ocbsl =>
           val diff = (u2.c2u.toSet ++ uuu2.c2u.toSet) -- eq
           assert(false, "!!! Pas d'égalité2")
         }
-
+        */
         (u2, c2, inlinedLet2)
       }
 
@@ -436,10 +438,9 @@ trait OCBSL extends Definitions { ocbsl =>
 */
       pluggedMap.getOrElseUpdate((this, inCtxs, env), {
         assert(inCtxs.isPrefixOf(ctxs))
-//        val u = Occurrences.of(terminal)(using env, ctxs) // TODO: Pas tout à fait en raison de ensuring. p-e un occOf avec this.ctxs?
         val u = occurrencesOf(terminal)(using env, ctxs)
         val (u2, c, inlinedLet) = ctxs.plugged(inCtxs, u, terminal)
-
+        /*
         val expected0 = occurrencesOf(c)(using env, inCtxs)
         val expected = expected0.withRemovedBindings(inlinedLet)
         if (expected != u2) {
@@ -448,7 +449,7 @@ trait OCBSL extends Definitions { ocbsl =>
           // if (!env.forceBinding)
           assert(false, "owie, not the same :(")
         }
-
+        */
         assert(codeTpe(terminal) == codeTpe(c), s"${codeTpe(terminal)} != ${codeTpe(c)}")
         val currEntry = unplugMap.getOrElse((c, env), Map.empty)
         // TODO: Voir si oui ou non c'est ok
@@ -1033,11 +1034,13 @@ trait OCBSL extends Definitions { ocbsl =>
       }
     }
 
-    def plugRec(disjsCodeRes: Seq[CodeRes], restPlugged: Code): Code = {
-      def plugAndMkDisj(toPlug: CodeRes, inCtxs: Ctxs): Code = {
+    def plugRec(disjsCodeRes: Seq[CodeRes], restPlugged: Code, pluggedWithin: Map[Code, Ctxs]): (Code, Map[Code, Ctxs]) = {
+      def plugAndMkDisj(toPlug: CodeRes, inCtxs: Ctxs): (Code, Map[Code, Ctxs]) = {
         assert(inCtxs.isPrefixOf(toPlug.ctxs))
         val (_, plugged) = toPlug.selfPlugged(inCtxs)
-        simplifiedDisjunction(Seq(plugged, restPlugged))(using env, inCtxs)
+        val disj = simplifiedDisjunction(Seq(plugged, restPlugged))(using env, inCtxs)
+        val pluggedWithin2 = if (pluggedWithin.contains(disj)) pluggedWithin else pluggedWithin + (plugged -> inCtxs)
+        (disj, pluggedWithin2)
       }
 
       disjsCodeRes match {
@@ -1046,25 +1049,70 @@ trait OCBSL extends Definitions { ocbsl =>
           plugAndMkDisj(first, outerCtxs)
         case (init :+ prev) :+ last =>
           val inCtxs = prev.ctxs.withCond(negCodeOf(prev.terminal))
-          val combined = plugAndMkDisj(last, inCtxs)
-          plugRec(init :+ prev, combined)
+          val (disj, pluggedWithin2) = plugAndMkDisj(last, inCtxs)
+          plugRec(init :+ prev, disj, pluggedWithin2)
       }
     }
 
     val disjsCodeRes = transformRec(disjs, Seq.empty)(using outerCtxs)
-    val plugged = plugRec(disjsCodeRes, falseCode)
-    code2sig(plugged) match {
-      case Signature(lab@(Label.Or | Label.Not), first +: rest) =>
-        assert(lab == Label.Or || rest.isEmpty)
-        assert(lab == Label.Not || rest.nonEmpty)
-        val Some((firstUnplg, _)) = unplugged(first)(using env, outerCtxs)
-        // Comme on return avec le ctxs de first, il faut return le terminal de firstUnplg, car first tel quel contient les bindings (puisqu'il a été plugged)
-        val newTerminal = codeOfSig(Signature(lab, firstUnplg.terminal +: rest), BoolTy)
-        firstUnplg.derived(newTerminal)
-      case _ =>
-        assert(!CodeRes.isTerminal(plugged))
-        val Some((unplg, _)) = unplugged(plugged)(using env, outerCtxs)
-        unplg
+    val (plugged, pluggedWithin) = plugRec(disjsCodeRes, falseCode, Map.empty)
+    assert(codeTpe(plugged) == BoolTy)
+    if (CodeRes.isTerminal(plugged)) {
+      val Signature(lab, args) = code2sig(plugged)
+      // On essaie de hoist le ctx du premier argument non-terminal // TODO: !!!! IfExpr, Lambda, MatchExpr, Ensuring qui ont des self plugged???
+      val argUnplugged = findMap(args.zipWithIndex) { case (arg, i) =>
+        // TODO: Et quid args de arg??? Eux aussi peuvent avoir des non terminaux!!!
+        assert(CodeRes.isTerminal(arg) || pluggedWithin.contains(arg))
+//        if (code2sig(arg).label == Label.Or) {
+//          println("Hmm, pickling pickles #1")
+//        }
+        pluggedWithin.get(arg).map { argPlugCtxs =>
+          assert(args.take(i).forall(argPlugCtxs.isLitVarOrBoundDef))
+          val Some((argUnpl, _)) = unplugged(arg)(using env, argPlugCtxs)
+          // Comme on return avec le ctxs de arg, il faut return le terminal de argUnplg,
+          // car arg tel quel contient les bindings (puisqu'il a été plugged)
+          // En gros, dans `args`, on remplace args(i) par argUnplg.terminal
+          val newArgs = args.updated(i, argUnpl.terminal)
+          // TODO: simplifiedDisj peut redonner lieu à un non-terminal
+          /*
+          // TODO: SimplifyTopLvlSig devrait avoir ces 2 cas
+          val newTerminal = lab match {
+            case Label.Or => simplifiedDisjunction(newArgs)(using env, argPlugCtxs) // TODO: ctxs ok?
+            case Label.Not =>
+              assert(newArgs.size == 1)
+              negCodeOf(newArgs.head)
+            case _ => codeOfSig(Signature(lab, newArgs), BoolTy)
+          }
+          */
+//          if (code2sig(argUnpl.terminal).label == Label.Or) {
+//            println("Hmm, pickling pickles")
+//          }
+          val newTerminal = codeOfSig(Signature(lab, newArgs), BoolTy)
+          argUnpl.derived(newTerminal)
+        }
+      }
+      argUnplugged.getOrElse(CodeRes(plugged, outerCtxs.addBoundDef(plugged)))
+
+      /*
+      def defaultRes = CodeRes(plugged, outerCtxs.addBoundDef(plugged))
+      code2sig(plugged) match {
+        case Signature(lab, first +: rest) =>
+          pluggedWithin.get(first)
+            .flatMap(firstPlugCtxs => unplugged(first)(using env, firstPlugCtxs))
+            .map { case (firstUnplg, _) =>
+              // Comme on return avec le ctxs de first, il faut return le terminal de firstUnplg, car first tel quel contient les bindings (puisqu'il a été plugged)
+              val newTerminal = codeOfSig(Signature(lab, firstUnplg.terminal +: rest), BoolTy)
+              firstUnplg.derived(newTerminal)
+            }
+            .getOrElse(defaultRes)
+        case _ => defaultRes
+      }
+      */
+    } else {
+      assert(pluggedWithin.contains(plugged))
+      val plugCtxs = pluggedWithin(plugged)
+      val Some((unplg, _)) = unplugged(plugged)(using env, plugCtxs)
+      unplg
     }
   }
 
@@ -1927,10 +1975,6 @@ trait OCBSL extends Definitions { ocbsl =>
       override type Extra = Unit
 
       override def transformImpl(c: Code, repl: Map[Code, Code], extra: Unit)(using env: OEnv, ctxs: Ctxs): CodeRes = code2sig(c) match {
-        case Signature(Label.Let, Seq(e, body)) if ctxs.isBoundDef(e) =>
-          // Ce cas peut arriver parce qu'au moment du bdg de la lambda et de l'application, des bdgs extra peuvent avoir été ajoutées
-          transform(body, repl, ())
-
         case Signature(lab: Label.LambdaLike, Seq(body)) if !ctxs.isBoundDef(c) => // On ne va pas modifier les occurrences liés
           val freshParams = lab.params.map(v => v -> freshened(v))
           val freshParamsRepl = freshParams.map { case (old, nw) => codeOfVarId(old) -> codeOfVarId(nw) }.toMap
@@ -2105,10 +2149,12 @@ trait OCBSL extends Definitions { ocbsl =>
         case Signature(Label.Lit(_), Seq()) => Occurrences.empty
         case Signature(Label.Var(_), Seq()) => slf
 
+        case Signature(Label.Let, Seq(e, b)) if ctxs.isBoundDef(e) =>
+          occurrencesOf(b)
+
         case Signature(Label.Let, Seq(e, b)) =>
           assert(CodeRes.isTerminal(e))
           assert(!isLitOrVar(e))
-          assert(!ctxs.isBoundDef(e))
           val occE = occurrencesOf(e)
           assert(occE(e).isOnce)
           val occB = occurrencesOf(b)(using env, ctxs.addBoundDef(e))
@@ -2258,10 +2304,12 @@ trait OCBSL extends Definitions { ocbsl =>
       code2sig(c) match {
         case Signature(Label.Var(_) | Label.Lit(_), Seq()) => CodeRes(c, ctxs)
 
+        case Signature(Label.Let, Seq(e, b)) if ctxs.isBoundDef(e) =>
+          transform(b, repl, extra)
+
         case Signature(Label.Let, Seq(e, b)) =>
           assert(CodeRes.isTerminal(e))
           assert(!isLitOrVar(e))
-          assert(!ctxs.isBoundDef(e))
           val re = transform(e, repl, extra)
           assert(re.ctxs.isLitVarOrBoundDef(re.terminal))
           transform(b, repl + (e -> re.terminal), extra)(using env, re.ctxs)
@@ -2379,10 +2427,12 @@ trait OCBSL extends Definitions { ocbsl =>
     def tryFoldImpl(c: Code, acc: T, extra: Extra)(using env: OEnv, ctxs: Ctxs): Either[E, T] = code2sig(c) match {
       case Signature(Label.Lit(_) | Label.Var(_), Seq()) => Right(acc)
 
+      case Signature(Label.Let, Seq(e, b)) if ctxs.isBoundDef(e) =>
+        tryFold(b, acc, extra)
+
       case Signature(Label.Let, Seq(e, b)) =>
         assert(CodeRes.isTerminal(e))
         assert(!isLitOrVar(e))
-        assert(!ctxs.isBoundDef(e))
         for {
           re <- tryFold(e, acc, extra)
           rb <- tryFold(b, re, extra)(using env, ctxs.addBoundDef(e))
