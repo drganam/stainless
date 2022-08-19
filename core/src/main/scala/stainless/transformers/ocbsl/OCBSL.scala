@@ -1038,35 +1038,24 @@ trait OCBSL extends Definitions { ocbsl =>
         else transformRec(disjs.tail, rdisjsAcc :+ re)(using newCtxs)
       }
     }
+
     def combineRec(disjs: Seq[CodeRes], acc: CodeRes): CodeRes = {
       disjs match {
         case Seq() => acc
         case init :+ last =>
+          assert(last.ctxs.isPrefixOf(acc.ctxs))
           val negLast = negCodeOf(last.terminal)
-          val accTerm = acc.terminal
-          // acc.ctxs, mais sans l'assomption de negLast et sans le binding de son terminal
-          // pour autant que ceux-ci sont en dernière position)
-          val accCtxs = acc.ctxs.ctxs match {
-            case accCtxsInit :+ Ctx.Assumed(`negLast`) :+ Ctx.BoundDef(`accTerm`) => Ctxs(accCtxsInit)
-            case accCtxsInit :+ Ctx.Assumed(`negLast`) => Ctxs(accCtxsInit) // Peut arriver si accTerm a déjà été bound avant
-            case accCtxsInit :+ Ctx.BoundDef(`accTerm`) => Ctxs(accCtxsInit) // Peut arriver si negLast est subsumed par les assomptions précédentes
-            case _ => acc.ctxs
-          }
-          assert(last.ctxs.isPrefixOf(accCtxs))
-
           if (last.terminal == falseCode) {
             // On skip celui-ci (on ne drop pas son ctxs, car il est préfixe de acc par construction de transformRec)
             combineRec(init, acc)
-//          } else if (acc.terminal == falseCode) {
-//            combineRec(init, acc.derived(last.terminal)) // Nope
           } else {
             val (_, accPlugged) = acc.selfPlugged(last.ctxs.withCond(negLast))
             if (CodeRes.isTerminal(accPlugged)) {
-              val ctxs = last.ctxs //.addBoundDef(accPlugged)
-              val newDisjs = simplifiedDisjunction(Seq(last.terminal, accPlugged))(using env, ctxs)
-              val newAcc = CodeRes(newDisjs, ctxs.addBoundDef(newDisjs))
+              // Le plugged est un terminal, son ctx ne sert donc à rien (pour ainsi dire)
+              val newDisjs = simplifiedDisjunction(Seq(last.terminal, accPlugged))(using env, last.ctxs)
+              val newAcc = last.derived(newDisjs)
               val res = combineRec(init, newAcc)
-              val noTailRecPls = ctxs.addBoundDef(newDisjs)
+              val noTailRecPls = last.ctxs.addBoundDef(newDisjs)
               res
             } else {
               val newDisjs = codeOfSig(mkOr(Seq(last.terminal, accPlugged)), BoolTy)
@@ -1076,26 +1065,6 @@ trait OCBSL extends Definitions { ocbsl =>
               res
             }
           }
-          /*
-          if (last.terminal == falseCode) {
-            // On skip celui-ci (on ne drop pas son ctxs, car il est préfixe de acc par construction de transformRec)
-            combineRec(init, acc)
-          } else if (last.ctxs.size == accCtxs.size) {
-            // On prend le ctxs de last, mais on bind acc.terminal pour éviter des dupliqués
-            val ctxs = last.ctxs.addBoundDef(acc.terminal)
-            val newDisjs = simplifiedDisjunction(Seq(last.terminal, acc.terminal))(using env, ctxs)
-            val newAcc = CodeRes(newDisjs, ctxs.addBoundDef(newDisjs))
-            val res = combineRec(init, newAcc)
-            val noTailRecPls = ctxs.addBoundDef(newDisjs)
-            res
-          } else {
-            val (_, accPlugged) = acc.selfPlugged(last.ctxs.withCond(negLast))
-            val newDisjs = codeOfSig(mkOr(Seq(last.terminal, accPlugged)), BoolTy)
-            val newAcc = last.derived(newDisjs)
-            val res = combineRec(init, newAcc)
-            val noTailRecPls = last.ctxs.addBoundDef(newDisjs)
-            res
-          }*/
       }
     }
 
@@ -1103,89 +1072,6 @@ trait OCBSL extends Definitions { ocbsl =>
     assert(disjsCodeRes.last.ctxs.isPrefixOf(lastCtxs))
     val res = combineRec(disjsCodeRes, CodeRes(falseCode, lastCtxs))
     res
-
-    /*
-    def plugRec(disjsCodeRes: Seq[CodeRes], restPlugged: Code, pluggedWithin: Map[Code, Ctxs]): (Code, Map[Code, Ctxs]) = {
-      def plugAndMkDisj(toPlug: CodeRes, inCtxs: Ctxs): (Code, Map[Code, Ctxs]) = {
-        assert(inCtxs.isPrefixOf(toPlug.ctxs))
-        val (_, plugged) = toPlug.selfPlugged(inCtxs)
-        val disj = simplifiedDisjunction(Seq(plugged, restPlugged))(using env, inCtxs)
-        val pluggedWithin2 = if (pluggedWithin.contains(disj)) pluggedWithin else pluggedWithin + (plugged -> inCtxs)
-        (disj, pluggedWithin2)
-      }
-
-      disjsCodeRes match {
-        case Seq() => sys.error("no, should have returned before")
-        case Seq(first) =>
-          plugAndMkDisj(first, outerCtxs)
-        case (init :+ prev) :+ last =>
-          val inCtxs = prev.ctxs.withCond(negCodeOf(prev.terminal))
-          val (disj, pluggedWithin2) = plugAndMkDisj(last, inCtxs)
-          plugRec(init :+ prev, disj, pluggedWithin2)
-      }
-    }
-    */
-    /*
-    val (plugged, pluggedWithin) = plugRec(disjsCodeRes, falseCode, Map.empty)
-    assert(codeTpe(plugged) == BoolTy)
-    if (CodeRes.isTerminal(plugged)) {
-      val Signature(lab, args) = code2sig(plugged)
-      // On essaie de hoist le ctx du premier argument non-terminal // TODO: !!!! IfExpr, Lambda, MatchExpr, Ensuring qui ont des self plugged???
-      val argUnplugged = findMap(args.zipWithIndex) { case (arg, i) =>
-        // TODO: Et quid args de arg??? Eux aussi peuvent avoir des non terminaux!!!
-        assert(CodeRes.isTerminal(arg) || pluggedWithin.contains(arg))
-//        if (code2sig(arg).label == Label.Or) {
-//          println("Hmm, pickling pickles #1")
-//        }
-        pluggedWithin.get(arg).map { argPlugCtxs =>
-          assert(args.take(i).forall(argPlugCtxs.isLitVarOrBoundDef))
-          val Some((argUnpl, _)) = unplugged(arg)(using env, argPlugCtxs)
-          // Comme on return avec le ctxs de arg, il faut return le terminal de argUnplg,
-          // car arg tel quel contient les bindings (puisqu'il a été plugged)
-          // En gros, dans `args`, on remplace args(i) par argUnplg.terminal
-          val newArgs = args.updated(i, argUnpl.terminal)
-          // TODO: simplifiedDisj peut redonner lieu à un non-terminal
-          /*
-          // TODO: SimplifyTopLvlSig devrait avoir ces 2 cas
-          val newTerminal = lab match {
-            case Label.Or => simplifiedDisjunction(newArgs)(using env, argPlugCtxs) // TODO: ctxs ok?
-            case Label.Not =>
-              assert(newArgs.size == 1)
-              negCodeOf(newArgs.head)
-            case _ => codeOfSig(Signature(lab, newArgs), BoolTy)
-          }
-          */
-//          if (code2sig(argUnpl.terminal).label == Label.Or) {
-//            println("Hmm, pickling pickles")
-//          }
-          val newTerminal = codeOfSig(Signature(lab, newArgs), BoolTy)
-          argUnpl.derived(newTerminal)
-        }
-      }
-      argUnplugged.getOrElse(CodeRes(plugged, outerCtxs.addBoundDef(plugged)))
-
-      /*
-      def defaultRes = CodeRes(plugged, outerCtxs.addBoundDef(plugged))
-      code2sig(plugged) match {
-        case Signature(lab, first +: rest) =>
-          pluggedWithin.get(first)
-            .flatMap(firstPlugCtxs => unplugged(first)(using env, firstPlugCtxs))
-            .map { case (firstUnplg, _) =>
-              // Comme on return avec le ctxs de first, il faut return le terminal de firstUnplg, car first tel quel contient les bindings (puisqu'il a été plugged)
-              val newTerminal = codeOfSig(Signature(lab, firstUnplg.terminal +: rest), BoolTy)
-              firstUnplg.derived(newTerminal)
-            }
-            .getOrElse(defaultRes)
-        case _ => defaultRes
-      }
-      */
-    } else {
-      assert(pluggedWithin.contains(plugged))
-      val plugCtxs = pluggedWithin(plugged)
-      val Some((unplg, _)) = unplugged(plugged)(using env, plugCtxs)
-      unplg
-    }
-    */
   }
 
   // TODO: Voir si on peut pas faire qqchose pr eviter code dup avec pNegNormal
@@ -1413,9 +1299,9 @@ trait OCBSL extends Definitions { ocbsl =>
       case Signature(Label.Or, args) => recHelper(args)(Or.apply)
       case Signature(Label.Not, Seq(c)) =>
         code2sig(c) match {
-//          case Signature(Label.Or, disjs) =>
-//            given OEnv = OEnv(renv.nesting, forceBinding = false)
-//            recHelper(disjs.map(negCodeOf))(And.apply)
+          case Signature(Label.Or, disjs) =>
+            given OEnv = OEnv(renv.nesting, forceBinding = false)
+            recHelper(disjs.map(negCodeOf))(And.apply)
           case _ => recHelper(c)(Not.apply)
         }
       case Signature(Label.Equals, Seq(c1, c2)) => recHelper(c1, c2)(Equals.apply)
