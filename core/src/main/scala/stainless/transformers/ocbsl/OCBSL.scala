@@ -13,18 +13,51 @@ trait OCBSL extends Definitions { ocbsl =>
   import Purity._
   import scala.collection.mutable // A bit ironic that we import mutable stuff right after "Purity"...
 
+  // TODO: Et les assms???
+  // TODO: Et les assms???
+  // TODO: Et les assms???
+  // TODO: Et les assms???
+
+  // TODO: On pourrait simplifier les trucs du genre !isInstanceOf[A] && isInstanceOf[B] en isInstanceOf[B] pour les patmat?
+
+  // TODO (liste de rappel):
+  //    - Pour le cache, il faudra qu'on serialize les mapping signature -> code
+  //    Il faudra aussi que ce mapping soit le même pr ts les threads!!!
+  //      -sig2code: on ajoute 1 indirection par ordinal de label pour diminuer les contention
+  //      -code2sig: un simple atomicref d'array fera amplement l'affaire (faudra faire attention pr ne pas faire des allocs concurrentes...)
+
   // Not for sparing allocations, but for sparing key strokes :p
   val BoolTy: Type = BooleanType()
 
+  private val sig2code = mutable.Map.empty[Signature, Code]
+  private val code2sig = mutable.Map.empty[Code, Signature]
+  private val sizeCache = mutable.Map.empty[Expr, Int]
+  private val codeTpe = mutable.Map.empty[Code, Type]
+
+  private var varIdCounter: Int = 0
+  private val varId2Var = mutable.Map.empty[VarId, Variable]
+  private val var2VarId = mutable.Map.empty[Variable, VarId]
+
+  private val purityCache = mutable.Map.empty[Identifier, Boolean]
+  private val codePurityCache = mutable.Map.empty[Code, Boolean]
+  private val fnBlockedBy = mutable.Map.empty[Identifier, Set[Identifier]] // K = fn qui est bloqué par les fn dans V
+  private val codeBlockedBy = mutable.Map.empty[Code, Set[Identifier]] // K = code qui est bloqué par les fn dans V
+  private val blocking = mutable.Map.empty[Identifier, (Set[Identifier], Set[Code])] // K = fn qui bloque les fn et les codes dans V
+  private val visiting = mutable.Set.empty[Identifier]
+
+  private val falseSig = Signature(Label.Lit(BooleanLiteral(false)), Seq.empty)
+  private val trueSig = Signature(Label.Lit(BooleanLiteral(true)), Seq.empty)
+  private val unitSig = Signature(Label.Lit(UnitLiteral()), Seq.empty)
+  private val falseCode = codeOfSig(falseSig, BoolTy)
+  private val trueCode = codeOfSig(trueSig, BoolTy)
+  private val unitCode = codeOfSig(unitSig, UnitType())
+
+  private val pluggedMap = mutable.Map.empty[(CodeRes, Ctxs, OEnv), (Occurrences, Code)]
+  private val unplugMap = mutable.Map.empty[(Code, OEnv), Map[Ctxs, (CodeRes, Occurrences)]]
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-  def isPrefixOf[T](lhs: Seq[T], rhs: Seq[T]): Boolean =
-    lhs.size <= rhs.size && lhs.zip(rhs).forall { case (l, r) => l == r }
-
-  def findMap[A, B](as: Seq[A])(f: A => Option[B]): Option[B] =
-    if (as.isEmpty) None
-    else f(as.head).orElse(findMap(as.tail)(f))
+  //region Various simple ADTs
 
   case class OEnv(nesting: LambdaNesting, forceBinding: Boolean) {
     def inc: OEnv = OEnv(nesting.inc, forceBinding)
@@ -43,6 +76,124 @@ trait OCBSL extends Definitions { ocbsl =>
     def incIf(lab: Label.LambdaLike): LambdaNesting =
       if (lab.isLambda) inc else this
   }
+
+  enum OccurrenceKind {
+    case Expanded
+    case Applied
+  }
+
+  enum Occurrence {
+    case Zero
+    case Once(inCtxs: Ctxs, nesting: LambdaNesting, kind: OccurrenceKind)
+    case Many
+
+    def ++(that: Occurrence): Occurrence = (this, that) match {
+      case (Zero, _) => that
+      case (_, Zero) => this
+      case _ => Many
+    }
+
+    def isZero: Boolean = this match {
+      case Zero => true
+      case _ => false
+    }
+
+    def isOnce: Boolean = this match {
+      case Once(_, _, _) => true
+      case _ => false
+    }
+
+    def isMany: Boolean = this match {
+      case Many => true
+      case _ => false
+    }
+
+    def nonZero: Boolean = !isZero
+
+    override def toString: String = this match {
+      case Zero => "Zero"
+      case Once(_, _, _) => "Once"
+      case Many => "Many"
+    }
+  }
+
+  case class Occurrences(c2u: Map[Code, Occurrence]) {
+    def hasLambda: Boolean = c2u.keys.exists(c => code2sig(c).label.isLambda)
+
+    def apply(c: Code): Occurrence = c2u.getOrElse(c, Occurrence.Zero)
+
+    def +(c: Code, occ: Occurrence): Occurrences = this ++ Occurrences(Map(c -> occ))
+
+    def ++(that: Occurrences): Occurrences = Occurrences((c2u.keySet ++ that.c2u.keySet)
+      .map(c => c -> (this (c) ++ that(c))).toMap)
+
+    def setTo(c: Code, o: Occurrence): Occurrences = Occurrences(c2u + (c -> o))
+
+    def -(c: Code): Occurrences = Occurrences(c2u - c)
+
+    // TODO: What is this name!!!!
+    def manyied: Occurrences = Occurrences(c2u.map {
+      case (c, Occurrence.Zero) => (c, Occurrence.Zero) // TODO: Should we just filter these out?
+      case (c, _) => c -> Occurrence.Many
+    })
+
+    def allSuffixes(ctxs: Ctxs): Boolean = c2u.values.forall {
+      case Occurrence.Once(inCtxs, _, _) => ctxs.isPrefixOf(inCtxs)
+      case _ => true
+    }
+
+    def withInlinedOccurrences(newInCtxs: Ctxs, nesting: LambdaNesting)(using env: OEnv): Occurrences = {
+      assert(env.nesting.level <= nesting.level)
+      Occurrences(c2u.map {
+        case (c, Occurrence.Once(prevInCtxs, nesting2, kind)) =>
+          assert(env.nesting.level <= nesting2.level)
+          val nbNestedLambdas = nesting2.level - env.nesting.level
+          val ctxs = prevInCtxs.movedAfter(newInCtxs)
+          c -> Occurrence.Once(ctxs, LambdaNesting(nesting.level + nbNestedLambdas), kind)
+        case (c, occ) => c -> occ
+      })
+    }
+
+    def withRemovedBinding(bound: Code): Occurrences = withRemovedBindings(Set(bound))
+
+    def withRemovedBindings(bound: Set[Code]): Occurrences = Occurrences(c2u.map {
+      case (c, Occurrence.Once(inCtxs, nesting, kind)) =>
+        c -> Occurrence.Once(inCtxs.withRemovedBindings(bound), nesting, kind)
+      case (c, occ) => c -> occ
+    })
+  }
+
+  object Occurrences {
+    def empty: Occurrences = Occurrences(Map.empty)
+
+    def of(c: Code)(using env: OEnv, ctxs: Ctxs): Occurrences = {
+      if (code2sig(c).label.isLiteral) Occurrences.empty
+      else Occurrences(Map(c -> Occurrence.Once(ctxs, env.nesting, OccurrenceKind.Expanded)))
+    }
+  }
+
+  case class LetValSubst(subst: Map[Variable, Code]) {
+    def apply(v: Variable): Code = {
+      assert(subst.contains(v))
+      subst(v)
+    }
+
+    def get(v: Variable): Option[Code] = subst.get(v)
+
+    def +(t: (Variable, Code)): LetValSubst = {
+      assert(!subst.contains(t._1))
+      LetValSubst(subst + t)
+    }
+  }
+
+  object LetValSubst {
+    def empty: LetValSubst = LetValSubst(Map.empty)
+  }
+  //endregion
+
+  /////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+  //region Ctxs and CodeRes
 
   enum Ctx {
     case Id
@@ -291,122 +442,6 @@ trait OCBSL extends Definitions { ocbsl =>
     def empty: Ctxs = new Ctxs(Seq.empty)
   }
 
-  enum OccurrenceKind {
-    case Expanded
-    case Applied
-  }
-
-  enum Occurrence {
-    case Zero
-    case Once(inCtxs: Ctxs, nesting: LambdaNesting, kind: OccurrenceKind)
-    case Many
-
-    def ++(that: Occurrence): Occurrence = (this, that) match {
-      case (Zero, _) => that
-      case (_, Zero) => this
-      case _ => Many
-    }
-
-    def isZero: Boolean = this match {
-      case Zero => true
-      case _ => false
-    }
-    def isOnce: Boolean = this match {
-      case Once(_, _, _) => true
-      case _ => false
-    }
-    def isMany: Boolean = this match {
-      case Many => true
-      case _ => false
-    }
-
-    def nonZero: Boolean = !isZero
-
-    override def toString: String = this match {
-      case Zero => "Zero"
-      case Once(_, _, _) => "Once"
-      case Many => "Many"
-    }
-  }
-
-  case class Occurrences(c2u: Map[Code, Occurrence]) {
-    def hasLambda: Boolean = c2u.keys.exists(c => code2sig(c).label.isLambda)
-
-    def apply(c: Code): Occurrence = c2u.getOrElse(c, Occurrence.Zero)
-
-    def +(c: Code, occ: Occurrence): Occurrences = this ++ Occurrences(Map(c -> occ))
-
-    def ++(that: Occurrences): Occurrences = Occurrences((c2u.keySet ++ that.c2u.keySet)
-      .map(c => c -> (this(c) ++ that(c))).toMap)
-
-    def setTo(c: Code, o: Occurrence): Occurrences = Occurrences(c2u + (c -> o))
-
-    def -(c: Code): Occurrences = Occurrences(c2u - c)
-
-    // TODO: What is this name!!!!
-    def manyied: Occurrences = Occurrences(c2u.map {
-      case (c, Occurrence.Zero) => (c, Occurrence.Zero) // TODO: Should we just filter these out?
-      case (c, _) => c -> Occurrence.Many
-    })
-
-    def allSuffixes(ctxs: Ctxs): Boolean = c2u.values.forall {
-      case Occurrence.Once(inCtxs, _, _) => ctxs.isPrefixOf(inCtxs)
-      case _ => true
-    }
-
-    def withInlinedOccurrences(newInCtxs: Ctxs, nesting: LambdaNesting)(using env: OEnv): Occurrences = {
-      assert(env.nesting.level <= nesting.level)
-      Occurrences(c2u.map {
-        case (c, Occurrence.Once(prevInCtxs, nesting2, kind)) =>
-          assert(env.nesting.level <= nesting2.level)
-          val nbNestedLambdas = nesting2.level - env.nesting.level
-          val ctxs = prevInCtxs.movedAfter(newInCtxs)
-          c -> Occurrence.Once(ctxs, LambdaNesting(nesting.level + nbNestedLambdas), kind)
-        case (c, occ) => c -> occ
-      })
-    }
-
-    def withRemovedBinding(bound: Code): Occurrences = withRemovedBindings(Set(bound))
-
-    def withRemovedBindings(bound: Set[Code]): Occurrences = Occurrences(c2u.map {
-      case (c, Occurrence.Once(inCtxs, nesting, kind)) =>
-        c -> Occurrence.Once(inCtxs.withRemovedBindings(bound), nesting, kind)
-      case (c, occ) => c -> occ
-    })
-  }
-
-  object Occurrences {
-    def empty: Occurrences = Occurrences(Map.empty)
-
-    def of(c: Code)(using env: OEnv, ctxs: Ctxs): Occurrences = {
-      if (code2sig(c).label.isLiteral) Occurrences.empty
-      else Occurrences(Map(c -> Occurrence.Once(ctxs, env.nesting, OccurrenceKind.Expanded)))
-    }
-  }
-
-  case class LetValSubst(subst: Map[Variable, Code]) {
-    def apply(v: Variable): Code = {
-      assert(subst.contains(v))
-      subst(v)
-    }
-
-    def get(v: Variable): Option[Code] = subst.get(v)
-
-    def +(t: (Variable, Code)): LetValSubst = {
-      assert(!subst.contains(t._1))
-      LetValSubst(subst + t)
-    }
-  }
-  object LetValSubst {
-    def empty: LetValSubst = LetValSubst(Map.empty)
-  }
-
-  private val pluggedMap = mutable.Map.empty[(CodeRes, Ctxs, OEnv), (Occurrences, Code)]
-  private val unplugMap = mutable.Map.empty[(Code, OEnv), Map[Ctxs, (CodeRes, Occurrences)]]
-
-  def unplugged(c: Code)(using env: OEnv, ctxs: Ctxs): Option[(CodeRes, Occurrences)] =
-    unplugMap.get((c, env)).flatMap(_.get(ctxs))
-
   case class CodeRes(terminal: Code, ctxs: Ctxs) {
     assert(CodeRes.isTerminal(terminal), s"Gag: $terminal n'est pas un terminal (est un ${code2sig(terminal)})")
     // assert(!isLambda(terminal)) // TODO: Non, car comment pourrait on repr. un lambda sans bdg? (= eta expand/inlined)
@@ -453,244 +488,10 @@ trait OCBSL extends Definitions { ocbsl =>
     def derived(newTerminal: Code): CodeRes = CodeRes(newTerminal, ctxs.addBoundDef(newTerminal))
   }
 
-  /////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-  // TODO: Et les assms???
-  // TODO: Et les assms???
-  // TODO: Et les assms???
-  // TODO: Et les assms???
-
-  // TODO: On pourrait simplifier les trucs du genre !isInstanceOf[A] && isInstanceOf[B] en isInstanceOf[B] pour les patmat?
-
-  // TODO (liste de rappel):
-  //    - Pour le cache, il faudra qu'on serialize les mapping signature -> code
-  //    Il faudra aussi que ce mapping soit le même pr ts les threads!!!
-  //      -sig2code: on ajoute 1 indirection par ordinal de label pour diminuer les contention
-  //      -code2sig: un simple atomicref d'array fera amplement l'affaire (faudra faire attention pr ne pas faire des allocs concurrentes...)
-
-  /////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-  // TODO: Comment mélanger caching et simplification (p.ex. simplifiedDisjunction)?
-
-  private val sig2code = mutable.Map.empty[Signature, Code]
-  private val code2sig = mutable.Map.empty[Code, Signature]
-  private val sizeCache = mutable.Map.empty[Expr, Int]
-  private val codeTpe = mutable.Map.empty[Code, Type]
-
-  private var varIdCounter: Int = 0
-  private val varId2Var = mutable.Map.empty[VarId, Variable]
-  private val var2VarId = mutable.Map.empty[Variable, VarId]
-
-  private val purityCache = mutable.Map.empty[Identifier, Boolean]
-  private val codePurityCache = mutable.Map.empty[Code, Boolean]
-  private val fnBlockedBy = mutable.Map.empty[Identifier, Set[Identifier]] // K = fn qui est bloqué par les fn dans V
-  private val codeBlockedBy = mutable.Map.empty[Code, Set[Identifier]] // K = code qui est bloqué par les fn dans V
-  private val blocking = mutable.Map.empty[Identifier, (Set[Identifier], Set[Code])] // K = fn qui bloque les fn et les codes dans V
-  private val visiting = mutable.Set.empty[Identifier]
-
-  private val falseSig = Signature(Label.Lit(BooleanLiteral(false)), Seq.empty)
-  private val trueSig = Signature(Label.Lit(BooleanLiteral(true)), Seq.empty)
-  private val unitSig = Signature(Label.Lit(UnitLiteral()), Seq.empty)
-  private val falseCode = codeOfSig(falseSig, BoolTy)
-  private val trueCode = codeOfSig(trueSig, BoolTy)
-  private val unitCode = codeOfSig(unitSig, UnitType())
-
-//  // TODO: fusionner les deux fns?
-//  def codeOfExpr(e: Expr)(using OEnv, InLambda): CodeRes = {
-////    if (e.getType == BoolTy) simplifiedDisjunction(pDisj(e).toSet)
-////    else {
-////      val sig = sigOfExpr(e)
-////      codeOfSig(sig, e.getType)
-////    }
-//    // TODO: fusionner les deux fns?
-//    sigOfExpr(e)
-//  }
-
-  // TODO: !!!! Si un Ctxs est ajouté, penser à regarder que toutes les refs soient correctes !!!!
-  def negCodeOf(c: Code)(using OEnv): Code = {
-    assert(codeTpe(c) == BoolTy, s"Got ${codeTpe(c)}")
-    code2sig(c) match {
-      case Signature(Label.Not, Seq(cc)) => cc
-      case Signature(Label.Lit(BooleanLiteral(b)), Seq()) => b2c(!b)
-      case Signature(Label.LessThan, Seq(lhs, rhs)) => codeOfSig(mkGreaterEquals(lhs, rhs), BoolTy)
-      case Signature(Label.GreaterEquals, Seq(lhs, rhs)) => codeOfSig(mkLessThan(lhs, rhs), BoolTy)
-      case Signature(Label.GreaterThan, Seq(lhs, rhs)) => codeOfSig(mkLessEquals(lhs, rhs), BoolTy)
-      case Signature(Label.LessEquals, Seq(lhs, rhs)) => codeOfSig(mkGreaterThan(lhs, rhs), BoolTy)
-      case _ =>
-        codeOfSig(mkNot(c), BoolTy)
-//        // TODO: Essayer de le push pour IfExpr et MatchExpr
-//        if (CodeRes.isTerminal(c)) codeOfSig(mkNot(c), BoolTy)
-//        else {
-//          // Unplugging a terminal gives the terminal itself, hence we have the above guard.
-//          unplugged(c) match {
-//            case Some((cr, _, inCtxs)) =>
-//              cr.derived(negCodeOf(cr.terminal)).selfPlugged(inCtxs)._2
-//            case _ => codeOfSig(mkNot(c), BoolTy)
-//          }
-//        }
-    }
-  }
-
-  // TODO: Quid négation????
-  // TODO: Pk ce truc est fait dans codeOf mais pas dans pDisj?
-  // TODO: Et les assms???
-  def simplifiedDisjunction(disj0: Seq[Code])(using OEnv, Ctxs): Code = {
-    assert(disj0.forall(c => codeTpe(c) == BoolTy))
-    val disj = unOrCodes(disj0)
-    val disjs1 = disj.filter(_ != falseCode).distinct
-    if (disjs1.isEmpty) falseCode
-    else if (disjs1.size == 1) disjs1.head
-    else {
-      val lastKeptIx = Some(disjs1.indexOf(trueCode)).filter(_ >= 0)
-        .orElse(checkForContradiction(disjs1))
-        .getOrElse(disjs1.length - 1)
-
-      if (lastKeptIx == disjs1.length - 1 && disjs1.last != trueCode) {
-        // Nothing simplified, so just make the disjunction and return
-        // TODO: Sort if "truly pure" and not pure due to binding!
-        // val disjs2 = if (purities.forall(_.isPure)) disjs1.sorted else disjs1
-        codeOfSig(mkOr(disjs1), BoolTy)
-      } else {
-        // Due to short-circuiting, once the disjunction evaluates to true, the remaining disjuncts won't ever be evaluated
-        // so it is safe to drop them -- including impure expressions.
-        val disjs2 = disjs1.take(lastKeptIx + 1)
-        val disjs2Purities = disjs2.map(codePurity)
-        if (disjs2Purities.forall(_.isPure)) trueCode
-        else {
-          // Add a trailing `true` if not already present (because the disjunction will evaluate to true,
-          // but due to the presence of impure expressions, we are not allowed to simplify the whole expr to true
-          val disjs3 = if (disjs2.contains(trueCode)) disjs2 else disjs2 :+ trueCode
-          codeOfSig(mkOr(disjs3), BoolTy)
-        }
-      }
-    }
-  }
-
-  enum BindingCase {
-    // In let v = e in body...
-    case Elidable // ... the `e` (and the let) can be removed (that is, we can just return `body`, `e` is pure)
-    case Inlinable // ... the `e` can be inlined or bound, but it definitely appears in `body` (may or may not be impure)
-    case MustBind // ... the `e` must be bound (appears in `body` if pure, may not appear if impure)
-  }
-
-  def needsBinding(terminal: Code, terminalComposition: Occurrences, definitionOccurrence: Occurrence)(using env: OEnv, prefix: Ctxs): BindingCase = {
-    assert(!isLitOrVar(terminal))
-    assert(!prefix.isBoundDef(terminal))
-
-    code2sig(terminal) match {
-      case Signature(Label.Ensuring, _) => BindingCase.Inlinable
-      case _ =>
-        if (env.forceBinding) BindingCase.MustBind
-        else {
-          lazy val isPure = codePurity(terminal).isPure
-          definitionOccurrence match {
-            case Occurrence.Many => BindingCase.MustBind
-            case Occurrence.Zero =>
-              // Si une expr impure n'apparait pas dans le body, on ne peut pas l'éliminer, il faut donc le bind
-              if (!isPure) BindingCase.MustBind
-              else BindingCase.Elidable
-            case Occurrence.Once(inCtxs, nesting, _) if isPure =>
-              assert(env.nesting.level <= nesting.level)
-              assert(prefix.isPrefixOf(inCtxs))
-              assert(prefix.ctxs.size + 1 <= inCtxs.ctxs.size)
-              assert(inCtxs.ctxs(prefix.ctxs.size) == Ctx.BoundDef(terminal))
-              if (nesting.inAnyLambda && terminalComposition.hasLambda) BindingCase.MustBind
-              else BindingCase.Inlinable
-            case Occurrence.Once(inCtxs, nesting, _) =>
-              assert(env.nesting.level <= nesting.level)
-              // TODO: Expliquer cette daube
-              // inEnv représente l'env. actif lors de l'occurrence de `terminal` dans le trou que l'on s'apprête à compléter.
-              // S'il est différent de l'env ou `terminal` est introduit, alors on a besoin de let-bind, car inline
-              // une expr impure après un PC est incorrect.
-              assert(prefix.isPrefixOf(inCtxs))
-              // Dans inCtxs, on nécessairement le binding v -> terminal juste après prefix
-              assert(prefix.ctxs.size + 1 <= inCtxs.ctxs.size)
-              assert(inCtxs.ctxs(prefix.ctxs.size) == Ctx.BoundDef(terminal))
-
-              // TODO: inEnv.letDef.drop(env.letDef.size + 1)
-              // Pour qu'on puisse inline cette expression impure...
-              // 1. Pas dans une lambda
-              // 2. Pas de nouvelles conditions (assumptions/PC)
-              // 3. Tous les bindings supplémentaires (*après celui-ci*) sont pures
-              // 2 et 3 sont gérés par isPureSuffix
-
-              lazy val isPureSuffix: Boolean = {
-                def rec(extras: Seq[Ctx], running: Ctxs): Boolean = {
-                  assert(extras.forall(ex => !running.ctxs.contains(ex)))
-                  assert(running.isPrefixOf(inCtxs))
-                  if (extras.isEmpty) true
-                  else extras.head match {
-                    case Ctx.Id => sys.error("Les Id devraient être filtré!!!")
-                    case Ctx.Assumed(_) | Ctx.AssumeLike(_, _) => false // Condition supplémentaire; donc impure
-                    case Ctx.BoundDef(defn) =>
-                      codePurity(defn)(using env, running).isPure &&
-                        rec(extras.tail, running.addBoundDef(defn))
-                  }
-                }
-                val extras = inCtxs.ctxs.drop(prefix.ctxs.size + 1) // +1 car c'est après ce binding
-                rec(extras, prefix.addBoundDef(terminal))
-              }
-
-              if (env.nesting == nesting && isPureSuffix) BindingCase.Inlinable
-              else BindingCase.MustBind
-          }
-        }
-    }
-  }
-
-  def codeOfExprsBound(es: Seq[Expr], tpe: Type)(cons: Seq[Code] => Signature)(using OEnv, Ctxs, LetValSubst): CodeRes =
-    codeOfExprsBound(es)(cs => codeOfSig(cons(cs), tpe))
-
-  def codeOfExprsBound(e1: Expr, tpe: Type)(cons: Code => Signature)(using OEnv, Ctxs, LetValSubst): CodeRes =
-    codeOfExprsBound(Seq(e1), tpe) { case Seq(c1) => cons(c1) }
-
-  def codeOfExprsBound(e1: Expr, e2: Expr, tpe: Type)(cons: (Code, Code) => Signature)(using OEnv, Ctxs, LetValSubst): CodeRes =
-    codeOfExprsBound(Seq(e1, e2), tpe) { case Seq(c1, c2) => cons(c1, c2) }
-
-  def codeOfExprsBound(e1: Expr, e2: Expr, e3: Expr, tpe: Type)(cons: (Code, Code, Code) => Signature)(using OEnv, Ctxs, LetValSubst): CodeRes =
-    codeOfExprsBound(Seq(e1, e2, e3), tpe) { case Seq(c1, c2, c3) => cons(c1, c2, c3) }
-
-  // TODO: Très mal nommé!!! C'est slmt pour les expr du type C(args) sans control flow etc.
-  def codeOfExprsBound(es: Seq[Expr])(cons: Seq[Code] => Code)(using env: OEnv, ctxs: Ctxs, subst: LetValSubst): CodeRes = {
-    given x_x: Ctxs = sys.error("Carefully select ctxs")
-
-    val (newCtxs, codeRess) = es.foldLeft((ctxs, Seq.empty[CodeRes])) {
-      case ((ctxs, codeResAcc), e) =>
-        val codeResE = codeOfExpr(e)(using env, ctxs)
-        assert(ctxs.isPrefixOf(codeResE.ctxs))
-        (codeResE.ctxs, codeResAcc :+ codeResE)
-    }
-
-    combineCodeRes(codeRess)(cons)(using env, newCtxs)
-  }
-
-  def combineCodeRes(codeRess: Seq[CodeRes], tpe: Type)(cons: Seq[Code] => Signature)(using OEnv, Ctxs): CodeRes =
-    combineCodeRes(codeRess)(cs => codeOfSig(cons(cs), tpe))
-
-  def combineCodeRes(cr1: CodeRes, tpe: Type)(cons: Code => Signature)(using env: OEnv): CodeRes =
-    combineCodeRes(Seq(cr1)) { case Seq(c1) => codeOfSig(cons(c1), tpe) }(using env, cr1.ctxs)
-
-  def combineCodeRes(cr1: CodeRes, cr2: CodeRes, tpe: Type)(cons: (Code, Code) => Signature)(using env: OEnv): CodeRes =
-    combineCodeRes(Seq(cr1, cr2)) { case Seq(c1, c2) => codeOfSig(cons(c1, c2), tpe) }(using env, cr2.ctxs)
-
-  // TODO: Très mal nommé!!! C'est slmt pour les expr du type C(args) sans control flow etc.
-  def combineCodeRes(codeRess: Seq[CodeRes])(cons: Seq[Code] => Code)(using env: OEnv, ctxs: Ctxs): CodeRes = {
-    assert(codeRess.isEmpty || (ctxs eq codeRess.last.ctxs))
-    assert(codeRess.forall(_.ctxs.isPrefixOf(ctxs)))
-    assert(codeRess.size <= 1 || codeRess.zip(codeRess.tail).forall { case (prev, cur) => prev.ctxs.isPrefixOf(cur.ctxs) })
-
-    val terminal = cons(codeRess.map(_.terminal))
-    // TODO: Etendre ce check à d'autre cas (ensuring, etc.)
-    assert(!isLambdaLike(terminal))
-    CodeRes(terminal, ctxs.addBoundDef(terminal))
-  }
-
-  def freshVarId(name: String, tpe: Type): VarId = idOfVariable(Variable.fresh(name, tpe))
-
   object CodeRes {
     def isTerminal(c: Code): Boolean = code2sig(c) match {
       // TODO: Ensuring?
-      case Signature(Label.Assume | Label.Assert | Label.Require | Label.Decreases/* | Label.Ensuring*/ | Label.Let, _) => false
+      case Signature(Label.Assume | Label.Assert | Label.Require | Label.Decreases /* | Label.Ensuring*/ | Label.Let, _) => false
       case _ => true
     }
 
@@ -740,6 +541,36 @@ trait OCBSL extends Definitions { ocbsl =>
       CodeRes(terminal, ctxs.addBoundDef(terminal))
     }
   }
+
+  def combineCodeRes(codeRess: Seq[CodeRes], tpe: Type)(cons: Seq[Code] => Signature)(using OEnv, Ctxs): CodeRes =
+    combineCodeRes(codeRess)(cs => codeOfSig(cons(cs), tpe))
+
+  def combineCodeRes(cr1: CodeRes, tpe: Type)(cons: Code => Signature)(using env: OEnv): CodeRes =
+    combineCodeRes(Seq(cr1)) { case Seq(c1) => codeOfSig(cons(c1), tpe) }(using env, cr1.ctxs)
+
+  def combineCodeRes(cr1: CodeRes, cr2: CodeRes, tpe: Type)(cons: (Code, Code) => Signature)(using env: OEnv): CodeRes =
+    combineCodeRes(Seq(cr1, cr2)) { case Seq(c1, c2) => codeOfSig(cons(c1, c2), tpe) }(using env, cr2.ctxs)
+
+  // TODO: Très mal nommé!!! C'est slmt pour les expr du type C(args) sans control flow etc.
+  def combineCodeRes(codeRess: Seq[CodeRes])(cons: Seq[Code] => Code)(using env: OEnv, ctxs: Ctxs): CodeRes = {
+    assert(codeRess.isEmpty || (ctxs eq codeRess.last.ctxs))
+    assert(codeRess.forall(_.ctxs.isPrefixOf(ctxs)))
+    assert(codeRess.size <= 1 || codeRess.zip(codeRess.tail).forall { case (prev, cur) => prev.ctxs.isPrefixOf(cur.ctxs) })
+
+    val terminal = cons(codeRess.map(_.terminal))
+    // TODO: Etendre ce check à d'autre cas (ensuring, etc.)
+    assert(!isLambdaLike(terminal))
+    CodeRes(terminal, ctxs.addBoundDef(terminal))
+  }
+
+  def unplugged(c: Code)(using env: OEnv, ctxs: Ctxs): Option[(CodeRes, Occurrences)] =
+    unplugMap.get((c, env)).flatMap(_.get(ctxs))
+
+  //endregion
+
+  /////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+  //region Expr -> Code
 
   def codeOfExpr(e: Expr)(using env: OEnv, ctxs: Ctxs, subst: LetValSubst): CodeRes = {
     val tpe = e.getType
@@ -881,6 +712,32 @@ trait OCBSL extends Definitions { ocbsl =>
     simplifyTopLvl(res)
   }
 
+  def codeOfExprsBound(es: Seq[Expr], tpe: Type)(cons: Seq[Code] => Signature)(using OEnv, Ctxs, LetValSubst): CodeRes =
+    codeOfExprsBound(es)(cs => codeOfSig(cons(cs), tpe))
+
+  def codeOfExprsBound(e1: Expr, tpe: Type)(cons: Code => Signature)(using OEnv, Ctxs, LetValSubst): CodeRes =
+    codeOfExprsBound(Seq(e1), tpe) { case Seq(c1) => cons(c1) }
+
+  def codeOfExprsBound(e1: Expr, e2: Expr, tpe: Type)(cons: (Code, Code) => Signature)(using OEnv, Ctxs, LetValSubst): CodeRes =
+    codeOfExprsBound(Seq(e1, e2), tpe) { case Seq(c1, c2) => cons(c1, c2) }
+
+  def codeOfExprsBound(e1: Expr, e2: Expr, e3: Expr, tpe: Type)(cons: (Code, Code, Code) => Signature)(using OEnv, Ctxs, LetValSubst): CodeRes =
+    codeOfExprsBound(Seq(e1, e2, e3), tpe) { case Seq(c1, c2, c3) => cons(c1, c2, c3) }
+
+  // TODO: Très mal nommé!!! C'est slmt pour les expr du type C(args) sans control flow etc.
+  def codeOfExprsBound(es: Seq[Expr])(cons: Seq[Code] => Code)(using env: OEnv, ctxs: Ctxs, subst: LetValSubst): CodeRes = {
+    given x_x: Ctxs = sys.error("Carefully select ctxs")
+
+    val (newCtxs, codeRess) = es.foldLeft((ctxs, Seq.empty[CodeRes])) {
+      case ((ctxs, codeResAcc), e) =>
+        val codeResE = codeOfExpr(e)(using env, ctxs)
+        assert(ctxs.isPrefixOf(codeResE.ctxs))
+        (codeResE.ctxs, codeResAcc :+ codeResE)
+    }
+
+    combineCodeRes(codeRess)(cons)(using env, newCtxs)
+  }
+
   case class CodeResMatchCase(mc: LabMatchCase, composition: Occurrences)
 
   def signatureOfCase(scrut: Code, mc: MatchCase)(using env: OEnv, ctxs0: Ctxs, subst0: LetValSubst): (CodeResMatchCase, Seq[Code]) = {
@@ -944,57 +801,7 @@ trait OCBSL extends Definitions { ocbsl =>
       signatureOfCases(cScrut, mcs.tail, acc :+ newMatchCase)(using env, ctxs.withCond(negCaseConds))
     }
   }
-
-  def checkForContradiction(disjs0: Seq[Code]): Option[Int] = {
-    // Convert a >= b and a > b to !(a < b) and !(a <= b) respectively.
-    // This will ease the work of for the rest of the fn.
-    // Assumes that disjs is normalized (i.e. we have `a` instead of !!a, a <= b instead of !(a > b) etc.)
-    // so in some sense we are denormalizing parts of the given disjs.
-    // If disjs is not normalized, denormalize may return expressions such as !!(a > b),
-    // which may cause a contradiction to be missed.
-    def denormalize(disjs: Seq[Code]): Seq[Code] = {
-      disjs.map { c => code2sig(c) match {
-        case Signature(Label.GreaterEquals, Seq(a, b)) =>
-          val lt = codeOfSig(mkLessThan(a, b), BoolTy)
-          codeOfSig(mkNot(lt), BoolTy)
-        case Signature(Label.GreaterThan, Seq(a, b)) =>
-          val leq = codeOfSig(mkLessEquals(a, b), BoolTy)
-          codeOfSig(mkNot(leq), BoolTy)
-        case _ => c
-      }}
-    }
-
-    val disjs = denormalize(disjs0)
-
-    def firstTry(i: Int, pos: Set[Code], neg: Set[Code]): Either[(Set[Code], Set[Code]), Int] = {
-      if (i == disjs.length) Left((pos, neg))
-      else {
-        val c = disjs.head
-        code2sig(c) match {
-          case Signature(Label.Not, Seq(cc)) =>
-            if (pos(cc)) Right(i)
-            else firstTry(i + 1, pos, neg + cc)
-          case _ =>
-            if (neg(c)) Right(i)
-            else firstTry(i + 1, pos + c, neg)
-        }
-      }
-    }
-
-    firstTry(0, Set.empty, Set.empty) match {
-      case Right(ix) => Some(ix)
-      case Left((_, neg)) =>
-        val found = neg.exists { negC =>
-          code2sig(negC) match {
-            case Signature(Label.Or, negDisj) =>
-              // TODO: Est-ce vrai? Quid si un meme code apparait dans un truc negatif?
-              denormalize(negDisj).forall(disjs.contains)
-            case _ => false
-          }
-        }
-        if (found) Some(disjs.length - 1) else None
-    }
-  }
+  //endregion
 
 //  // TODO: Ok?
 //  def pDisj(e: Expr)(using OEnv): Seq[Code] = {
@@ -1007,8 +814,47 @@ trait OCBSL extends Definitions { ocbsl =>
 //    }
 //  }
 
+//  // TODO: fusionner les deux fns?
+//  def codeOfExpr(e: Expr)(using OEnv, InLambda): CodeRes = {
+////    if (e.getType == BoolTy) simplifiedDisjunction(pDisj(e).toSet)
+////    else {
+////      val sig = sigOfExpr(e)
+////      codeOfSig(sig, e.getType)
+////    }
+//    // TODO: fusionner les deux fns?
+//    sigOfExpr(e)
+//  }
+
+  /*
+  def simpForall(nbParams: Int, body: Code)(using subst: Subst): Signature = {
+    def liftForall(es: Seq[Code]): Signature = {
+      // TODO: Il faudra incrémenter les indexed vars des forall
+      val (nbParamss, bodies) = es.map(c => code2sig(c) match {
+        case Signature(Label.Forall(nbParams2), body2) => (nbParams2, ???) // TODO: Qqchose à faire par rapport aux indexed vars???
+        case s => (0, s)
+      }).unzip
+      val allParams = nbParams + nbParamss.sum
+      val combinedBody = ???
+      if (allParams == nbParams) Signature(Label.Forall(nbParams), combinedBody)
+      else simpForall(allParams, combinedBody)
+    }
+
+    code2sig(body) match {
+      case Signature(Label.Forall(nbParams2), Seq(body2)) => simpForall(nbParams + nbParams2, body2)
+      // TODO: On n'a pas de And ou Implies!!! On devrait pouvoir les "reconstruire"
+      case Signature(Label.Or, disjs) => ???
+      case _ => Signature(Label.Forall(nbParams), Seq(body))
+    }
+  }
+  */
+
+  /////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+  //region OCBSL
+
   def transformDisjunction[T](disjs: Seq[T])(f: Ctxs ?=> T => CodeRes)(using env: OEnv, outerCtxs: Ctxs): CodeRes = {
     given x_x: Ctxs = sys.error("Carefully select ctxs")
+
     assert(disjs.size >= 2)
 
     def transformRec(disjs: Seq[T], rdisjsAcc: Seq[CodeRes])(using ctxs: Ctxs): (Seq[CodeRes], Ctxs) = {
@@ -1072,6 +918,66 @@ trait OCBSL extends Definitions { ocbsl =>
     res
   }
 
+  // TODO: !!!! Si un Ctxs est ajouté, penser à regarder que toutes les refs soient correctes !!!!
+  def negCodeOf(c: Code)(using OEnv): Code = {
+    assert(codeTpe(c) == BoolTy, s"Got ${codeTpe(c)}")
+    code2sig(c) match {
+      case Signature(Label.Not, Seq(cc)) => cc
+      case Signature(Label.Lit(BooleanLiteral(b)), Seq()) => b2c(!b)
+      case Signature(Label.LessThan, Seq(lhs, rhs)) => codeOfSig(mkGreaterEquals(lhs, rhs), BoolTy)
+      case Signature(Label.GreaterEquals, Seq(lhs, rhs)) => codeOfSig(mkLessThan(lhs, rhs), BoolTy)
+      case Signature(Label.GreaterThan, Seq(lhs, rhs)) => codeOfSig(mkLessEquals(lhs, rhs), BoolTy)
+      case Signature(Label.LessEquals, Seq(lhs, rhs)) => codeOfSig(mkGreaterThan(lhs, rhs), BoolTy)
+      case _ =>
+        codeOfSig(mkNot(c), BoolTy)
+      //        // TODO: Essayer de le push pour IfExpr et MatchExpr
+      //        if (CodeRes.isTerminal(c)) codeOfSig(mkNot(c), BoolTy)
+      //        else {
+      //          // Unplugging a terminal gives the terminal itself, hence we have the above guard.
+      //          unplugged(c) match {
+      //            case Some((cr, _, inCtxs)) =>
+      //              cr.derived(negCodeOf(cr.terminal)).selfPlugged(inCtxs)._2
+      //            case _ => codeOfSig(mkNot(c), BoolTy)
+      //          }
+      //        }
+    }
+  }
+
+  // TODO: Quid négation????
+  // TODO: Pk ce truc est fait dans codeOf mais pas dans pDisj?
+  // TODO: Et les assms???
+  def simplifiedDisjunction(disj0: Seq[Code])(using OEnv, Ctxs): Code = {
+    assert(disj0.forall(c => codeTpe(c) == BoolTy))
+    val disj = unOrCodes(disj0)
+    val disjs1 = disj.filter(_ != falseCode).distinct
+    if (disjs1.isEmpty) falseCode
+    else if (disjs1.size == 1) disjs1.head
+    else {
+      val lastKeptIx = Some(disjs1.indexOf(trueCode)).filter(_ >= 0)
+        .orElse(checkForContradiction(disjs1))
+        .getOrElse(disjs1.length - 1)
+
+      if (lastKeptIx == disjs1.length - 1 && disjs1.last != trueCode) {
+        // Nothing simplified, so just make the disjunction and return
+        // TODO: Sort if "truly pure" and not pure due to binding!
+        // val disjs2 = if (purities.forall(_.isPure)) disjs1.sorted else disjs1
+        codeOfSig(mkOr(disjs1), BoolTy)
+      } else {
+        // Due to short-circuiting, once the disjunction evaluates to true, the remaining disjuncts won't ever be evaluated
+        // so it is safe to drop them -- including impure expressions.
+        val disjs2 = disjs1.take(lastKeptIx + 1)
+        val disjs2Purities = disjs2.map(codePurity)
+        if (disjs2Purities.forall(_.isPure)) trueCode
+        else {
+          // Add a trailing `true` if not already present (because the disjunction will evaluate to true,
+          // but due to the presence of impure expressions, we are not allowed to simplify the whole expr to true
+          val disjs3 = if (disjs2.contains(trueCode)) disjs2 else disjs2 :+ trueCode
+          codeOfSig(mkOr(disjs3), BoolTy)
+        }
+      }
+    }
+  }
+
   // TODO: Voir si on peut pas faire qqchose pr eviter code dup avec pNegNormal
   // Signature de Not(child)
   def negExprOf(child: Expr)(using env: OEnv, ctxs: Ctxs, subst: LetValSubst): CodeRes = {
@@ -1112,24 +1018,58 @@ trait OCBSL extends Definitions { ocbsl =>
     }
   }
 
-  def freshened(v: VarId): VarId = idOfVariable(varId2Var(v).freshen)
+  def checkForContradiction(disjs0: Seq[Code]): Option[Int] = {
+    // Convert a >= b and a > b to !(a < b) and !(a <= b) respectively.
+    // This will ease the work of for the rest of the fn.
+    // Assumes that disjs is normalized (i.e. we have `a` instead of !!a, a <= b instead of !(a > b) etc.)
+    // so in some sense we are denormalizing parts of the given disjs.
+    // If disjs is not normalized, denormalize may return expressions such as !!(a > b),
+    // which may cause a contradiction to be missed.
+    def denormalize(disjs: Seq[Code]): Seq[Code] = {
+      disjs.map { c =>
+        code2sig(c) match {
+          case Signature(Label.GreaterEquals, Seq(a, b)) =>
+            val lt = codeOfSig(mkLessThan(a, b), BoolTy)
+            codeOfSig(mkNot(lt), BoolTy)
+          case Signature(Label.GreaterThan, Seq(a, b)) =>
+            val leq = codeOfSig(mkLessEquals(a, b), BoolTy)
+            codeOfSig(mkNot(leq), BoolTy)
+          case _ => c
+        }
+      }
+    }
 
-  def codeOfSig(sig: Signature, tpe: Type): Code = {
-    sig2code.get(sig) match {
-      case Some(c) =>
-        assert(codeTpe(c) == tpe, s"${codeTpe(c)} != $tpe")
-        c
-      case None =>
-        val newCode = Code.fromInt(sig2code.size)
-        assert(!code2sig.contains(newCode))
-        sig2code += sig -> newCode
-        code2sig += newCode -> sig
-        codeTpe += newCode -> tpe
-        newCode
+    val disjs = denormalize(disjs0)
+
+    def firstTry(i: Int, pos: Set[Code], neg: Set[Code]): Either[(Set[Code], Set[Code]), Int] = {
+      if (i == disjs.length) Left((pos, neg))
+      else {
+        val c = disjs.head
+        code2sig(c) match {
+          case Signature(Label.Not, Seq(cc)) =>
+            if (pos(cc)) Right(i)
+            else firstTry(i + 1, pos, neg + cc)
+          case _ =>
+            if (neg(c)) Right(i)
+            else firstTry(i + 1, pos + c, neg)
+        }
+      }
+    }
+
+    firstTry(0, Set.empty, Set.empty) match {
+      case Right(ix) => Some(ix)
+      case Left((_, neg)) =>
+        val found = neg.exists { negC =>
+          code2sig(negC) match {
+            case Signature(Label.Or, negDisj) =>
+              // TODO: Est-ce vrai? Quid si un meme code apparait dans un truc negatif?
+              denormalize(negDisj).forall(disjs.contains)
+            case _ => false
+          }
+        }
+        if (found) Some(disjs.length - 1) else None
     }
   }
-
-  /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
   def implied(rhs: Code)(using env: OEnv, ctxs: Ctxs): Boolean = {
     if (rhs == trueCode) true
@@ -1146,499 +1086,14 @@ trait OCBSL extends Definitions { ocbsl =>
     }
   }
 
-  // Is `c` an ADT with constructor `id`?
-  //   Some(true) - Yes
-  //   Some(false) - No
-  //   None - Can't tell
-  def isConstructor(c: Code, adt: ADTType, id: Identifier)(using OEnv, Ctxs): Option[Boolean] = {
-    // TODO: What about purity?
-    def codeIsCtor(ofId: Identifier): Code =
-      codeOfSig(Signature(Label.IsConstructor(adt, ofId), Seq(c)), BoolTy)
-    def codeNotCtor(ofId: Identifier): Code =
-      negCodeOf(codeIsCtor(ofId))
-
-    code2sig(c) match {
-      case Signature(Label.ADT(id2, _), _) => Some(id == id2)
-      case _ =>
-        if (implied(codeIsCtor(id))) Some(true)
-        else if (implied(codeNotCtor(id))) Some(false)
-        else {
-          val cons = getConstructor(id, adt.tps)
-          val sort = cons.sort
-          // All other constructors (excluding `id`) for the ADT
-          val alts = (sort.constructors.toSet - cons).map(_.id)
-
-          if (alts.exists(alt => implied(codeIsCtor(alt)))) Some(false)
-          else if (alts.forall(alt => implied(codeNotCtor(alt)))) Some(true)
-          else None
-        }
-    }
-  }
-
-  def idOfVariable(v: Variable): VarId = var2VarId.get(v) match {
-    case Some(vId) => vId
-    case None =>
-      val vId = VarId.fromInt(varIdCounter)
-      varIdCounter += 1
-      var2VarId += v -> vId
-      varId2Var += vId -> v
-      vId
-  }
-  def varTpe(v: VarId): Type = varId2Var(v).getType // TODO: Apparemment, il y a une difference entre .getType et .tpe (pour les refinement type)
-
   def conjunct(conj: Seq[Code])(using OEnv, Ctxs): Code = negCodeOf(negatedConjunction(conj))
 
-  def negatedConjunction(conj: Seq[Code])(using OEnv, Ctxs): Code= simplifiedDisjunction(conj.map(negCodeOf))
-
-  def codeOfIntLit(lit: BigInt, tpe: Type): Code = codeOfLit(intLitOfType(lit, tpe))
-
-  def intLitOfType(lit: BigInt, tpe: Type): Literal[_] = tpe match {
-    case IntegerType() => IntegerLiteral(lit)
-    case RealType() => FractionLiteral(lit, 1)
-    case BVType(signed, size) =>
-      // BVLiteral guards against signed=true and lit < 0, but not against lit not fitting
-      // into the given bitwidth (it wrap-around)
-      val (loIncl, hiExcl) = {
-        if (signed) (-BigInt(2).pow(size-1), BigInt(2).pow(size-1))
-        else (BigInt(0), BigInt(2).pow(size))
-      }
-      if (!(loIncl <= lit && lit < hiExcl)) {
-        sys.error(s"$lit does not fit into $tpe  (with range [$loIncl, $hiExcl[)")
-      }
-      BVLiteral(signed, lit, size)
-    case _ => sys.error(s"$tpe is not an integer-like type")
-  }
-
-  /*
-  def simpForall(nbParams: Int, body: Code)(using subst: Subst): Signature = {
-    def liftForall(es: Seq[Code]): Signature = {
-      // TODO: Il faudra incrémenter les indexed vars des forall
-      val (nbParamss, bodies) = es.map(c => code2sig(c) match {
-        case Signature(Label.Forall(nbParams2), body2) => (nbParams2, ???) // TODO: Qqchose à faire par rapport aux indexed vars???
-        case s => (0, s)
-      }).unzip
-      val allParams = nbParams + nbParamss.sum
-      val combinedBody = ???
-      if (allParams == nbParams) Signature(Label.Forall(nbParams), combinedBody)
-      else simpForall(allParams, combinedBody)
-    }
-
-    code2sig(body) match {
-      case Signature(Label.Forall(nbParams2), Seq(body2)) => simpForall(nbParams + nbParams2, body2)
-      // TODO: On n'a pas de And ou Implies!!! On devrait pouvoir les "reconstruire"
-      case Signature(Label.Or, disjs) => ???
-      case _ => Signature(Label.Forall(nbParams), Seq(body))
-    }
-  }
-  */
+  def negatedConjunction(conj: Seq[Code])(using OEnv, Ctxs): Code = simplifiedDisjunction(conj.map(negCodeOf))
+  //endregion
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-  case class RevEnv(revLetDefs: Map[Code, VarId], nesting: LambdaNesting) {
-    def withLetBounds(vs: Seq[(VarId, Code)]): RevEnv =
-      RevEnv(revLetDefs ++ vs.map { case (v, c) => c -> v }.toMap, nesting)
-
-    def withLetBounds(v: VarId, c: Code): RevEnv =
-      RevEnv(revLetDefs + (c -> v), nesting)
-
-    def inc: RevEnv = RevEnv(revLetDefs, nesting.inc)
-  }
-
-  object RevEnv {
-    def empty: RevEnv = RevEnv(Map.empty, LambdaNesting(0))
-  }
-
-  case class RevRes(expr: Expr, used: Set[VarId])
-
-  def uncodeOf(c: Code)(using renv: RevEnv): RevRes = {
-    renv.revLetDefs.get(c) match {
-      case Some(vIx) =>
-        return RevRes(varId2Var(vIx), Set(vIx))
-      case None => ()
-    }
-
-    code2sig(c) match {
-      case Signature(Label.Var(v), Seq()) => RevRes(varId2Var(v), Set(v))
-      case Signature(Label.Lit(lit), Seq()) => RevRes(lit, Set.empty)
-      case Signature(Label.Tuple, args) => recHelper(args)(Tuple.apply)
-      case Signature(Label.ADT(id, tps), args) => recHelper(args)(ADT(id, tps, _))
-      case Signature(Label.ADTSelector(_, _, sel), Seq(recv)) => recHelper(recv)(ADTSelector(_, sel))
-      case Signature(Label.FunctionInvocation(id, tps), args) => recHelper(args)(FunctionInvocation(id, tps, _))
-      case Signature(Label.Annotated(flags), Seq(e)) => recHelper(e)(Annotated(_, flags))
-      case Signature(Label.IsConstructor(_, id), Seq(e)) => recHelper(e)(IsConstructor(_, id))
-      case Signature(Label.Application, all@(callee +: args)) =>
-        recHelper(all) { case callee +: args => Application(callee, args) }
-
-      case Signature(Label.Let, Seq(cE, cBody)) =>
-        val e = uncodeOf(cE)
-        val v = freshVarId("bdg", codeTpe(cE))
-        val body = uncodeOf(cBody)(using renv.withLetBounds(v, cE))
-        RevRes(Let(new ValDef(varId2Var(v)), e.expr, body.expr), e.used ++ body.used)
-
-      // TODO: Ok?
-      case Signature(Label.Assume, Seq(pred, body)) => recHelper(pred, body)(Assume.apply)
-      case Signature(Label.Assert, Seq(pred, body)) => recHelper(pred, body)(Assert(_, None, _))
-      case Signature(Label.Require, Seq(pred, body)) => recHelper(pred, body)(Require.apply)
-      case Signature(Label.Ensuring, Seq(body, pred)) =>
-        recHelper(body, pred) {
-          case (body, pred: Lambda) => Ensuring(body, pred)
-          case (body, Let(v, lam: Lambda, predBody)) if predBody == v.toVariable => Ensuring(body, lam) // TODO: Slmt pour debug fnPurity
-        }
-      case Signature(Label.Decreases, Seq(measure, body)) => recHelper(measure, body)(Decreases.apply)
-
-      case Signature(Label.IfExpr, Seq(cond, thn, els)) => recHelper(cond, thn, els)(IfExpr.apply)
-      case Signature(Label.Lambda(params), Seq(body)) =>
-        val vds = params.map(v => new ValDef(varId2Var(v)))
-        recHelper(body)(Lambda(vds, _))(using renv.inc)
-      case Signature(Label.Choose(v), Seq(pred)) => recHelper(pred)(Choose(new ValDef(varId2Var(v)), _))
-      case Signature(Label.Forall(params), Seq(pred)) =>
-        val vds = params.map(v => new ValDef(varId2Var(v)))
-        recHelper(pred)(Forall(vds, _))
-
-      case Signature(Label.Or, args) => recHelper(args)(Or.apply)
-      case Signature(Label.Not, Seq(c)) =>
-        code2sig(c) match {
-//          case Signature(Label.Or, disjs) =>
-//            given OEnv = OEnv(renv.nesting, forceBinding = false)
-//            recHelper(disjs.map(negCodeOf))(And.apply)
-          case _ => recHelper(c)(Not.apply)
-        }
-      case Signature(Label.Equals, Seq(c1, c2)) => recHelper(c1, c2)(Equals.apply)
-      case Signature(Label.LessThan, Seq(c1, c2)) => recHelper(c1, c2)(LessThan.apply)
-      case Signature(Label.GreaterThan, Seq(c1, c2)) => recHelper(c1, c2)(GreaterThan.apply)
-      case Signature(Label.LessEquals, Seq(c1, c2)) => recHelper(c1, c2)(LessEquals.apply)
-      case Signature(Label.GreaterEquals, Seq(c1, c2)) => recHelper(c1, c2)(GreaterEquals.apply)
-      case Signature(Label.UMinus, Seq(c)) => recHelper(c)(UMinus.apply)
-      case Signature(Label.Plus, Seq(c1, c2)) => recHelper(c1, c2)(Plus.apply)
-      case Signature(Label.Minus, Seq(c1, c2)) => recHelper(c1, c2)(Minus.apply)
-      case Signature(Label.Times, Seq(c1, c2)) => recHelper(c1, c2)(Times.apply)
-      case Signature(Label.Division, Seq(c1, c2)) => recHelper(c1, c2)(Division.apply)
-      case Signature(Label.Remainder, Seq(c1, c2)) => recHelper(c1, c2)(Remainder.apply)
-      case Signature(Label.Modulo, Seq(c1, c2)) => recHelper(c1, c2)(Modulo.apply)
-      case Signature(Label.BVNot, Seq(c)) => recHelper(c)(BVNot.apply)
-      case Signature(Label.BVAnd, Seq(c1, c2)) => recHelper(c1, c2)(BVAnd.apply)
-      case Signature(Label.BVOr, Seq(c1, c2)) => recHelper(c1, c2)(BVOr.apply)
-      case Signature(Label.BVXor, Seq(c1, c2)) => recHelper(c1, c2)(BVXor.apply)
-      case Signature(Label.BVShiftLeft, Seq(c1, c2)) => recHelper(c1, c2)(BVShiftLeft.apply)
-      case Signature(Label.BVAShiftRight, Seq(c1, c2)) => recHelper(c1, c2)(BVAShiftRight.apply)
-      case Signature(Label.BVLShiftRight, Seq(c1, c2)) => recHelper(c1, c2)(BVLShiftRight.apply)
-      case Signature(Label.BVNarrowingCast(newType), Seq(c)) => recHelper(c)(BVNarrowingCast(_, newType))
-      case Signature(Label.BVWideningCast(newType), Seq(c)) => recHelper(c)(BVWideningCast(_, newType))
-      case Signature(Label.BVUnsignedToSigned, Seq(c)) => recHelper(c)(BVUnsignedToSigned.apply)
-      case Signature(Label.BVSignedToUnsigned, Seq(c)) => recHelper(c)(BVSignedToUnsigned.apply)
-      case Signature(Label.TupleSelect(index), Seq(c)) => recHelper(c)(TupleSelect(_, index))
-
-      case Signature(Label.FiniteSet(base), args) => recHelper(args)(FiniteSet(_, base))
-      case Signature(Label.SetAdd, Seq(set, elem)) => recHelper(set, elem)(SetAdd.apply)
-      case Signature(Label.ElementOfSet, Seq(elem, set)) => recHelper(elem, set)(ElementOfSet.apply)
-      case Signature(Label.SubsetOf, Seq(lhs, rhs)) => recHelper(lhs, rhs)(SubsetOf.apply)
-      case Signature(Label.SetIntersection, Seq(lhs, rhs)) => recHelper(lhs, rhs)(SetIntersection.apply)
-      case Signature(Label.SetUnion, Seq(lhs, rhs)) => recHelper(lhs, rhs)(SetUnion.apply)
-      case Signature(Label.SetDifference, Seq(lhs, rhs)) => recHelper(lhs, rhs)(SetDifference.apply)
-
-      case Signature(Label.FiniteArray(base), args) => recHelper(args)(FiniteArray(_, base))
-      case Signature(Label.LargeArray(elemsIndices, base), all@(elems :+ default :+ size)) =>
-        recHelper(all) { case elems :+ default :+ size =>
-          LargeArray(elemsIndices.zip(elems).toMap, default, size, base)
-        }
-      case Signature(Label.ArraySelect, Seq(arr, i)) => recHelper(arr, i)(ArraySelect.apply)
-      case Signature(Label.ArrayUpdated, Seq(arr, i, v)) => recHelper(arr, i, v)(ArrayUpdated.apply)
-      case Signature(Label.ArrayLength, Seq(arr)) => recHelper(arr)(ArrayLength.apply)
-
-      case Signature(Label.Error(tpe, descr), Seq()) => RevRes(Error(tpe, descr), Set.empty)
-      case Signature(Label.NoTree(tpe), Seq()) => RevRes(NoTree(tpe), Set.empty)
-
-      case Signature(Label.MatchExpr(pats), cScrut +: cGuardRhs) =>
-        assert(2 * pats.size == cGuardRhs.size)
-
-        def convertPattern(scrut: Code, pat: LabelledPattern, vds: Map[Code, ValDef]): Pattern = {
-          def recHelper(subscruts: Seq[Code], subps: Seq[LabelledPattern]): Seq[Pattern] = {
-            assert(subscruts.size == subps.size)
-            subscruts.zip(subps).map {
-              case (subscrut, subpat) => convertPattern(subscrut, subpat, vds)
-            }
-          }
-          val bdg = vds.get(scrut)
-          pat match {
-            case LabelledPattern.Wildcard => WildcardPattern(bdg)
-            case LabelledPattern.ADT(id, tps, subps) =>
-              val rsubs = recHelper(adtSubscrutinees(scrut, ADTType(id, tps)), subps)
-              ADTPattern(bdg, id, tps, rsubs)
-            case LabelledPattern.TuplePattern(subps) =>
-              val tt@TupleType(bases) = codeTpe(scrut)
-              assert(bases.size == subps.size)
-              val rsubs = recHelper(tupleSubscrutinees(scrut, tt), subps)
-              TuplePattern(bdg, rsubs)
-            case LabelledPattern.Lit(lit) => LiteralPattern(bdg, lit)
-            case LabelledPattern.Unapply(recs, id, tps, sub) => ???
-          }
-        }
-
-        def uncodeOfCase(pat: LabelledPattern, cGuard: Code, cRhs: Code): (Pattern, RevRes, RevRes) = {
-          val allScruts = allScrutinees(cScrut, pat)
-          val scrutBdgs = allScruts.zipWithIndex.map {
-            case (subScrut, i) =>
-              val vId = idOfVariable(Variable.fresh(s"bdg$i", codeTpe(subScrut)))
-              vId -> subScrut
-          }
-          val newRenv = renv.withLetBounds(scrutBdgs)
-          val guard = uncodeOf(cGuard)(using newRenv)
-          val rhs = uncodeOf(cRhs)(using newRenv)
-          // On retire les scrut. binding qui sont inutiles.
-          val scrutVds = scrutBdgs.filter { case (v, _) => guard.used(v) || rhs.used(v) }
-            .map { case (v, c) =>
-              val vd = new ValDef(varId2Var(v))
-              c -> vd
-            }.toMap
-          (convertPattern(cScrut, pat, scrutVds), guard, rhs)
-        }
-
-        val (guards, rhss) = cGuardRhs.grouped(2).map { case Seq(guard, rhs) => (guard, rhs) }.toSeq.unzip
-        val scrut = uncodeOf(cScrut)
-        val (cases, used) = pats.zip(guards).zip(rhss).foldLeft((Seq.empty[MatchCase], scrut.used)) {
-          case ((accCases, accUsed), ((labPat, cGuard), cRhs)) =>
-            val (pat, guard, rhs) = uncodeOfCase(labPat, cGuard, cRhs)
-            val cse = MatchCase(pat, if (guard.expr == BooleanLiteral(true)) None else Some(guard.expr), rhs.expr)
-            (accCases :+ cse, accUsed ++ guard.used ++ rhs.used)
-        }
-        RevRes(MatchExpr(scrut.expr, cases), used)
-
-      case sig =>
-        sys.error(s"uncodeOf: what is this: $sig")
-    }
-  }
-
-  def recHelper(args: Seq[Code])(recons: Seq[Expr] => Expr)(using RevEnv): RevRes = {
-    val rargs = args.map(uncodeOf)
-    RevRes(recons(rargs.map(_.expr)), rargs.flatMap(_.used).toSet)
-  }
-  def recHelper(c1: Code)(recons: Expr => Expr)(using RevEnv): RevRes =
-    recHelper(Seq(c1)) { case Seq(e1) => recons(e1) }
-  def recHelper(c1: Code, c2: Code)(recons: (Expr, Expr) => Expr)(using RevEnv): RevRes =
-    recHelper(Seq(c1, c2)) { case Seq(e1, e2) => recons(e1, e2) }
-  def recHelper(c1: Code, c2: Code, c3: Code)(recons: (Expr, Expr, Expr) => Expr)(using RevEnv): RevRes =
-    recHelper(Seq(c1, c2, c3)) { case Seq(e1, e2, e3) => recons(e1, e2, e3) }
-
-  /////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-  def b2c(b: Boolean): Code = if (b) trueCode else falseCode
-  def b2sig(b: Boolean): Signature = if (b) trueSig else falseSig
-
-  val assmChkPurity: Purity = if (opts.assumeChecked) Pure else Impure
-
-  def unAnd(e: Expr): Seq[Expr] = e match {
-    case And(es) => es.flatMap(unAnd)
-    case e => Seq(e)
-  }
-
-  def unOr(e: Expr): Seq[Expr] = e match {
-    case Or(es) => es.flatMap(unOr)
-    case e => Seq(e)
-  }
-
-  def unOrCodes(disjs: Seq[Code]): Seq[Code] = disjs.flatMap(unOrCode)
-
-  def unOrCode(c: Code): Seq[Code] = code2sig(c) match {
-    case Signature(Label.Or, disjs) => disjs.flatMap(unOrCode)
-    case _ => Seq(c)
-  }
-
-  def sizeOf(e: Expr): Int = sizeCache.getOrElseUpdate(e, exprOps.formulaSize(e))
-
-  /////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-  def fnPurity(fn: Identifier): Purity = {
-    def resolvedPurity(isPure: Boolean): Unit = {
-      purityCache += fn -> isPure
-      if (blocking.contains(fn)) {
-        val (blockedFns, blockedCodes) = blocking.remove(fn).get
-        for (blockedFn <- blockedFns) {
-          assert(fnBlockedBy.contains(blockedFn))
-          assert(fnBlockedBy(blockedFn) == Set(fn))
-          fnBlockedBy -= blockedFn
-          purityCache += blockedFn -> isPure
-        }
-        for (blockedCode <- blockedCodes) {
-          assert(codeBlockedBy.contains(blockedCode))
-          assert(codeBlockedBy(blockedCode) == Set(fn))
-          codeBlockedBy -= blockedCode
-          codePurityCache += blockedCode -> isPure // TODO: env dependant?
-        }
-      }
-    }
-    def addToBlocked(blockers: Set[Identifier]): Unit = {
-      assert(!blockers.contains(fn))
-      // On s'ajoute à la liste des bloqués
-      fnBlockedBy += fn -> blockers
-      for (blocker <- blockers) {
-        val (blockedFns, blockedCodes) = blocking.getOrElse(blocker, (Set.empty, Set.empty))
-        blocking += blocker -> (blockedFns + fn, blockedCodes)
-      }
-
-      // On upd. les bloqués pour qu'ils pointent vers ceux qui nous bloquent, et pas nous.
-      val (blockedFnsByThisFn, blockedCodeByThisCode) = blocking.remove(fn).getOrElse((Set.empty, Set.empty))
-      for (blockedFn <- blockedFnsByThisFn) {
-        assert(fnBlockedBy.contains(blockedFn))
-        val upd = fnBlockedBy(blockedFn) - fn ++ blockers
-        fnBlockedBy += blockedFn -> upd
-      }
-      for (blockedCode <- blockedCodeByThisCode) {
-        assert(codeBlockedBy.contains(blockedCode))
-        val upd = codeBlockedBy(blockedCode) - fn ++ blockers
-        codeBlockedBy += blockedCode -> upd
-      }
-    }
-
-    if (visiting.contains(fn)) {
-      if (!opts.assumeChecked) Impure
-      else Delayed(Set(fn))
-    } else {
-      purityCache.get(fn) match {
-        case Some(true) => Pure
-        case Some(false) => Impure
-        case None if fnBlockedBy.contains(fn) => Delayed(fnBlockedBy(fn))
-        case None =>
-          // TODO: Quid condition venant du simplifier (s'il y en as???)?
-          // TODO: Différencier:
-          //    -outer assms et local assms
-          //    -outer open bound et local open bound
-          given OEnv = OEnv(LambdaNesting(0), forceBinding = true)
-          given Ctxs = Ctxs.empty
-          given LetValSubst = LetValSubst.empty
-          assert(!visiting.contains(fn))
-          assert(!fnBlockedBy.contains(fn))
-          assert(!blocking.contains(fn))
-          visiting += fn
-          val bodyCodeRes = codeOfExpr(getFunction(fn).fullBody)
-          val bodyCode = bodyCodeRes.selfPlugged(Ctxs.empty)._2
-          val uncodedTest = uncodeOf(bodyCode)(using RevEnv(Map.empty, LambdaNesting(0)))
-          val purity = codePurity(bodyCode)
-          visiting -= fn
-          purity match {
-            case Pure =>
-              resolvedPurity(isPure = true)
-              Pure
-            case Impure =>
-              resolvedPurity(isPure = false)
-              Impure
-            case Delayed(blockers0) =>
-              assert(blockers0.nonEmpty)
-              assert(opts.assumeChecked)
-              assert(!fnBlockedBy.contains(fn))
-              val blockersWoCurr = blockers0 - fn
-
-              if (blockers0.contains(fn)) {
-                assert(blocking.contains(fn))
-                if (blockersWoCurr.isEmpty) {
-                  resolvedPurity(isPure = true)
-                  Pure
-                } else {
-                  addToBlocked(blockersWoCurr)
-                  Delayed(blockersWoCurr)
-                }
-              } else {
-                assert(!blocking.contains(fn))
-                addToBlocked(blockers0)
-                Delayed(blockers0)
-              }
-          }
-      }
-    }
-  }
-
-  /////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-  def adtSubscrutinees(scrut: Code, adt: ADTType): Seq[Code] = {
-    val tcons = getConstructor(adt.id, adt.tps)
-    tcons.fields.map(fld => codeOfSig(mkADTSelector(scrut, adt, tcons, fld.id), fld.getType))
-  }
-
-  def tupleSubscrutinees(scrut: Code, tt: TupleType): Seq[Code] = {
-    tt.bases.zipWithIndex.map { case (base, i) => codeOfSig(mkTupleSelect(scrut, i + 1), base) }
-  }
-
-  def allScrutinees(scrut: Code, pat: LabelledPattern): Seq[Code] = {
-    pat match {
-      case LabelledPattern.Wildcard | LabelledPattern.Lit(_) => Seq(scrut)
-      case LabelledPattern.ADT(id, tps, subps) =>
-        val subscruts = adtSubscrutinees(scrut, ADTType(id, tps))
-        assert(subscruts.size == subps.size)
-        scrut +: subscruts.zip(subps).flatMap {
-          case (subscrut, subp) => allScrutinees(subscrut, subp)
-        }
-      case LabelledPattern.TuplePattern(subps) =>
-        val tt@TupleType(bases) = codeTpe(scrut)
-        assert(bases.size == subps.size)
-        val subscruts = tupleSubscrutinees(scrut, tt)
-        assert(subscruts.size == subps.size)
-        scrut +: subscruts.zip(subps).flatMap {
-          case (subscrut, subp) => allScrutinees(subscrut, subp)
-        }
-      case LabelledPattern.Unapply(recs, id, tps, sub) => sys.error("Oh non, un Unapply :(")
-    }
-  }
-
-  def addScrutineeBindings(scrut: Code, pat: LabelledPattern, ctxs: Ctxs): Ctxs = {
-    allScrutinees(scrut, pat).foldLeft(ctxs) {
-      case (ctxs, scrut) => ctxs.addBoundDef(scrut)
-    }
-  }
-
-  // TODO: Ordre ok???
-  // TODO: Ordre ok???
-  // TODO: Ordre ok???
-  def collectPatternConds(scrut: Code, pat: LabelledPattern, recursive: Boolean)(using env: OEnv, ctxs: Ctxs): Seq[Code] = {
-    assert(ctxs.isLitVarOrBoundDef(scrut))
-
-    def recHelper(subscruts: Seq[Code], subps: Seq[LabelledPattern], patConds: Seq[Code]): Seq[Code] = {
-      assert(subscruts.size == subps.size)
-      subscruts.zip(subps).foldLeft((patConds, ctxs.withConds(patConds))) {
-        case ((acc, ctxs), (subscrut, subpat)) =>
-          val conds2 = collectPatternConds(subscrut, subpat, true)(using env, ctxs)
-          (acc ++ conds2, ctxs.withConds(conds2))
-      }._1
-    }
-
-    pat match {
-      case LabelledPattern.Wildcard | LabelledPattern.Lit(_) => Seq.empty
-      case LabelledPattern.ADT(id, tps, subps) =>
-        val adt = ADTType(id, tps)
-        val tcons = getConstructor(id, tps)
-        assert(tcons.fields.size == subps.size)
-        val patConds = isConstructor(scrut, adt, id) match {
-          case Some(true) => Seq.empty[Code]
-          case Some(false) => return Seq(falseCode) // Cela ne sert à rien de continuer plus loin
-          case None => Seq(codeOfSig(mkIsCtor(scrut, adt, id), BoolTy))
-        }
-        if (recursive) recHelper(adtSubscrutinees(scrut, adt), subps, patConds)
-        else patConds
-      case LabelledPattern.TuplePattern(subps) =>
-        if (recursive) {
-          val tt@TupleType(bases) = codeTpe(scrut)
-          assert(bases.size == subps.size)
-          val subscruts = tupleSubscrutinees(scrut, tt)
-          recHelper(subscruts, subps, Seq.empty)
-        }
-        else Seq.empty
-      case LabelledPattern.Unapply(recs, id, tps, subps) =>
-        sys.error(s"Does not know how to handle $pat")
-    }
-  }
-
-  def isLambda(c: Code): Boolean = code2sig(c).label.isLambda
-  def isLambdaLike(c: Code): Boolean = code2sig(c).label.isLambdaLike
-  def isVar(c: Code): Boolean = code2sig(c).label.isVar
-  def isLitOrVar(c: Code): Boolean = code2sig(c).label.isLitOrVar
-
-  /////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-  def codeOfVarId(v: VarId): Code = codeOfSig(mkVar(v), varTpe(v))
-
-  def codeOfLit[T](l: Literal[T]): Code = codeOfSig(mkLit(l), l.getType)
-
-  private val codePurityInst = new CodePurity
-
-  def codePurity(c: Code)(using env: OEnv, ctxs: Ctxs): Purity = codePurityInst.codePurity(c)(using env.copy(forceBinding = true))
+  //region Code general simplification
 
   // TODO: Si cr.terminal != cr.ctxs.last, alors c'est une occurrences lié qu'il ne faudrait pas simplifier, n'est-ce pas???
   //  --> Oui et non, car dans certains cas, on peut avoir des simplifications extra grace a un ctx enrichi
@@ -1947,40 +1402,118 @@ trait OCBSL extends Definitions { ocbsl =>
 
     rec(cases, Seq.empty)
   }
+  //endregion
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-  // TODO: Cette histoire de assume(...) en début de lambda????
-  // TODO: Cette histoire de assume(...) en début de lambda????
-  // TODO: Cette histoire de assume(...) en début de lambda????
-  def inlineLambda(outerCtxs: Ctxs, argsSubst: Seq[(VarId, Code)], body: Code)(using env: OEnv): CodeRes = {
-    // Essentiellement un freshener + simplifyTopLvl a chaque step
-    object inliner extends CodeTransformer {
-      override type Extra = Unit
+  //region Purity
 
-      override def transformImpl(c: Code, repl: Map[Code, Code], extra: Unit)(using env: OEnv, ctxs: Ctxs): CodeRes = code2sig(c) match {
-        case Signature(lab: Label.LambdaLike, Seq(body)) if !ctxs.isBoundDef(c) => // On ne va pas modifier les occurrences liés
-          val freshParams = lab.params.map(v => v -> freshened(v))
-          val freshParamsRepl = freshParams.map { case (old, nw) => codeOfVarId(old) -> codeOfVarId(nw) }.toMap
-          val newLab = lab.replacedParams(freshParams.map(_._2))
-          val newLam = codeOfSig(mkLambdaLike(newLab, body), codeTpe(c))
-          val rec = super.transformImpl(newLam, repl ++ freshParamsRepl, ())
-          simplifyTopLvl(rec)
+  private val codePurityInst = new CodePurity
 
-        case Signature(_, _) =>
-          val rec = super.transformImpl(c, repl, ())
-          simplifyTopLvl(rec)
+  def codePurity(c: Code)(using env: OEnv, ctxs: Ctxs): Purity =
+    codePurityInst.codePurity(c)(using env.copy(forceBinding = true))
+
+  def fnPurity(fn: Identifier): Purity = {
+    def resolvedPurity(isPure: Boolean): Unit = {
+      purityCache += fn -> isPure
+      if (blocking.contains(fn)) {
+        val (blockedFns, blockedCodes) = blocking.remove(fn).get
+        for (blockedFn <- blockedFns) {
+          assert(fnBlockedBy.contains(blockedFn))
+          assert(fnBlockedBy(blockedFn) == Set(fn))
+          fnBlockedBy -= blockedFn
+          purityCache += blockedFn -> isPure
+        }
+        for (blockedCode <- blockedCodes) {
+          assert(codeBlockedBy.contains(blockedCode))
+          assert(codeBlockedBy(blockedCode) == Set(fn))
+          codeBlockedBy -= blockedCode
+          codePurityCache += blockedCode -> isPure // TODO: env dependant?
+        }
       }
     }
 
-    val bodyTpe = codeTpe(body)
-    val initCtxs = argsSubst.foldLeft(outerCtxs) {
-      case (ctxs, (_, arg)) => ctxs.addBoundDef(arg)
+    def addToBlocked(blockers: Set[Identifier]): Unit = {
+      assert(!blockers.contains(fn))
+      // On s'ajoute à la liste des bloqués
+      fnBlockedBy += fn -> blockers
+      for (blocker <- blockers) {
+        val (blockedFns, blockedCodes) = blocking.getOrElse(blocker, (Set.empty, Set.empty))
+        blocking += blocker -> (blockedFns + fn, blockedCodes)
+      }
+
+      // On upd. les bloqués pour qu'ils pointent vers ceux qui nous bloquent, et pas nous.
+      val (blockedFnsByThisFn, blockedCodeByThisCode) = blocking.remove(fn).getOrElse((Set.empty, Set.empty))
+      for (blockedFn <- blockedFnsByThisFn) {
+        assert(fnBlockedBy.contains(blockedFn))
+        val upd = fnBlockedBy(blockedFn) - fn ++ blockers
+        fnBlockedBy += blockedFn -> upd
+      }
+      for (blockedCode <- blockedCodeByThisCode) {
+        assert(codeBlockedBy.contains(blockedCode))
+        val upd = codeBlockedBy(blockedCode) - fn ++ blockers
+        codeBlockedBy += blockedCode -> upd
+      }
     }
-    val initRepl = argsSubst.map { case (param, arg) => codeOfVarId(param) -> arg }.toMap
-    val inlined = inliner.transform(body, initRepl, ())(using env, initCtxs)
-    assert(codeTpe(inlined.terminal) == bodyTpe)
-    inlined
+
+    if (visiting.contains(fn)) {
+      if (!opts.assumeChecked) Impure
+      else Delayed(Set(fn))
+    } else {
+      purityCache.get(fn) match {
+        case Some(true) => Pure
+        case Some(false) => Impure
+        case None if fnBlockedBy.contains(fn) => Delayed(fnBlockedBy(fn))
+        case None =>
+          // TODO: Quid condition venant du simplifier (s'il y en as???)?
+          // TODO: Différencier:
+          //    -outer assms et local assms
+          //    -outer open bound et local open bound
+          given OEnv = OEnv(LambdaNesting(0), forceBinding = true)
+
+          given Ctxs = Ctxs.empty
+
+          given LetValSubst = LetValSubst.empty
+
+          assert(!visiting.contains(fn))
+          assert(!fnBlockedBy.contains(fn))
+          assert(!blocking.contains(fn))
+          visiting += fn
+          val bodyCodeRes = codeOfExpr(getFunction(fn).fullBody)
+          val bodyCode = bodyCodeRes.selfPlugged(Ctxs.empty)._2
+          val uncodedTest = uncodeOf(bodyCode)(using RevEnv(Map.empty, LambdaNesting(0)))
+          val purity = codePurity(bodyCode)
+          visiting -= fn
+          purity match {
+            case Pure =>
+              resolvedPurity(isPure = true)
+              Pure
+            case Impure =>
+              resolvedPurity(isPure = false)
+              Impure
+            case Delayed(blockers0) =>
+              assert(blockers0.nonEmpty)
+              assert(opts.assumeChecked)
+              assert(!fnBlockedBy.contains(fn))
+              val blockersWoCurr = blockers0 - fn
+
+              if (blockers0.contains(fn)) {
+                assert(blocking.contains(fn))
+                if (blockersWoCurr.isEmpty) {
+                  resolvedPurity(isPure = true)
+                  Pure
+                } else {
+                  addToBlocked(blockersWoCurr)
+                  Delayed(blockersWoCurr)
+                }
+              } else {
+                assert(!blocking.contains(fn))
+                addToBlocked(blockers0)
+                Delayed(blockers0)
+              }
+          }
+      }
+    }
   }
 
   class CodePurity extends CodeTryFolder[Unit, Purity] {
@@ -2046,7 +1579,8 @@ trait OCBSL extends Definitions { ocbsl =>
             foldPurity(args) ++ fnPurity(id)
 
           case Signature(Label.Application, callee +: args) =>
-            assert(ctxs.isLitVarOrBoundDef(callee))
+             assert(ctxs.isLitVarOrBoundDef(callee))
+//            assert(CodeRes.isTerminal(callee))
             // TODO: L'orig ignore callee, mais si on fait ça, on risque de faire du reordering dans certains cas (comme ContMonad)
             // TODO: Dans SWP: quid pureté callee???
             // TODO: Pureté ok? Après tout, un inline de lambda peut donner lieu à impure...
@@ -2092,6 +1626,84 @@ trait OCBSL extends Definitions { ocbsl =>
         visiting -= c
         if (purity == Impure) Left(()) else Right(purity)
       }
+    }
+  }
+  //endregion
+
+  /////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+  //region Composition of codes, binding, inlining
+
+  enum BindingCase {
+    // In let v = e in body...
+    case Elidable // ... the `e` (and the let) can be removed (that is, we can just return `body`, `e` is pure)
+    case Inlinable // ... the `e` can be inlined or bound, but it definitely appears in `body` (may or may not be impure)
+    case MustBind // ... the `e` must be bound (appears in `body` if pure, may not appear if impure)
+  }
+
+  def needsBinding(terminal: Code, terminalComposition: Occurrences, definitionOccurrence: Occurrence)(using env: OEnv, prefix: Ctxs): BindingCase = {
+    assert(!isLitOrVar(terminal))
+    assert(!prefix.isBoundDef(terminal))
+
+    code2sig(terminal) match {
+      case Signature(Label.Ensuring, _) => BindingCase.Inlinable
+      case _ =>
+        if (env.forceBinding) BindingCase.MustBind
+        else {
+          lazy val isPure = codePurity(terminal).isPure
+          definitionOccurrence match {
+            case Occurrence.Many => BindingCase.MustBind
+            case Occurrence.Zero =>
+              // Si une expr impure n'apparait pas dans le body, on ne peut pas l'éliminer, il faut donc le bind
+              if (!isPure) BindingCase.MustBind
+              else BindingCase.Elidable
+            case Occurrence.Once(inCtxs, nesting, _) if isPure =>
+              assert(env.nesting.level <= nesting.level)
+              assert(prefix.isPrefixOf(inCtxs))
+              assert(prefix.ctxs.size + 1 <= inCtxs.ctxs.size)
+              assert(inCtxs.ctxs(prefix.ctxs.size) == Ctx.BoundDef(terminal))
+              if (nesting.inAnyLambda && terminalComposition.hasLambda) BindingCase.MustBind
+              else BindingCase.Inlinable
+            case Occurrence.Once(inCtxs, nesting, _) =>
+              assert(env.nesting.level <= nesting.level)
+              // TODO: Expliquer cette daube
+              // inEnv représente l'env. actif lors de l'occurrence de `terminal` dans le trou que l'on s'apprête à compléter.
+              // S'il est différent de l'env ou `terminal` est introduit, alors on a besoin de let-bind, car inline
+              // une expr impure après un PC est incorrect.
+              assert(prefix.isPrefixOf(inCtxs))
+              // Dans inCtxs, on nécessairement le binding v -> terminal juste après prefix
+              assert(prefix.ctxs.size + 1 <= inCtxs.ctxs.size)
+              assert(inCtxs.ctxs(prefix.ctxs.size) == Ctx.BoundDef(terminal))
+
+              // TODO: inEnv.letDef.drop(env.letDef.size + 1)
+              // Pour qu'on puisse inline cette expression impure...
+              // 1. Pas dans une lambda
+              // 2. Pas de nouvelles conditions (assumptions/PC)
+              // 3. Tous les bindings supplémentaires (*après celui-ci*) sont pures
+              // 2 et 3 sont gérés par isPureSuffix
+
+              lazy val isPureSuffix: Boolean = {
+                def rec(extras: Seq[Ctx], running: Ctxs): Boolean = {
+                  assert(extras.forall(ex => !running.ctxs.contains(ex)))
+                  assert(running.isPrefixOf(inCtxs))
+                  if (extras.isEmpty) true
+                  else extras.head match {
+                    case Ctx.Id => sys.error("Les Id devraient être filtré!!!")
+                    case Ctx.Assumed(_) | Ctx.AssumeLike(_, _) => false // Condition supplémentaire; donc impure
+                    case Ctx.BoundDef(defn) =>
+                      codePurity(defn)(using env, running).isPure &&
+                        rec(extras.tail, running.addBoundDef(defn))
+                  }
+                }
+
+                val extras = inCtxs.ctxs.drop(prefix.ctxs.size + 1) // +1 car c'est après ce binding
+                rec(extras, prefix.addBoundDef(terminal))
+              }
+
+              if (env.nesting == nesting && isPureSuffix) BindingCase.Inlinable
+              else BindingCase.MustBind
+          }
+        }
     }
   }
 
@@ -2276,8 +1888,241 @@ trait OCBSL extends Definitions { ocbsl =>
   }
   */
 
+  // TODO: Cette histoire de assume(...) en début de lambda????
+  // TODO: Cette histoire de assume(...) en début de lambda????
+  // TODO: Cette histoire de assume(...) en début de lambda????
+  def inlineLambda(outerCtxs: Ctxs, argsSubst: Seq[(VarId, Code)], body: Code)(using env: OEnv): CodeRes = {
+    // Essentiellement un freshener + simplifyTopLvl a chaque step
+    object inliner extends CodeTransformer {
+      override type Extra = Unit
+
+      override def transformImpl(c: Code, repl: Map[Code, Code], extra: Unit)(using env: OEnv, ctxs: Ctxs): CodeRes = code2sig(c) match {
+        case Signature(lab: Label.LambdaLike, Seq(body)) if !ctxs.isBoundDef(c) => // On ne va pas modifier les occurrences liés
+          val freshParams = lab.params.map(v => v -> freshened(v))
+          val freshParamsRepl = freshParams.map { case (old, nw) => codeOfVarId(old) -> codeOfVarId(nw) }.toMap
+          val newLab = lab.replacedParams(freshParams.map(_._2))
+          val newLam = codeOfSig(mkLambdaLike(newLab, body), codeTpe(c))
+          val rec = super.transformImpl(newLam, repl ++ freshParamsRepl, ())
+          simplifyTopLvl(rec)
+
+        case Signature(_, _) =>
+          val rec = super.transformImpl(c, repl, ())
+          simplifyTopLvl(rec)
+      }
+    }
+
+    val bodyTpe = codeTpe(body)
+    val initCtxs = argsSubst.foldLeft(outerCtxs) {
+      case (ctxs, (_, arg)) => ctxs.addBoundDef(arg)
+    }
+    val initRepl = argsSubst.map { case (param, arg) => codeOfVarId(param) -> arg }.toMap
+    val inlined = inliner.transform(body, initRepl, ())(using env, initCtxs)
+    assert(codeTpe(inlined.terminal) == bodyTpe)
+    inlined
+  }
+  //endregion
+
+  /////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+  //region Uncoding
+
+  case class RevEnv(revLetDefs: Map[Code, VarId], nesting: LambdaNesting) {
+    def withLetBounds(vs: Seq[(VarId, Code)]): RevEnv =
+      RevEnv(revLetDefs ++ vs.map { case (v, c) => c -> v }.toMap, nesting)
+
+    def withLetBounds(v: VarId, c: Code): RevEnv =
+      RevEnv(revLetDefs + (c -> v), nesting)
+
+    def inc: RevEnv = RevEnv(revLetDefs, nesting.inc)
+  }
+
+  object RevEnv {
+    def empty: RevEnv = RevEnv(Map.empty, LambdaNesting(0))
+  }
+
+  case class RevRes(expr: Expr, used: Set[VarId])
+
+  def uncodeOf(c: Code)(using renv: RevEnv): RevRes = {
+    renv.revLetDefs.get(c) match {
+      case Some(vIx) =>
+        return RevRes(varId2Var(vIx), Set(vIx))
+      case None => ()
+    }
+
+    code2sig(c) match {
+      case Signature(Label.Var(v), Seq()) => RevRes(varId2Var(v), Set(v))
+      case Signature(Label.Lit(lit), Seq()) => RevRes(lit, Set.empty)
+      case Signature(Label.Tuple, args) => recHelper(args)(Tuple.apply)
+      case Signature(Label.ADT(id, tps), args) => recHelper(args)(ADT(id, tps, _))
+      case Signature(Label.ADTSelector(_, _, sel), Seq(recv)) => recHelper(recv)(ADTSelector(_, sel))
+      case Signature(Label.FunctionInvocation(id, tps), args) => recHelper(args)(FunctionInvocation(id, tps, _))
+      case Signature(Label.Annotated(flags), Seq(e)) => recHelper(e)(Annotated(_, flags))
+      case Signature(Label.IsConstructor(_, id), Seq(e)) => recHelper(e)(IsConstructor(_, id))
+      case Signature(Label.Application, all@(callee +: args)) =>
+        recHelper(all) { case callee +: args => Application(callee, args) }
+
+      case Signature(Label.Let, Seq(cE, cBody)) =>
+        val e = uncodeOf(cE)
+        val v = freshVarId("bdg", codeTpe(cE))
+        val body = uncodeOf(cBody)(using renv.withLetBounds(v, cE))
+        RevRes(Let(new ValDef(varId2Var(v)), e.expr, body.expr), e.used ++ body.used)
+
+      // TODO: Ok?
+      case Signature(Label.Assume, Seq(pred, body)) => recHelper(pred, body)(Assume.apply)
+      case Signature(Label.Assert, Seq(pred, body)) => recHelper(pred, body)(Assert(_, None, _))
+      case Signature(Label.Require, Seq(pred, body)) => recHelper(pred, body)(Require.apply)
+      case Signature(Label.Ensuring, Seq(body, pred)) =>
+        recHelper(body, pred) {
+          case (body, pred: Lambda) => Ensuring(body, pred)
+          case (body, Let(v, lam: Lambda, predBody)) if predBody == v.toVariable => Ensuring(body, lam) // TODO: Slmt pour debug fnPurity
+        }
+      case Signature(Label.Decreases, Seq(measure, body)) => recHelper(measure, body)(Decreases.apply)
+
+      case Signature(Label.IfExpr, Seq(cond, thn, els)) => recHelper(cond, thn, els)(IfExpr.apply)
+      case Signature(Label.Lambda(params), Seq(body)) =>
+        val vds = params.map(v => new ValDef(varId2Var(v)))
+        recHelper(body)(Lambda(vds, _))(using renv.inc)
+      case Signature(Label.Choose(v), Seq(pred)) => recHelper(pred)(Choose(new ValDef(varId2Var(v)), _))
+      case Signature(Label.Forall(params), Seq(pred)) =>
+        val vds = params.map(v => new ValDef(varId2Var(v)))
+        recHelper(pred)(Forall(vds, _))
+
+      case Signature(Label.Or, args) => recHelper(args)(Or.apply)
+      case Signature(Label.Not, Seq(c)) =>
+        code2sig(c) match {
+          //          case Signature(Label.Or, disjs) =>
+          //            given OEnv = OEnv(renv.nesting, forceBinding = false)
+          //            recHelper(disjs.map(negCodeOf))(And.apply)
+          case _ => recHelper(c)(Not.apply)
+        }
+      case Signature(Label.Equals, Seq(c1, c2)) => recHelper(c1, c2)(Equals.apply)
+      case Signature(Label.LessThan, Seq(c1, c2)) => recHelper(c1, c2)(LessThan.apply)
+      case Signature(Label.GreaterThan, Seq(c1, c2)) => recHelper(c1, c2)(GreaterThan.apply)
+      case Signature(Label.LessEquals, Seq(c1, c2)) => recHelper(c1, c2)(LessEquals.apply)
+      case Signature(Label.GreaterEquals, Seq(c1, c2)) => recHelper(c1, c2)(GreaterEquals.apply)
+      case Signature(Label.UMinus, Seq(c)) => recHelper(c)(UMinus.apply)
+      case Signature(Label.Plus, Seq(c1, c2)) => recHelper(c1, c2)(Plus.apply)
+      case Signature(Label.Minus, Seq(c1, c2)) => recHelper(c1, c2)(Minus.apply)
+      case Signature(Label.Times, Seq(c1, c2)) => recHelper(c1, c2)(Times.apply)
+      case Signature(Label.Division, Seq(c1, c2)) => recHelper(c1, c2)(Division.apply)
+      case Signature(Label.Remainder, Seq(c1, c2)) => recHelper(c1, c2)(Remainder.apply)
+      case Signature(Label.Modulo, Seq(c1, c2)) => recHelper(c1, c2)(Modulo.apply)
+      case Signature(Label.BVNot, Seq(c)) => recHelper(c)(BVNot.apply)
+      case Signature(Label.BVAnd, Seq(c1, c2)) => recHelper(c1, c2)(BVAnd.apply)
+      case Signature(Label.BVOr, Seq(c1, c2)) => recHelper(c1, c2)(BVOr.apply)
+      case Signature(Label.BVXor, Seq(c1, c2)) => recHelper(c1, c2)(BVXor.apply)
+      case Signature(Label.BVShiftLeft, Seq(c1, c2)) => recHelper(c1, c2)(BVShiftLeft.apply)
+      case Signature(Label.BVAShiftRight, Seq(c1, c2)) => recHelper(c1, c2)(BVAShiftRight.apply)
+      case Signature(Label.BVLShiftRight, Seq(c1, c2)) => recHelper(c1, c2)(BVLShiftRight.apply)
+      case Signature(Label.BVNarrowingCast(newType), Seq(c)) => recHelper(c)(BVNarrowingCast(_, newType))
+      case Signature(Label.BVWideningCast(newType), Seq(c)) => recHelper(c)(BVWideningCast(_, newType))
+      case Signature(Label.BVUnsignedToSigned, Seq(c)) => recHelper(c)(BVUnsignedToSigned.apply)
+      case Signature(Label.BVSignedToUnsigned, Seq(c)) => recHelper(c)(BVSignedToUnsigned.apply)
+      case Signature(Label.TupleSelect(index), Seq(c)) => recHelper(c)(TupleSelect(_, index))
+
+      case Signature(Label.FiniteSet(base), args) => recHelper(args)(FiniteSet(_, base))
+      case Signature(Label.SetAdd, Seq(set, elem)) => recHelper(set, elem)(SetAdd.apply)
+      case Signature(Label.ElementOfSet, Seq(elem, set)) => recHelper(elem, set)(ElementOfSet.apply)
+      case Signature(Label.SubsetOf, Seq(lhs, rhs)) => recHelper(lhs, rhs)(SubsetOf.apply)
+      case Signature(Label.SetIntersection, Seq(lhs, rhs)) => recHelper(lhs, rhs)(SetIntersection.apply)
+      case Signature(Label.SetUnion, Seq(lhs, rhs)) => recHelper(lhs, rhs)(SetUnion.apply)
+      case Signature(Label.SetDifference, Seq(lhs, rhs)) => recHelper(lhs, rhs)(SetDifference.apply)
+
+      case Signature(Label.FiniteArray(base), args) => recHelper(args)(FiniteArray(_, base))
+      case Signature(Label.LargeArray(elemsIndices, base), all@(elems :+ default :+ size)) =>
+        recHelper(all) { case elems :+ default :+ size =>
+          LargeArray(elemsIndices.zip(elems).toMap, default, size, base)
+        }
+      case Signature(Label.ArraySelect, Seq(arr, i)) => recHelper(arr, i)(ArraySelect.apply)
+      case Signature(Label.ArrayUpdated, Seq(arr, i, v)) => recHelper(arr, i, v)(ArrayUpdated.apply)
+      case Signature(Label.ArrayLength, Seq(arr)) => recHelper(arr)(ArrayLength.apply)
+
+      case Signature(Label.Error(tpe, descr), Seq()) => RevRes(Error(tpe, descr), Set.empty)
+      case Signature(Label.NoTree(tpe), Seq()) => RevRes(NoTree(tpe), Set.empty)
+
+      case Signature(Label.MatchExpr(pats), cScrut +: cGuardRhs) =>
+        assert(2 * pats.size == cGuardRhs.size)
+
+        def convertPattern(scrut: Code, pat: LabelledPattern, vds: Map[Code, ValDef]): Pattern = {
+          def recHelper(subscruts: Seq[Code], subps: Seq[LabelledPattern]): Seq[Pattern] = {
+            assert(subscruts.size == subps.size)
+            subscruts.zip(subps).map {
+              case (subscrut, subpat) => convertPattern(subscrut, subpat, vds)
+            }
+          }
+
+          val bdg = vds.get(scrut)
+          pat match {
+            case LabelledPattern.Wildcard => WildcardPattern(bdg)
+            case LabelledPattern.ADT(id, tps, subps) =>
+              val rsubs = recHelper(adtSubscrutinees(scrut, ADTType(id, tps)), subps)
+              ADTPattern(bdg, id, tps, rsubs)
+            case LabelledPattern.TuplePattern(subps) =>
+              val tt@TupleType(bases) = codeTpe(scrut)
+              assert(bases.size == subps.size)
+              val rsubs = recHelper(tupleSubscrutinees(scrut, tt), subps)
+              TuplePattern(bdg, rsubs)
+            case LabelledPattern.Lit(lit) => LiteralPattern(bdg, lit)
+            case LabelledPattern.Unapply(recs, id, tps, sub) => ???
+          }
+        }
+
+        def uncodeOfCase(pat: LabelledPattern, cGuard: Code, cRhs: Code): (Pattern, RevRes, RevRes) = {
+          val allScruts = allScrutinees(cScrut, pat)
+          val scrutBdgs = allScruts.zipWithIndex.map {
+            case (subScrut, i) =>
+              val vId = idOfVariable(Variable.fresh(s"bdg$i", codeTpe(subScrut)))
+              vId -> subScrut
+          }
+          val newRenv = renv.withLetBounds(scrutBdgs)
+          val guard = uncodeOf(cGuard)(using newRenv)
+          val rhs = uncodeOf(cRhs)(using newRenv)
+          // On retire les scrut. binding qui sont inutiles.
+          val scrutVds = scrutBdgs.filter { case (v, _) => guard.used(v) || rhs.used(v) }
+            .map { case (v, c) =>
+              val vd = new ValDef(varId2Var(v))
+              c -> vd
+            }.toMap
+          (convertPattern(cScrut, pat, scrutVds), guard, rhs)
+        }
+
+        val (guards, rhss) = cGuardRhs.grouped(2).map { case Seq(guard, rhs) => (guard, rhs) }.toSeq.unzip
+        val scrut = uncodeOf(cScrut)
+        val (cases, used) = pats.zip(guards).zip(rhss).foldLeft((Seq.empty[MatchCase], scrut.used)) {
+          case ((accCases, accUsed), ((labPat, cGuard), cRhs)) =>
+            val (pat, guard, rhs) = uncodeOfCase(labPat, cGuard, cRhs)
+            val cse = MatchCase(pat, if (guard.expr == BooleanLiteral(true)) None else Some(guard.expr), rhs.expr)
+            (accCases :+ cse, accUsed ++ guard.used ++ rhs.used)
+        }
+        RevRes(MatchExpr(scrut.expr, cases), used)
+
+      case sig =>
+        sys.error(s"uncodeOf: what is this: $sig")
+    }
+  }
+
+  def recHelper(args: Seq[Code])(recons: Seq[Expr] => Expr)(using RevEnv): RevRes = {
+    val rargs = args.map(uncodeOf)
+    RevRes(recons(rargs.map(_.expr)), rargs.flatMap(_.used).toSet)
+  }
+
+  def recHelper(c1: Code)(recons: Expr => Expr)(using RevEnv): RevRes =
+    recHelper(Seq(c1)) { case Seq(e1) => recons(e1) }
+
+  def recHelper(c1: Code, c2: Code)(recons: (Expr, Expr) => Expr)(using RevEnv): RevRes =
+    recHelper(Seq(c1, c2)) { case Seq(e1, e2) => recons(e1, e2) }
+
+  def recHelper(c1: Code, c2: Code, c3: Code)(recons: (Expr, Expr, Expr) => Expr)(using RevEnv): RevRes =
+    recHelper(Seq(c1, c2, c3)) { case Seq(e1, e2, e3) => recons(e1, e2, e3) }
+  //endregion
+
+  /////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+  //region Code transformer & folder
+
   // TODO: Commentaire à propos de code potentiel dans les labels qui ne sont pas transform
-  class CodeTransformer {
+  // TODO: Devrait-on run simplifyDisj ou simplifyTopLvlSig à chaque step?
+  trait CodeTransformer {
     type Extra
 
     final def transform(c: Code, repl: Map[Code, Code], extra: Extra)(using env: OEnv, ctxs: Ctxs): CodeRes = {
@@ -2414,15 +2259,6 @@ trait OCBSL extends Definitions { ocbsl =>
     }
   }
 
-  def contextOf(c: Code)(using OEnv, Ctxs): Ctxs = {
-    // TODO: r u srs???
-    object iden extends CodeTransformer {
-      override type Extra = Unit
-    }
-    val cr = iden.transform(c, Map.empty, ())
-    cr.ctxs
-  }
-
   trait CodeTryFolder[E, T] {
     type Extra
 
@@ -2463,6 +2299,7 @@ trait OCBSL extends Definitions { ocbsl =>
         tryFoldSeq(args, acc, extra) {
           case (disj, ctxs) =>
             given Ctxs = ctxs
+            // TODO: Hmm, cela semble ne pas être correct?
             val negated = negCodeOf(disj)
             if (CodeRes.isTerminal(disj)) {
               ctxs.addBoundDef(disj).withCond(negated)
@@ -2540,7 +2377,225 @@ trait OCBSL extends Definitions { ocbsl =>
     }
   }
 
+  object idTransformer extends CodeTransformer {
+    override type Extra = Unit
+  }
+
+  def tearDown(c: Code)(using OEnv, Ctxs): CodeRes = idTransformer.transform(c, Map.empty, ())
+
+  def contextOf(c: Code)(using OEnv, Ctxs): Ctxs = tearDown(c).ctxs
+
+  //endregion
+
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+  //region Match expression utilities
+
+  def adtSubscrutinees(scrut: Code, adt: ADTType): Seq[Code] = {
+    val tcons = getConstructor(adt.id, adt.tps)
+    tcons.fields.map(fld => codeOfSig(mkADTSelector(scrut, adt, tcons, fld.id), fld.getType))
+  }
+
+  def tupleSubscrutinees(scrut: Code, tt: TupleType): Seq[Code] = {
+    tt.bases.zipWithIndex.map { case (base, i) => codeOfSig(mkTupleSelect(scrut, i + 1), base) }
+  }
+
+  def allScrutinees(scrut: Code, pat: LabelledPattern): Seq[Code] = {
+    pat match {
+      case LabelledPattern.Wildcard | LabelledPattern.Lit(_) => Seq(scrut)
+      case LabelledPattern.ADT(id, tps, subps) =>
+        val subscruts = adtSubscrutinees(scrut, ADTType(id, tps))
+        assert(subscruts.size == subps.size)
+        scrut +: subscruts.zip(subps).flatMap {
+          case (subscrut, subp) => allScrutinees(subscrut, subp)
+        }
+      case LabelledPattern.TuplePattern(subps) =>
+        val tt@TupleType(bases) = codeTpe(scrut)
+        assert(bases.size == subps.size)
+        val subscruts = tupleSubscrutinees(scrut, tt)
+        assert(subscruts.size == subps.size)
+        scrut +: subscruts.zip(subps).flatMap {
+          case (subscrut, subp) => allScrutinees(subscrut, subp)
+        }
+      case LabelledPattern.Unapply(recs, id, tps, sub) => sys.error("Oh non, un Unapply :(")
+    }
+  }
+
+  def addScrutineeBindings(scrut: Code, pat: LabelledPattern, ctxs: Ctxs): Ctxs = {
+    allScrutinees(scrut, pat).foldLeft(ctxs) {
+      case (ctxs, scrut) => ctxs.addBoundDef(scrut)
+    }
+  }
+
+  // TODO: Ordre ok???
+  // TODO: Ordre ok???
+  // TODO: Ordre ok???
+  def collectPatternConds(scrut: Code, pat: LabelledPattern, recursive: Boolean)(using env: OEnv, ctxs: Ctxs): Seq[Code] = {
+    assert(ctxs.isLitVarOrBoundDef(scrut))
+
+    def recHelper(subscruts: Seq[Code], subps: Seq[LabelledPattern], patConds: Seq[Code]): Seq[Code] = {
+      assert(subscruts.size == subps.size)
+      subscruts.zip(subps).foldLeft((patConds, ctxs.withConds(patConds))) {
+        case ((acc, ctxs), (subscrut, subpat)) =>
+          val conds2 = collectPatternConds(subscrut, subpat, true)(using env, ctxs)
+          (acc ++ conds2, ctxs.withConds(conds2))
+      }._1
+    }
+
+    pat match {
+      case LabelledPattern.Wildcard | LabelledPattern.Lit(_) => Seq.empty
+      case LabelledPattern.ADT(id, tps, subps) =>
+        val adt = ADTType(id, tps)
+        val tcons = getConstructor(id, tps)
+        assert(tcons.fields.size == subps.size)
+        val patConds = isConstructor(scrut, adt, id) match {
+          case Some(true) => Seq.empty[Code]
+          case Some(false) => return Seq(falseCode) // Cela ne sert à rien de continuer plus loin
+          case None => Seq(codeOfSig(mkIsCtor(scrut, adt, id), BoolTy))
+        }
+        if (recursive) recHelper(adtSubscrutinees(scrut, adt), subps, patConds)
+        else patConds
+      case LabelledPattern.TuplePattern(subps) =>
+        if (recursive) {
+          val tt@TupleType(bases) = codeTpe(scrut)
+          assert(bases.size == subps.size)
+          val subscruts = tupleSubscrutinees(scrut, tt)
+          recHelper(subscruts, subps, Seq.empty)
+        }
+        else Seq.empty
+      case LabelledPattern.Unapply(recs, id, tps, subps) =>
+        sys.error(s"Does not know how to handle $pat")
+    }
+  }
+  //endregion
+
+  /////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+  //region Misc
+
+  def isPrefixOf[T](lhs: Seq[T], rhs: Seq[T]): Boolean =
+    lhs.size <= rhs.size && lhs.zip(rhs).forall { case (l, r) => l == r }
+
+  def findMap[A, B](as: Seq[A])(f: A => Option[B]): Option[B] =
+    if (as.isEmpty) None
+    else f(as.head).orElse(findMap(as.tail)(f))
+
+  // Is `c` an ADT with constructor `id`?
+  //   Some(true) - Yes
+  //   Some(false) - No
+  //   None - Can't tell
+  def isConstructor(c: Code, adt: ADTType, id: Identifier)(using OEnv, Ctxs): Option[Boolean] = {
+    // TODO: What about purity?
+    def codeIsCtor(ofId: Identifier): Code =
+      codeOfSig(Signature(Label.IsConstructor(adt, ofId), Seq(c)), BoolTy)
+
+    def codeNotCtor(ofId: Identifier): Code =
+      negCodeOf(codeIsCtor(ofId))
+
+    code2sig(c) match {
+      case Signature(Label.ADT(id2, _), _) => Some(id == id2)
+      case _ =>
+        if (implied(codeIsCtor(id))) Some(true)
+        else if (implied(codeNotCtor(id))) Some(false)
+        else {
+          val cons = getConstructor(id, adt.tps)
+          val sort = cons.sort
+          // All other constructors (excluding `id`) for the ADT
+          val alts = (sort.constructors.toSet - cons).map(_.id)
+
+          if (alts.exists(alt => implied(codeIsCtor(alt)))) Some(false)
+          else if (alts.forall(alt => implied(codeNotCtor(alt)))) Some(true)
+          else None
+        }
+    }
+  }
+
+  def idOfVariable(v: Variable): VarId = var2VarId.get(v) match {
+    case Some(vId) => vId
+    case None =>
+      val vId = VarId.fromInt(varIdCounter)
+      varIdCounter += 1
+      var2VarId += v -> vId
+      varId2Var += vId -> v
+      vId
+  }
+
+  def freshened(v: VarId): VarId = idOfVariable(varId2Var(v).freshen)
+
+  def freshVarId(name: String, tpe: Type): VarId = idOfVariable(Variable.fresh(name, tpe))
+
+  def codeOfSig(sig: Signature, tpe: Type): Code = {
+    sig2code.get(sig) match {
+      case Some(c) =>
+        assert(codeTpe(c) == tpe, s"${codeTpe(c)} != $tpe")
+        c
+      case None =>
+        val newCode = Code.fromInt(sig2code.size)
+        assert(!code2sig.contains(newCode))
+        sig2code += sig -> newCode
+        code2sig += newCode -> sig
+        codeTpe += newCode -> tpe
+        newCode
+    }
+  }
+
+  def varTpe(v: VarId): Type = varId2Var(v).getType // TODO: Apparemment, il y a une difference entre .getType et .tpe (pour les refinement type)
+
+  def codeOfIntLit(lit: BigInt, tpe: Type): Code = codeOfLit(intLitOfType(lit, tpe))
+
+  def intLitOfType(lit: BigInt, tpe: Type): Literal[_] = tpe match {
+    case IntegerType() => IntegerLiteral(lit)
+    case RealType() => FractionLiteral(lit, 1)
+    case BVType(signed, size) =>
+      // BVLiteral guards against signed=true and lit < 0, but not against lit not fitting
+      // into the given bitwidth (it wrap-around)
+      val (loIncl, hiExcl) = {
+        if (signed) (-BigInt(2).pow(size - 1), BigInt(2).pow(size - 1))
+        else (BigInt(0), BigInt(2).pow(size))
+      }
+      if (!(loIncl <= lit && lit < hiExcl)) {
+        sys.error(s"$lit does not fit into $tpe  (with range [$loIncl, $hiExcl[)")
+      }
+      BVLiteral(signed, lit, size)
+    case _ => sys.error(s"$tpe is not an integer-like type")
+  }
+
+  def codeOfVarId(v: VarId): Code = codeOfSig(mkVar(v), varTpe(v))
+
+  def codeOfLit[T](l: Literal[T]): Code = codeOfSig(mkLit(l), l.getType)
+
+  def isLambda(c: Code): Boolean = code2sig(c).label.isLambda
+
+  def isLambdaLike(c: Code): Boolean = code2sig(c).label.isLambdaLike
+
+  def isVar(c: Code): Boolean = code2sig(c).label.isVar
+
+  def isLitOrVar(c: Code): Boolean = code2sig(c).label.isLitOrVar
+
+  def b2c(b: Boolean): Code = if (b) trueCode else falseCode
+
+  def b2sig(b: Boolean): Signature = if (b) trueSig else falseSig
+
+  val assmChkPurity: Purity = if (opts.assumeChecked) Pure else Impure
+
+  def unAnd(e: Expr): Seq[Expr] = e match {
+    case And(es) => es.flatMap(unAnd)
+    case e => Seq(e)
+  }
+
+  def unOr(e: Expr): Seq[Expr] = e match {
+    case Or(es) => es.flatMap(unOr)
+    case e => Seq(e)
+  }
+
+  def unOrCodes(disjs: Seq[Code]): Seq[Code] = disjs.flatMap(unOrCode)
+
+  def unOrCode(c: Code): Seq[Code] = code2sig(c) match {
+    case Signature(Label.Or, disjs) => disjs.flatMap(unOrCode)
+    case _ => Seq(c)
+  }
+
+  def sizeOf(e: Expr): Int = sizeCache.getOrElseUpdate(e, exprOps.formulaSize(e))
 
   // Map all codes to their corresponding signatures (for debugging purposes)
 
@@ -2555,6 +2610,7 @@ trait OCBSL extends Definitions { ocbsl =>
     val sig = code2sig(c)
     ExplicitSig(sig.label, sig.children.map(asExplicitSig))
   }
+  //endregion
 }
 
 object OCBSL {
