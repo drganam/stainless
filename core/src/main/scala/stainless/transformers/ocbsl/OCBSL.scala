@@ -850,6 +850,24 @@ trait OCBSL extends Definitions { ocbsl =>
 
   //region OCBSL
 
+  def tryFoldLeftDisjunction[E, T](disjs: Seq[Code], init: T)
+                                  (f: Ctxs ?=> (T, Code) => Either[E, T])
+                                  (using env: OEnv, ctxs: Ctxs): Either[E, T] = {
+    ocbsl.tryFoldLeft(disjs, (init, ctxs)) {
+      case ((acc, ctxs), disj) =>
+        given Ctxs = ctxs
+        f(acc, disj).map { newAcc =>
+          val tearedDisj = tearDown(disj)
+          assert(tearedDisj.ctxs.isLitVarOrBoundDef(tearedDisj.terminal))
+          val newCtxs = tearedDisj.ctxs.withNegatedCond(tearedDisj.terminal)
+          (newAcc, newCtxs)
+        }
+    }.map(_._1)
+  }
+
+  def foldLeftDisjunction[T](disjs: Seq[Code], init: T)(f: Ctxs ?=> (T, Code) => T)(using env: OEnv, ctxs: Ctxs): T =
+    tryFoldLeftDisjunction[Nothing, T](disjs, init)((t, c) => Right(f(t, c))).merge
+
   def transformDisjunction[T](disjs: Seq[T])(f: Ctxs ?=> T => CodeRes)(using env: OEnv, outerCtxs: Ctxs): CodeRes = {
     given x_x: Ctxs = sys.error("Carefully select ctxs")
 
@@ -1922,6 +1940,8 @@ trait OCBSL extends Definitions { ocbsl =>
   //region Uncoding
 
   case class RevEnv(revLetDefs: Map[Code, VarId], nesting: LambdaNesting) {
+    given env: OEnv = OEnv(nesting, false)
+
     def withLetBounds(vs: Seq[(VarId, Code)]): RevEnv =
       RevEnv(revLetDefs ++ vs.map { case (v, c) => c -> v }.toMap, nesting)
 
@@ -1929,6 +1949,8 @@ trait OCBSL extends Definitions { ocbsl =>
       RevEnv(revLetDefs + (c -> v), nesting)
 
     def inc: RevEnv = RevEnv(revLetDefs, nesting.inc)
+
+    def incIf(lab: Label.LambdaLike): RevEnv = RevEnv(revLetDefs, nesting.incIf(lab))
   }
 
   object RevEnv {
@@ -1937,7 +1959,8 @@ trait OCBSL extends Definitions { ocbsl =>
 
   case class RevRes(expr: Expr, used: Set[VarId])
 
-  def uncodeOf(c: Code)(using renv: RevEnv): RevRes = {
+  def uncodeOf(c: Code)(using renv: RevEnv, ctxs: Ctxs): RevRes = {
+    import renv.given
     renv.revLetDefs.get(c) match {
       case Some(vIx) =>
         return RevRes(varId2Var(vIx), Set(vIx))
@@ -1947,155 +1970,246 @@ trait OCBSL extends Definitions { ocbsl =>
     code2sig(c) match {
       case Signature(Label.Var(v), Seq()) => RevRes(varId2Var(v), Set(v))
       case Signature(Label.Lit(lit), Seq()) => RevRes(lit, Set.empty)
-      case Signature(Label.Tuple, args) => recHelper(args)(Tuple.apply)
-      case Signature(Label.ADT(id, tps), args) => recHelper(args)(ADT(id, tps, _))
-      case Signature(Label.ADTSelector(_, _, sel), Seq(recv)) => recHelper(recv)(ADTSelector(_, sel))
-      case Signature(Label.FunctionInvocation(id, tps), args) => recHelper(args)(FunctionInvocation(id, tps, _))
-      case Signature(Label.Annotated(flags), Seq(e)) => recHelper(e)(Annotated(_, flags))
-      case Signature(Label.IsConstructor(_, id), Seq(e)) => recHelper(e)(IsConstructor(_, id))
-      case Signature(Label.Application, all@(callee +: args)) =>
-        recHelper(all) { case callee +: args => Application(callee, args) }
 
       case Signature(Label.Let, Seq(cE, cBody)) =>
         val e = uncodeOf(cE)
         val v = freshVarId("bdg", codeTpe(cE))
-        val body = uncodeOf(cBody)(using renv.withLetBounds(v, cE))
+        val body = uncodeOf(cBody)(using renv.withLetBounds(v, cE), ctxs.addBoundDef(cE))
         RevRes(Let(new ValDef(varId2Var(v)), e.expr, body.expr), e.used ++ body.used)
 
-      // TODO: Ok?
-      case Signature(Label.Assume, Seq(pred, body)) => recHelper(pred, body)(Assume.apply)
-      case Signature(Label.Assert, Seq(pred, body)) => recHelper(pred, body)(Assert(_, None, _))
-      case Signature(Label.Require, Seq(pred, body)) => recHelper(pred, body)(Require.apply)
+      case Signature(Label.IfExpr, Seq(cond, thn, els)) =>
+        assert(CodeRes.isTerminal(cond))
+        val rcond = uncodeOf(cond)
+        val ctxs1 = ctxs.addBoundDef(cond)
+        val rthn = uncodeOf(thn)(using renv, ctxs1.withCond(cond))
+        val rels = uncodeOf(els)(using renv, ctxs1.withNegatedCond(cond))
+        RevRes(IfExpr(rcond.expr, rthn.expr, rels.expr), rcond.used ++ rthn.used ++ rels.used)
+
+      case Signature(kind: Label.AssumeLike, Seq(pred, body)) => uncodeOfAssumeLike(kind, pred, body)
+
       case Signature(Label.Ensuring, Seq(body, pred)) =>
-        recHelper(body, pred) {
-          case (body, pred: Lambda) => Ensuring(body, pred)
-          case (body, Let(v, lam: Lambda, predBody)) if predBody == v.toVariable => Ensuring(body, lam) // TODO: Slmt pour debug fnPurity
+        val rbody = uncodeOf(body)
+        val rpred = uncodeOf(pred)
+        val predLam = rpred.expr match {
+          case lam@Lambda(_, _) => lam
+          case Let(v, lam@Lambda(_, _), predBody) if predBody == v.toVariable => lam // TODO: Slmt pour debug fnPurity
         }
-      case Signature(Label.Decreases, Seq(measure, body)) => recHelper(measure, body)(Decreases.apply)
+        RevRes(Ensuring(rbody.expr, predLam), rbody.used ++ rpred.used)
 
-      case Signature(Label.IfExpr, Seq(cond, thn, els)) => recHelper(cond, thn, els)(IfExpr.apply)
-      case Signature(Label.Lambda(params), Seq(body)) =>
-        val vds = params.map(v => new ValDef(varId2Var(v)))
-        recHelper(body)(Lambda(vds, _))(using renv.inc)
-      case Signature(Label.Choose(v), Seq(pred)) => recHelper(pred)(Choose(new ValDef(varId2Var(v)), _))
-      case Signature(Label.Forall(params), Seq(pred)) =>
-        val vds = params.map(v => new ValDef(varId2Var(v)))
-        recHelper(pred)(Forall(vds, _))
+      case Signature(kind: Label.LambdaLike, Seq(body)) => uncodeOfLambdaLike(kind, body)
 
-      case Signature(Label.Or, args) => recHelper(args)(Or.apply)
+      case Signature(Label.Or, disjs) =>
+        val rdisjs = foldLeftDisjunction(disjs, Seq.empty[RevRes])((acc, disj) => acc :+ uncodeOf(disj))
+        RevRes(Or(rdisjs.map(_.expr)), rdisjs.flatMap(_.used).toSet)
+
       case Signature(Label.Not, Seq(c)) =>
         code2sig(c) match {
-          //          case Signature(Label.Or, disjs) =>
-          //            given OEnv = OEnv(renv.nesting, forceBinding = false)
-          //            recHelper(disjs.map(negCodeOf))(And.apply)
-          case _ => recHelper(c)(Not.apply)
+          case Signature(Label.Or, disjs) =>
+            val negDisjs = disjs.foldLeft((Seq.empty[RevRes], ctxs)) {
+              case ((acc, ctxs), disj) =>
+                given Ctxs = ctxs
+                val negated = negCodeOf(disj) // TODO: Pas de >= en < etc. si c'est bound
+                val negRes = uncodeOf(negated)
+                val newCtxs = {
+                  // Comme on est en négation, pour le next ctxs, on souhaite avoir ctxs avec comme bounddef la négation
+                  // du terminal de disj et comme condition le terminal de disj
+                  val tearedDisj = tearDown(disj)
+                  assert(tearedDisj.ctxs.isLitVarOrBoundDef(tearedDisj.terminal))
+                  val negatedDisjTerminal = negCodeOf(tearedDisj.terminal)(using renv.env, tearedDisj.ctxs)
+                  tearedDisj.ctxs.addBoundDef(negatedDisjTerminal)
+                    .withCond(tearedDisj.terminal)
+                }
+                (acc :+ negRes, newCtxs)
+            }._1
+            RevRes(And(negDisjs.map(_.expr)), negDisjs.flatMap(_.used).toSet)
+
+          case _ =>
+            val rc = uncodeOf(c)
+            RevRes(Not(rc.expr), rc.used)
         }
-      case Signature(Label.Equals, Seq(c1, c2)) => recHelper(c1, c2)(Equals.apply)
-      case Signature(Label.LessThan, Seq(c1, c2)) => recHelper(c1, c2)(LessThan.apply)
-      case Signature(Label.GreaterThan, Seq(c1, c2)) => recHelper(c1, c2)(GreaterThan.apply)
-      case Signature(Label.LessEquals, Seq(c1, c2)) => recHelper(c1, c2)(LessEquals.apply)
-      case Signature(Label.GreaterEquals, Seq(c1, c2)) => recHelper(c1, c2)(GreaterEquals.apply)
-      case Signature(Label.UMinus, Seq(c)) => recHelper(c)(UMinus.apply)
-      case Signature(Label.Plus, Seq(c1, c2)) => recHelper(c1, c2)(Plus.apply)
-      case Signature(Label.Minus, Seq(c1, c2)) => recHelper(c1, c2)(Minus.apply)
-      case Signature(Label.Times, Seq(c1, c2)) => recHelper(c1, c2)(Times.apply)
-      case Signature(Label.Division, Seq(c1, c2)) => recHelper(c1, c2)(Division.apply)
-      case Signature(Label.Remainder, Seq(c1, c2)) => recHelper(c1, c2)(Remainder.apply)
-      case Signature(Label.Modulo, Seq(c1, c2)) => recHelper(c1, c2)(Modulo.apply)
-      case Signature(Label.BVNot, Seq(c)) => recHelper(c)(BVNot.apply)
-      case Signature(Label.BVAnd, Seq(c1, c2)) => recHelper(c1, c2)(BVAnd.apply)
-      case Signature(Label.BVOr, Seq(c1, c2)) => recHelper(c1, c2)(BVOr.apply)
-      case Signature(Label.BVXor, Seq(c1, c2)) => recHelper(c1, c2)(BVXor.apply)
-      case Signature(Label.BVShiftLeft, Seq(c1, c2)) => recHelper(c1, c2)(BVShiftLeft.apply)
-      case Signature(Label.BVAShiftRight, Seq(c1, c2)) => recHelper(c1, c2)(BVAShiftRight.apply)
-      case Signature(Label.BVLShiftRight, Seq(c1, c2)) => recHelper(c1, c2)(BVLShiftRight.apply)
-      case Signature(Label.BVNarrowingCast(newType), Seq(c)) => recHelper(c)(BVNarrowingCast(_, newType))
-      case Signature(Label.BVWideningCast(newType), Seq(c)) => recHelper(c)(BVWideningCast(_, newType))
-      case Signature(Label.BVUnsignedToSigned, Seq(c)) => recHelper(c)(BVUnsignedToSigned.apply)
-      case Signature(Label.BVSignedToUnsigned, Seq(c)) => recHelper(c)(BVSignedToUnsigned.apply)
-      case Signature(Label.TupleSelect(index), Seq(c)) => recHelper(c)(TupleSelect(_, index))
 
-      case Signature(Label.FiniteSet(base), args) => recHelper(args)(FiniteSet(_, base))
-      case Signature(Label.SetAdd, Seq(set, elem)) => recHelper(set, elem)(SetAdd.apply)
-      case Signature(Label.ElementOfSet, Seq(elem, set)) => recHelper(elem, set)(ElementOfSet.apply)
-      case Signature(Label.SubsetOf, Seq(lhs, rhs)) => recHelper(lhs, rhs)(SubsetOf.apply)
-      case Signature(Label.SetIntersection, Seq(lhs, rhs)) => recHelper(lhs, rhs)(SetIntersection.apply)
-      case Signature(Label.SetUnion, Seq(lhs, rhs)) => recHelper(lhs, rhs)(SetUnion.apply)
-      case Signature(Label.SetDifference, Seq(lhs, rhs)) => recHelper(lhs, rhs)(SetDifference.apply)
+      case Signature(Label.MatchExpr(pats), cScrut +: cGuardRhs) =>
+        assert(2 * pats.size == cGuardRhs.size)
+        val (guards, rhss) = cGuardRhs.grouped(2).map { case Seq(guard, rhs) => (guard, rhs) }.toSeq.unzip
+        val cases = pats.zip(guards).zip(rhss).map {
+          case ((pat, guard), rhs) => LabMatchCase(pat, guard, rhs)
+        }
+        val rscrut = uncodeOf(cScrut)
+        val (rcases, used) = uncodeOfCases(cScrut, cases, Seq.empty, rscrut.used)(using renv, ctxs.addBoundDef(cScrut))
+        RevRes(MatchExpr(rscrut.expr, rcases), used)
 
-      case Signature(Label.FiniteArray(base), args) => recHelper(args)(FiniteArray(_, base))
-      case Signature(Label.LargeArray(elemsIndices, base), all@(elems :+ default :+ size)) =>
-        recHelper(all) { case elems :+ default :+ size =>
+      case Signature(Label.Tuple, args) => uncodeOfArgs(args)(Tuple.apply)
+      case Signature(Label.ADT(id, tps), args) => uncodeOfArgs(args)(ADT(id, tps, _))
+      case Signature(Label.ADTSelector(_, _, sel), Seq(recv)) => uncodeOfArgs(recv)(ADTSelector(_, sel))
+      case Signature(Label.FunctionInvocation(id, tps), args) => uncodeOfArgs(args)(FunctionInvocation(id, tps, _))
+      case Signature(Label.Annotated(flags), Seq(e)) => uncodeOfArgs(e)(Annotated(_, flags))
+      case Signature(Label.IsConstructor(_, id), Seq(e)) => uncodeOfArgs(e)(IsConstructor(_, id))
+      case Signature(Label.Application, calleeAndArgs) =>
+        uncodeOfArgs(calleeAndArgs) { case callee +: args => Application(callee, args) }
+
+      case Signature(Label.Equals, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(Equals.apply)
+      case Signature(Label.LessThan, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(LessThan.apply)
+      case Signature(Label.GreaterThan, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(GreaterThan.apply)
+      case Signature(Label.LessEquals, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(LessEquals.apply)
+      case Signature(Label.GreaterEquals, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(GreaterEquals.apply)
+      case Signature(Label.UMinus, Seq(c)) => uncodeOfArgs(c)(UMinus.apply)
+      case Signature(Label.Plus, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(Plus.apply)
+      case Signature(Label.Minus, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(Minus.apply)
+      case Signature(Label.Times, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(Times.apply)
+      case Signature(Label.Division, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(Division.apply)
+      case Signature(Label.Remainder, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(Remainder.apply)
+      case Signature(Label.Modulo, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(Modulo.apply)
+      case Signature(Label.BVNot, Seq(c)) => uncodeOfArgs(c)(BVNot.apply)
+      case Signature(Label.BVAnd, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(BVAnd.apply)
+      case Signature(Label.BVOr, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(BVOr.apply)
+      case Signature(Label.BVXor, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(BVXor.apply)
+      case Signature(Label.BVShiftLeft, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(BVShiftLeft.apply)
+      case Signature(Label.BVAShiftRight, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(BVAShiftRight.apply)
+      case Signature(Label.BVLShiftRight, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(BVLShiftRight.apply)
+      case Signature(Label.BVNarrowingCast(newType), Seq(c)) => uncodeOfArgs(c)(BVNarrowingCast(_, newType))
+      case Signature(Label.BVWideningCast(newType), Seq(c)) => uncodeOfArgs(c)(BVWideningCast(_, newType))
+      case Signature(Label.BVUnsignedToSigned, Seq(c)) => uncodeOfArgs(c)(BVUnsignedToSigned.apply)
+      case Signature(Label.BVSignedToUnsigned, Seq(c)) => uncodeOfArgs(c)(BVSignedToUnsigned.apply)
+      case Signature(Label.TupleSelect(index), Seq(c)) => uncodeOfArgs(c)(TupleSelect(_, index))
+
+      case Signature(Label.FiniteSet(base), args) => uncodeOfArgs(args)(FiniteSet(_, base))
+      case Signature(Label.SetAdd, Seq(set, elem)) => uncodeOfArgs(set, elem)(SetAdd.apply)
+      case Signature(Label.ElementOfSet, Seq(elem, set)) => uncodeOfArgs(elem, set)(ElementOfSet.apply)
+      case Signature(Label.SubsetOf, Seq(lhs, rhs)) => uncodeOfArgs(lhs, rhs)(SubsetOf.apply)
+      case Signature(Label.SetIntersection, Seq(lhs, rhs)) => uncodeOfArgs(lhs, rhs)(SetIntersection.apply)
+      case Signature(Label.SetUnion, Seq(lhs, rhs)) => uncodeOfArgs(lhs, rhs)(SetUnion.apply)
+      case Signature(Label.SetDifference, Seq(lhs, rhs)) => uncodeOfArgs(lhs, rhs)(SetDifference.apply)
+
+      case Signature(Label.FiniteArray(base), args) => uncodeOfArgs(args)(FiniteArray(_, base))
+      case Signature(Label.LargeArray(elemsIndices, base), all) =>
+        uncodeOfArgs(all) { case elems :+ default :+ size =>
           LargeArray(elemsIndices.zip(elems).toMap, default, size, base)
         }
-      case Signature(Label.ArraySelect, Seq(arr, i)) => recHelper(arr, i)(ArraySelect.apply)
-      case Signature(Label.ArrayUpdated, Seq(arr, i, v)) => recHelper(arr, i, v)(ArrayUpdated.apply)
-      case Signature(Label.ArrayLength, Seq(arr)) => recHelper(arr)(ArrayLength.apply)
+      case Signature(Label.ArraySelect, Seq(arr, i)) => uncodeOfArgs(arr, i)(ArraySelect.apply)
+      case Signature(Label.ArrayUpdated, Seq(arr, i, v)) => uncodeOfArgs(arr, i, v)(ArrayUpdated.apply)
+      case Signature(Label.ArrayLength, Seq(arr)) => uncodeOfArgs(arr)(ArrayLength.apply)
 
       case Signature(Label.Error(tpe, descr), Seq()) => RevRes(Error(tpe, descr), Set.empty)
       case Signature(Label.NoTree(tpe), Seq()) => RevRes(NoTree(tpe), Set.empty)
 
-      case Signature(Label.MatchExpr(pats), cScrut +: cGuardRhs) =>
-        assert(2 * pats.size == cGuardRhs.size)
-
-        def convertPattern(scrut: Code, pat: LabelledPattern, vds: Map[Code, ValDef]): Pattern = {
-          def recHelper(subscruts: Seq[Code], subps: Seq[LabelledPattern]): Seq[Pattern] = {
-            assert(subscruts.size == subps.size)
-            subscruts.zip(subps).map {
-              case (subscrut, subpat) => convertPattern(subscrut, subpat, vds)
-            }
-          }
-
-          val bdg = vds.get(scrut)
-          pat match {
-            case LabelledPattern.Wildcard => WildcardPattern(bdg)
-            case LabelledPattern.ADT(id, tps, subps) =>
-              val rsubs = recHelper(adtSubscrutinees(scrut, ADTType(id, tps)), subps)
-              ADTPattern(bdg, id, tps, rsubs)
-            case LabelledPattern.TuplePattern(subps) =>
-              val tt@TupleType(bases) = codeTpe(scrut)
-              assert(bases.size == subps.size)
-              val rsubs = recHelper(tupleSubscrutinees(scrut, tt), subps)
-              TuplePattern(bdg, rsubs)
-            case LabelledPattern.Lit(lit) => LiteralPattern(bdg, lit)
-            case LabelledPattern.Unapply(recs, id, tps, sub) => ???
-          }
-        }
-
-        def uncodeOfCase(pat: LabelledPattern, cGuard: Code, cRhs: Code): (Pattern, RevRes, RevRes) = {
-          val allScruts = allScrutinees(cScrut, pat)
-          val scrutBdgs = allScruts.zipWithIndex.map {
-            case (subScrut, i) =>
-              val vId = idOfVariable(Variable.fresh(s"bdg$i", codeTpe(subScrut)))
-              vId -> subScrut
-          }
-          val newRenv = renv.withLetBounds(scrutBdgs)
-          val guard = uncodeOf(cGuard)(using newRenv)
-          val rhs = uncodeOf(cRhs)(using newRenv)
-          // On retire les scrut. binding qui sont inutiles.
-          val scrutVds = scrutBdgs.filter { case (v, _) => guard.used(v) || rhs.used(v) }
-            .map { case (v, c) =>
-              val vd = new ValDef(varId2Var(v))
-              c -> vd
-            }.toMap
-          (convertPattern(cScrut, pat, scrutVds), guard, rhs)
-        }
-
-        val (guards, rhss) = cGuardRhs.grouped(2).map { case Seq(guard, rhs) => (guard, rhs) }.toSeq.unzip
-        val scrut = uncodeOf(cScrut)
-        val (cases, used) = pats.zip(guards).zip(rhss).foldLeft((Seq.empty[MatchCase], scrut.used)) {
-          case ((accCases, accUsed), ((labPat, cGuard), cRhs)) =>
-            val (pat, guard, rhs) = uncodeOfCase(labPat, cGuard, cRhs)
-            val cse = MatchCase(pat, if (guard.expr == BooleanLiteral(true)) None else Some(guard.expr), rhs.expr)
-            (accCases :+ cse, accUsed ++ guard.used ++ rhs.used)
-        }
-        RevRes(MatchExpr(scrut.expr, cases), used)
-
-      case sig =>
-        sys.error(s"uncodeOf: what is this: $sig")
+      case sig => sys.error(s"uncodeOf: what is this: $sig")
     }
   }
 
+  def convertPattern(scrut: Code, pat: LabelledPattern, vds: Map[Code, ValDef]): Pattern = {
+    def recHelper(subscruts: Seq[Code], subps: Seq[LabelledPattern]): Seq[Pattern] = {
+      assert(subscruts.size == subps.size)
+      subscruts.zip(subps).map {
+        case (subscrut, subpat) => convertPattern(subscrut, subpat, vds)
+      }
+    }
+
+    val bdg = vds.get(scrut)
+    pat match {
+      case LabelledPattern.Wildcard => WildcardPattern(bdg)
+      case LabelledPattern.ADT(id, tps, subps) =>
+        val rsubs = recHelper(adtSubscrutinees(scrut, ADTType(id, tps)), subps)
+        ADTPattern(bdg, id, tps, rsubs)
+      case LabelledPattern.TuplePattern(subps) =>
+        val tt@TupleType(bases) = codeTpe(scrut)
+        assert(bases.size == subps.size)
+        val rsubs = recHelper(tupleSubscrutinees(scrut, tt), subps)
+        TuplePattern(bdg, rsubs)
+      case LabelledPattern.Lit(lit) => LiteralPattern(bdg, lit)
+      case LabelledPattern.Unapply(recs, id, tps, sub) => ???
+    }
+  }
+
+  case class UncodedCase(pat: Pattern, guard: RevRes, rhs: RevRes, caseConds: Seq[Code])
+
+  def uncodeOfCase(cScrut: Code, cse: LabMatchCase)(using renv0: RevEnv, ctxs0: Ctxs): UncodedCase = {
+    val allScruts = allScrutinees(cScrut, cse.pattern)
+    val scrutBdgs = allScruts.zipWithIndex.map {
+      case (subScrut, i) =>
+        val vId = idOfVariable(Variable.fresh(s"bdg$i", codeTpe(subScrut)))
+        vId -> subScrut
+    }
+    val renv1 = renv0.withLetBounds(scrutBdgs)
+    val ctxs1 = ctxs0.addBoundDefs(allScruts)
+    val patConds = collectPatternConds(cScrut, cse.pattern, recursive = true)(using renv0.env, ctxs1)
+    val ctxsForGuard = ctxs1.withConds(patConds)
+    val rguard = uncodeOf(cse.guard)(using renv1, ctxsForGuard)
+    val ctxsForRhs = ctxsForGuard.withCond(cse.guard)
+    val rrhs = uncodeOf(cse.rhs)(using renv1, ctxsForRhs)
+    // On retire les scrut. binding qui sont inutiles.
+    val scrutVds = scrutBdgs.filter { case (v, _) => rguard.used(v) || rrhs.used(v) }
+      .map { case (v, c) =>
+        val vd = new ValDef(varId2Var(v))
+        c -> vd
+      }.toMap
+    UncodedCase(convertPattern(cScrut, cse.pattern, scrutVds), rguard, rrhs, patConds :+ cse.guard)
+  }
+
+  def uncodeOfCases(cScrut: Code, cases: Seq[LabMatchCase], transformedCases: Seq[MatchCase], used: Set[VarId])
+                   (using renv: RevEnv, ctxs: Ctxs): (Seq[MatchCase], Set[VarId]) = {
+    import renv.given
+    cases match {
+      case Seq() => (transformedCases, used)
+      case cse +: rest =>
+        val uncoded = uncodeOfCase(cScrut, cse)
+        val negCaseConds = negatedConjunction(uncoded.caseConds)
+        val theGuard =
+          if (uncoded.guard.expr == BooleanLiteral(true)) None
+          else Some(uncoded.guard.expr)
+        val theCase = MatchCase(uncoded.pat, theGuard, uncoded.rhs.expr)
+        val newUsed = used ++ uncoded.guard.used ++ uncoded.rhs.used
+        uncodeOfCases(cScrut, rest, transformedCases :+ theCase, newUsed)(using renv, ctxs.withCond(negCaseConds))
+    }
+  }
+
+  def uncodeOfLambdaLike(kind: Label.LambdaLike, body: Code)(using renv: RevEnv, ctxs: Ctxs): RevRes = {
+    val rbody = uncodeOf(body)(using renv.incIf(kind), ctxs)
+    kind match {
+      case Label.Lambda(params) =>
+        val vds = params.map(v => new ValDef(varId2Var(v)))
+        RevRes(Lambda(vds, rbody.expr), rbody.used)
+      case Label.Choose(v) =>
+        RevRes(Choose(new ValDef(varId2Var(v)), rbody.expr), rbody.used)
+      case Label.Forall(params) =>
+        val vds = params.map(v => new ValDef(varId2Var(v)))
+        RevRes(Forall(vds, rbody.expr), rbody.used)
+    }
+  }
+
+  def uncodeOfAssumeLike(kind: Label.AssumeLike, pred: Code, body: Code)(using renv: RevEnv, ctxs: Ctxs): RevRes = {
+    assert(CodeRes.isTerminal(pred))
+    val rpred = uncodeOf(pred)
+    val rbody = uncodeOf(body)(using renv, ctxs.addBoundDef(pred).withAssumeLike(kind, pred))
+    val expr = kind match {
+      case Label.Assume => Assume(rpred.expr, rbody.expr)
+      case Label.Assert => Assert(rpred.expr, None, rbody.expr)
+      case Label.Require => Require(rpred.expr, rbody.expr)
+      case Label.Decreases => Decreases(rpred.expr, rbody.expr)
+    }
+    RevRes(expr, rpred.used ++ rbody.used)
+  }
+
+  def uncodeOfArgs(args: Seq[Code])(recons: Seq[Expr] => Expr)(using renv: RevEnv, ctxs: Ctxs): RevRes = {
+    val rargs = args.foldLeft((Seq.empty[RevRes], ctxs)) {
+      case ((acc, ctxs), arg) =>
+        given Ctxs = ctxs
+        assert(CodeRes.isTerminal(arg))
+        val res = uncodeOf(arg)
+        (acc :+ res, ctxs.addBoundDef(arg))
+    }._1
+    RevRes(recons(rargs.map(_.expr)), rargs.flatMap(_.used).toSet)
+  }
+
+  def uncodeOfArgs(c1: Code)(recons: Expr => Expr)(using RevEnv, Ctxs): RevRes =
+    uncodeOfArgs(Seq(c1)) { case Seq(e1) => recons(e1) }
+
+  def uncodeOfArgs(c1: Code, c2: Code)(recons: (Expr, Expr) => Expr)(using RevEnv, Ctxs): RevRes =
+    uncodeOfArgs(Seq(c1, c2)) { case Seq(e1, e2) => recons(e1, e2) }
+
+  def uncodeOfArgs(c1: Code, c2: Code, c3: Code)(recons: (Expr, Expr, Expr) => Expr)(using RevEnv, Ctxs): RevRes =
+    uncodeOfArgs(Seq(c1, c2, c3)) { case Seq(e1, e2, e3) => recons(e1, e2, e3) }
+
+  /*
   def recHelper(args: Seq[Code])(recons: Seq[Expr] => Expr)(using RevEnv): RevRes = {
     val rargs = args.map(uncodeOf)
     RevRes(recons(rargs.map(_.expr)), rargs.flatMap(_.used).toSet)
@@ -2109,6 +2223,7 @@ trait OCBSL extends Definitions { ocbsl =>
 
   def recHelper(c1: Code, c2: Code, c3: Code)(recons: (Expr, Expr, Expr) => Expr)(using RevEnv): RevRes =
     recHelper(Seq(c1, c2, c3)) { case Seq(e1, e2, e3) => recons(e1, e2, e3) }
+  */
   //endregion
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -2228,14 +2343,14 @@ trait OCBSL extends Definitions { ocbsl =>
       val repl = repl0 ++ oldBdgs.zip(newBdgs).toMap
       val ctxs1 = addScrutineeBindings(newScrut, matchCase.pattern, ctxs0)
       val patConds = collectPatternConds(newScrut, matchCase.pattern, recursive = true)(using env, ctxs1)
-      val patCtxs = ctxs1.withConds(patConds)
+      val ctxsForGuard = ctxs1.withConds(patConds)
 
-      val rguard = transform(matchCase.guard, repl, extra)(using env, patCtxs)
-      val (compGuard, cGuard) = rguard.selfPlugged(patCtxs)
+      val rguard = transform(matchCase.guard, repl, extra)(using env, ctxsForGuard)
+      val (compGuard, cGuard) = rguard.selfPlugged(ctxsForGuard)
 
-      val ctxsRhs = patCtxs.withCond(cGuard)
-      val rrhs = transform(matchCase.rhs, repl, extra)(using env, ctxsRhs)
-      val (compRhs, cRhs) = rrhs.selfPlugged(ctxsRhs)
+      val ctxsForRhs = ctxsForGuard.withCond(cGuard)
+      val rrhs = transform(matchCase.rhs, repl, extra)(using env, ctxsForRhs)
+      val (compRhs, cRhs) = rrhs.selfPlugged(ctxsForRhs)
 
       val newMatchCase = LabMatchCase(matchCase.pattern, cGuard, cRhs)
       (CodeResMatchCase(newMatchCase, compGuard ++ compRhs), patConds :+ cGuard)
@@ -2290,8 +2405,8 @@ trait OCBSL extends Definitions { ocbsl =>
           rels <- tryFold(els, rthn, extra)(using env, ctxs1.withNegatedCond(cond))
         } yield rels
 
-      case Signature(Label.Or, args) =>
-        tryFoldDisjunctions(args, acc, extra)
+      case Signature(Label.Or, disjs) =>
+        ocbsl.tryFoldLeftDisjunction(disjs, acc)((acc, disj) => tryFold(disj, acc, extra))
 
       case Signature(Label.Ensuring, Seq(body, pred)) =>
         for {
@@ -2329,7 +2444,7 @@ trait OCBSL extends Definitions { ocbsl =>
             .map(newAcc => (newAcc, ctxs.addBoundDef(arg)))
       }.map(_._1)
     }
-
+    /*
     final def tryFoldDisjunctions(disjs: Seq[Code], acc: T, extra: Extra)(using env: OEnv, ctxs: Ctxs): Either[E, T] = {
       ocbsl.tryFoldLeft(disjs, (acc, ctxs)) {
         case ((acc, ctxs), disj) =>
@@ -2342,6 +2457,7 @@ trait OCBSL extends Definitions { ocbsl =>
           }
       }.map(_._1)
     }
+    */
 
     final def tryFoldCase(scrut: Code, matchCase: LabMatchCase, acc: T, extra: Extra)
                          (using env: OEnv, ctxs0: Ctxs): Either[E, (T, Seq[Code])] = {
