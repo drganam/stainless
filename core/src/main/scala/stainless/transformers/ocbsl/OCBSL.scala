@@ -933,21 +933,23 @@ trait OCBSL extends Definitions { ocbsl =>
     res
   }
 
-  def negCodeOf(c: Code)(using env: OEnv, ctxs: Ctxs): Code = {
+  def negCodeOf(c: Code)(using env: OEnv, ctxs: Ctxs): Code = negCodeOf(c)((_, _, _) => true)
+
+  def negCodeOf(c: Code)(invertSigns: Ctxs ?=> (Code, Code, Code) => Boolean)(using env: OEnv, ctxs: Ctxs): Code = {
     assert(codeTpe(c) == BoolTy, s"Got ${codeTpe(c)}")
     code2sig(c) match {
       case Signature(Label.Not, Seq(cc)) => cc
       case Signature(Label.Lit(BooleanLiteral(b)), Seq()) => b2c(!b)
-      case Signature(Label.LessThan, Seq(lhs, rhs)) => codeOfSig(mkGreaterEquals(lhs, rhs), BoolTy)
-      case Signature(Label.GreaterEquals, Seq(lhs, rhs)) => codeOfSig(mkLessThan(lhs, rhs), BoolTy)
-      case Signature(Label.GreaterThan, Seq(lhs, rhs)) => codeOfSig(mkLessEquals(lhs, rhs), BoolTy)
-      case Signature(Label.LessEquals, Seq(lhs, rhs)) => codeOfSig(mkGreaterThan(lhs, rhs), BoolTy)
+      case Signature(Label.LessThan, Seq(lhs, rhs)) if invertSigns(c, lhs, rhs) => codeOfSig(mkGreaterEquals(lhs, rhs), BoolTy)
+      case Signature(Label.GreaterEquals, Seq(lhs, rhs)) if invertSigns(c, lhs, rhs) => codeOfSig(mkLessThan(lhs, rhs), BoolTy)
+      case Signature(Label.GreaterThan, Seq(lhs, rhs)) if invertSigns(c, lhs, rhs) => codeOfSig(mkLessEquals(lhs, rhs), BoolTy)
+      case Signature(Label.LessEquals, Seq(lhs, rhs)) if invertSigns(c, lhs, rhs) => codeOfSig(mkGreaterThan(lhs, rhs), BoolTy)
       case _ =>
         // TODO: Push la négation pour IfExpr et MatchExpr
         if (CodeRes.isTerminal(c)) codeOfSig(mkNot(c), BoolTy)
         else {
           val teared = tearDown(c)
-          negCodeOf(teared.terminal)(using env, teared.ctxs)
+          negCodeOf(teared.terminal)(invertSigns)(using env, teared.ctxs)
         }
     }
   }
@@ -2002,31 +2004,7 @@ trait OCBSL extends Definitions { ocbsl =>
         val rdisjs = foldLeftDisjunction(disjs, Seq.empty[RevRes])((acc, disj) => acc :+ uncodeOf(disj))
         RevRes(Or(rdisjs.map(_.expr)), rdisjs.flatMap(_.used).toSet)
 
-      case Signature(Label.Not, Seq(c)) =>
-        code2sig(c) match {
-          case Signature(Label.Or, disjs) =>
-            val negDisjs = disjs.foldLeft((Seq.empty[RevRes], ctxs)) {
-              case ((acc, ctxs), disj) =>
-                given Ctxs = ctxs
-                val negated = negCodeOf(disj) // TODO: Pas de >= en < etc. si c'est bound
-                val negRes = uncodeOf(negated)
-                val newCtxs = {
-                  // Comme on est en négation, pour le next ctxs, on souhaite avoir ctxs avec comme bounddef la négation
-                  // du terminal de disj et comme condition le terminal de disj
-                  val tearedDisj = tearDown(disj)
-                  assert(tearedDisj.ctxs.isLitVarOrBoundDef(tearedDisj.terminal))
-                  val negatedDisjTerminal = negCodeOf(tearedDisj.terminal)(using renv.env, tearedDisj.ctxs)
-                  tearedDisj.ctxs.addBoundDef(negatedDisjTerminal)
-                    .withCond(tearedDisj.terminal)
-                }
-                (acc :+ negRes, newCtxs)
-            }._1
-            RevRes(And(negDisjs.map(_.expr)), negDisjs.flatMap(_.used).toSet)
-
-          case _ =>
-            val rc = uncodeOf(c)
-            RevRes(Not(rc.expr), rc.used)
-        }
+      case Signature(Label.Not, Seq(c)) => uncodeOfNot(c)
 
       case Signature(Label.MatchExpr(pats), cScrut +: cGuardRhs) =>
         assert(2 * pats.size == cGuardRhs.size)
@@ -2187,6 +2165,40 @@ trait OCBSL extends Definitions { ocbsl =>
       case Label.Decreases => Decreases(rpred.expr, rbody.expr)
     }
     RevRes(expr, rpred.used ++ rbody.used)
+  }
+
+  def uncodeOfNot(c: Code)(using renv: RevEnv, ctxs: Ctxs): RevRes = {
+    import renv.given
+
+    def invertSigns(op: Code, lhs: Code, rhs: Code)(using Ctxs): Boolean = {
+      def isSimple(c: Code): Boolean = isLitOrVar(c) || renv.revLetDefs.contains(c)
+      (isSimple(lhs) && isSimple(rhs)) || !renv.revLetDefs.contains(op) // TODO: Dire pk ! pour le op: car s'il est bind, une inversion risque de dupliquer les operandes
+    }
+
+    code2sig(c) match {
+      case Signature(Label.Or, disjs) =>
+        val negDisjs = disjs.foldLeft((Seq.empty[RevRes], ctxs)) {
+          case ((acc, ctxs), disj) =>
+            given Ctxs = ctxs
+            val negated = negCodeOf(disj)(invertSigns)
+            val negRes = uncodeOf(negated)
+            val newCtxs = {
+              // Comme on est en négation, pour le next ctxs, on souhaite avoir ctxs avec comme bounddef la négation
+              // du terminal de disj et comme condition le terminal de disj
+              val tearedDisj = tearDown(disj)
+              assert(tearedDisj.ctxs.isLitVarOrBoundDef(tearedDisj.terminal))
+              val negatedDisjTerminal = negCodeOf(tearedDisj.terminal)(using renv.env, tearedDisj.ctxs)
+              tearedDisj.ctxs.addBoundDef(negatedDisjTerminal)
+                .withCond(tearedDisj.terminal)
+            }
+            (acc :+ negRes, newCtxs)
+        }._1
+        RevRes(And(negDisjs.map(_.expr)), negDisjs.flatMap(_.used).toSet)
+
+      case _ =>
+        val rc = uncodeOf(c)
+        RevRes(Not(rc.expr), rc.used)
+    }
   }
 
   def uncodeOfArgs(args: Seq[Code])(recons: Seq[Expr] => Expr)(using renv: RevEnv, ctxs: Ctxs): RevRes = {
