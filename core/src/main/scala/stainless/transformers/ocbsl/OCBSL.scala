@@ -414,6 +414,11 @@ trait OCBSL extends Definitions { ocbsl =>
       else Ctxs(ctxs :+ Ctx.Assumed(cond))
     }
 
+    def withNegatedCond(cond: Code)(using env: OEnv): Ctxs = {
+      val neg = negCodeOf(cond)(using env, this)
+      withCond(neg)
+    }
+
     // TODO: Stripped annotation
     def withConds(conds: Seq[Code]): Ctxs = {
       conds.foldLeft(this)((acc, c) => acc.withCond(c))
@@ -490,7 +495,7 @@ trait OCBSL extends Definitions { ocbsl =>
       assert(cond.ctxs.isPrefixOf(thenn.ctxs))
       assert(cond.ctxs.isPrefixOf(els.ctxs))
       val (_, cThenn) = thenn.selfPlugged(cond.ctxs.withCond(cond.terminal))
-      val (_, cEls) = els.selfPlugged(cond.ctxs.withCond(negCodeOf(cond.terminal)))
+      val (_, cEls) = els.selfPlugged(cond.ctxs.withNegatedCond(cond.terminal))
       val terminal = codeOfSig(mkIfExpr(cond.terminal, cThenn, cEls), tpe)
       CodeRes(terminal, cond.ctxs.addBoundDef(terminal))
     }
@@ -576,7 +581,7 @@ trait OCBSL extends Definitions { ocbsl =>
         val rcond = codeOfExpr(cond)
         val ctxsThen = rcond.ctxs.withCond(rcond.terminal)
         val rthenn = codeOfExpr(thenn)(using env, ctxsThen)
-        val ctxsEls = rcond.ctxs.withCond(negCodeOf(rcond.terminal))
+        val ctxsEls = rcond.ctxs.withNegatedCond(rcond.terminal)
         val rels = codeOfExpr(els)(using env, ctxsEls)
         CodeRes.ifExpr(rcond, rthenn, rels, tpe)
 
@@ -856,7 +861,7 @@ trait OCBSL extends Definitions { ocbsl =>
         val re: CodeRes = f(disjs.head)
         assert(codeTpe(re.terminal) == BoolTy, s"Got ${codeTpe(re.terminal)}")
         assert(ctxs.isPrefixOf(re.ctxs))
-        val neg = negCodeOf(re.terminal)
+        val neg = negCodeOf(re.terminal)(using env, re.ctxs)
         val newCtxs = re.ctxs.withCond(neg)
         if (neg == falseCode) (rdisjsAcc :+ re, newCtxs) // On s'arrête ici, et on ajoute en effet false dans les conds, c'est voulu. Cela permet d'avoir le comportement inverse avec combineRec
         else transformRec(disjs.tail, rdisjsAcc :+ re)(using newCtxs)
@@ -886,12 +891,11 @@ trait OCBSL extends Definitions { ocbsl =>
         case Seq() => acc
         case init :+ last =>
           assert(last.ctxs.isPrefixOf(acc.ctxs))
-          val negLast = negCodeOf(last.terminal)
           if (last.terminal == falseCode) {
             // On skip celui-ci (on ne drop pas son ctxs, car il est préfixe de acc par construction de transformRec)
             combineRec(init, acc)
           } else {
-            val (_, accPlugged) = acc.selfPlugged(last.ctxs.withCond(negLast))
+            val (_, accPlugged) = acc.selfPlugged(last.ctxs.withNegatedCond(last.terminal))
             val newDisjs = simplifiedDisjunction(Seq(last.terminal, accPlugged))(using env, last.ctxs)
             val toRm = Seq(last.terminal, accPlugged).filter(c => code2sig(c).label == Label.Or)
             val ctxs = rmBindings(last.ctxs, toRm).addBoundDef(newDisjs)
@@ -909,8 +913,7 @@ trait OCBSL extends Definitions { ocbsl =>
     res
   }
 
-  // TODO: !!!! Si un Ctxs est ajouté, penser à regarder que toutes les refs soient correctes !!!!
-  def negCodeOf(c: Code)(using OEnv): Code = {
+  def negCodeOf(c: Code)(using env: OEnv, ctxs: Ctxs): Code = {
     assert(codeTpe(c) == BoolTy, s"Got ${codeTpe(c)}")
     code2sig(c) match {
       case Signature(Label.Not, Seq(cc)) => cc
@@ -920,17 +923,12 @@ trait OCBSL extends Definitions { ocbsl =>
       case Signature(Label.GreaterThan, Seq(lhs, rhs)) => codeOfSig(mkLessEquals(lhs, rhs), BoolTy)
       case Signature(Label.LessEquals, Seq(lhs, rhs)) => codeOfSig(mkGreaterThan(lhs, rhs), BoolTy)
       case _ =>
-        codeOfSig(mkNot(c), BoolTy)
-      //        // TODO: Essayer de le push pour IfExpr et MatchExpr
-      //        if (CodeRes.isTerminal(c)) codeOfSig(mkNot(c), BoolTy)
-      //        else {
-      //          // Unplugging a terminal gives the terminal itself, hence we have the above guard.
-      //          unplugged(c) match {
-      //            case Some((cr, _, inCtxs)) =>
-      //              cr.derived(negCodeOf(cr.terminal)).selfPlugged(inCtxs)._2
-      //            case _ => codeOfSig(mkNot(c), BoolTy)
-      //          }
-      //        }
+        // TODO: Push la négation pour IfExpr et MatchExpr
+        if (CodeRes.isTerminal(c)) codeOfSig(mkNot(c), BoolTy)
+        else {
+          val teared = tearDown(c)
+          negCodeOf(teared.terminal)(using env, teared.ctxs)
+        }
     }
   }
 
@@ -1004,7 +1002,7 @@ trait OCBSL extends Definitions { ocbsl =>
       */
       case _ =>
         val rchild = codeOfExpr(child)
-        val negChild = negCodeOf(rchild.terminal)
+        val negChild = negCodeOf(rchild.terminal)(using env, rchild.ctxs)
         rchild.derived(negChild)
     }
   }
@@ -1095,6 +1093,12 @@ trait OCBSL extends Definitions { ocbsl =>
     lazy val zero = codeOfIntLit(0, tpe)
     lazy val one = codeOfIntLit(1, tpe)
 
+//    // TODO: Dire qu'en gros, on n'opère certaines opération
+//    val atDefinitionSite = cr.ctxs.lastOption match {
+//      case Some(Ctx.BoundDef(bound)) => bound == cr.terminal
+//      case _ => false
+//    }
+
     val simp = code2sig(cr.terminal) match {
       // TODO: A gérer
       /*
@@ -1108,21 +1112,24 @@ trait OCBSL extends Definitions { ocbsl =>
       case Signature(Label.IfExpr, Seq(cond, thenn, els)) =>
         assert(CodeRes.isTerminal(cond))
         assert(cr.ctxs.isLitVarOrBoundDef(cond))
-        val (prevCtxs, ifCtx) = cr.ctxs.popOrId
-        assert(ifCtx match {
-          case Ctx.BoundDef(term) => term == cr.terminal
-          case _ => false
-        }, s"Trahison! Trahison! On a $ifCtx !!!")
-        val ctxs1 = prevCtxs.addBoundDef(cond)
-        val pCond = codePurity(cond)(using env, ctxs1) // TODO: Comme on bind, sera tjrs pure non?
-        assert(pCond.isPure)
+
+        // 1. Si cr.ctxs contient ce code en dernier BoundDef, cela signifie qu'on va simplifier la "définition"
+        // (dans l'équivalent let v = e, on est sur le point de simplifier 'e')
+        // 2. Sinon, alors cr.terminal est une occurrence liée par un BoundDef ultérieur
+        // (dans l'équivalent let v = e in body, on se trouve qqpart dans body, et on va simplifier 'v')
+        // Dans le cas 1, on utilise le contexte mais sans ce BoundDef
+        // Dans le cas 2, on utilise simplement cr.ctxs
+        val ctxs0 = cr.ctxs.popOrId match {
+          case (prevCtxs, Ctx.BoundDef(term)) if term == cr.terminal => prevCtxs
+          case _ => cr.ctxs
+        }
+        val ctxs1 = ctxs0.addBoundDef(cond)
         val ctxsThen = ctxs1.withCond(cond)
-        val ctxsEls = ctxs1.withCond(negCodeOf(cond))
-        lazy val pThen = codePurity(thenn)(using env, ctxsThen)
-        lazy val pEls = codePurity(els)(using env, ctxsEls)
+        val ctxsEls = ctxs1.withNegatedCond(cond)
 
         // TODO: On peut faire des trucs comme ifExpr
         val fstTry: Option[CodeRes] = {
+          // TODO: utiliser plutot implied(trueCode)? -> pas besoin, car devrait deja être simplifié avant
           // TODO: Pas besoin de la pureté:
           //  -Pour cond: car bound
           //  -Pour la branche "morte": car unreachable
@@ -1302,19 +1309,17 @@ trait OCBSL extends Definitions { ocbsl =>
           case ((pat, guard), rhs) => LabMatchCase(pat, guard, rhs)
         }
 
-        val (prevCtxs, matchCtx) = cr.ctxs.popOrId
-        assert(matchCtx match {
-          case Ctx.BoundDef(term) => term == cr.terminal
-          case _ => false
-        }, s"Trahison! Trahison! On a $matchCtx !!!")
-
-        simplifyCases(scrut, cases)(using env, prevCtxs.addBoundDef(scrut)) match {
+        // Voir explication IfExpr
+        val ctxs = cr.ctxs.popOrId match {
+          case (prevCtxs, Ctx.BoundDef(term)) if term == cr.terminal => prevCtxs
+          case _ => cr.ctxs
+        }
+        simplifyCases(scrut, cases)(using env, ctxs.addBoundDef(scrut)) match {
           case SimplifiedCases.Empty => sys.error("ah bah là, je sais pas quoi faire...")
           case SimplifiedCases.ElidableMatchExpr(rhs) => rhs
           case SimplifiedCases.Cases(newCases) =>
             val newMatch = codeOfSig(mkMatchExpr(scrut, newCases), tpe)
-            // On *remplace* l'ancien match par le nouveau, donc on utilise le ctxs précédent le binding du match
-            CodeRes(newMatch, prevCtxs.addBoundDef(newMatch))
+            CodeRes(newMatch, ctxs.addBoundDef(newMatch))
         }
 
       // TODO: Or not etc.
@@ -1323,8 +1328,9 @@ trait OCBSL extends Definitions { ocbsl =>
     }
 
     if (tpe == BoolTy) {
-      if (implied(cr.terminal)(using env, cr.ctxs)) simp.derived(trueCode)
-      else if (implied(negCodeOf(simp.terminal))(using env, cr.ctxs)) simp.derived(falseCode)
+      given Ctxs = cr.ctxs
+      if (implied(cr.terminal)) simp.derived(trueCode)
+      else if (implied(negCodeOf(simp.terminal))) simp.derived(falseCode)
       else simp
     }
     else simp
@@ -1780,7 +1786,7 @@ trait OCBSL extends Definitions { ocbsl =>
           val occCond = occurrencesOf(cond)
           val ctxs1 = ctxs.addBoundDef(cond)
           val occThn = occurrencesOf(thn)(using env, ctxs1.withCond(cond))
-          val occEls = occurrencesOf(els)(using env, ctxs1.withCond(negCodeOf(cond)))
+          val occEls = occurrencesOf(els)(using env, ctxs1.withNegatedCond(cond))
           slf ++ occCond ++ occThn ++ occEls
 
         case Signature(Label.Or, disjs) =>
@@ -1790,22 +1796,8 @@ trait OCBSL extends Definitions { ocbsl =>
               val occDisj = occurrencesOf(disj)
               val tearedDisj = tearDown(disj)
               assert(tearedDisj.ctxs.isLitVarOrBoundDef(tearedDisj.terminal))
-              val neg = negCodeOf(tearedDisj.terminal)
-              val newCtxs = tearedDisj.ctxs.withCond(neg)
+              val newCtxs = tearedDisj.ctxs.withNegatedCond(tearedDisj.terminal)
               (newCtxs, acc ++ occDisj)
-              /*
-              val occDisj = occurrencesOf(disj)
-              val nextCtxs = {
-                val negated = negCodeOf(disj)
-                if (CodeRes.isTerminal(disj)) {
-                  ctxs.addBoundDef(disj).withCond(negated)
-                } else {
-                  val disjsCtxs = contextOf(disj)
-                  disjsCtxs.withCond(negated)
-                }
-              }
-              (nextCtxs, acc ++ occDisj)
-              */
           }._2
 
         case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
@@ -1871,25 +1863,6 @@ trait OCBSL extends Definitions { ocbsl =>
             assert(occCallee0(callee) == Occurrence.Once(ctxs, env.nesting, OccurrenceKind.Expanded))
             val occCallee = occCallee0.setTo(callee, Occurrence.Once(ctxs, env.nesting, OccurrenceKind.Applied))
             tryFoldArgs(args, slf ++ acc ++ occCallee, ())(using env, ctxs.addBoundDef(callee))
-
-          // TODO: Remarque: Pour les expressions avec "self plugged", on ne "thread" pas les occurences
-          /*
-          case Signature(Label.Ensuring, Seq(body, pred)) =>
-            assert(acc.c2u.isEmpty)
-            val occBody = occOf(body)
-            val occPred = occOf(pred)
-            Right(slf ++ acc ++ occBody ++ occPred)
-
-          case Signature(Label.IfExpr, Seq(cond, thn, els)) =>
-            assert(CodeRes.isTerminal(cond))
-            val occCond = occOf(cond)
-            val ctxs1 = ctxs.addBoundDef(cond)
-            val occThn = occOf(thn)(using env, ctxs1.withCond(cond))
-            val occEls = occOf(els)(using env, ctxs1.withCond(negCodeOf(cond)))
-            Right(slf ++ occCond ++ occThn ++ occEls)
-
-          // TODO: Match case
-          */
 
           case _ => super.tryFoldImpl(c, acc ++ slf, ())
         }
@@ -2169,7 +2142,7 @@ trait OCBSL extends Definitions { ocbsl =>
           val rcond = transform(cond, repl, extra)
           val thennCtxs = rcond.ctxs.withCond(rcond.terminal)
           val rthenn = transform(thenn, repl, extra)(using env, thennCtxs)
-          val elsCtxs = rcond.ctxs.withCond(negCodeOf(rcond.terminal)) // (using rcond.env)
+          val elsCtxs = rcond.ctxs.withNegatedCond(rcond.terminal)
           val rels = transform(els, repl, extra)(using env, elsCtxs)
           CodeRes.ifExpr(rcond, rthenn, rels, tpe)
 
@@ -2301,7 +2274,7 @@ trait OCBSL extends Definitions { ocbsl =>
           rcond <- tryFold(cond, acc, extra)
           ctxs1 = ctxs.addBoundDef(cond)
           rthn <- tryFold(thn, rcond, extra)(using env, ctxs1.withCond(cond))
-          rels <- tryFold(els, rthn, extra)(using env, ctxs1.withCond(negCodeOf(cond)))
+          rels <- tryFold(els, rthn, extra)(using env, ctxs1.withNegatedCond(cond))
         } yield rels
 
       case Signature(Label.Or, args) =>
@@ -2351,8 +2324,7 @@ trait OCBSL extends Definitions { ocbsl =>
           tryFold(disj, acc, extra).map { newAcc =>
             val tearedDisj = tearDown(disj)
             assert(tearedDisj.ctxs.isLitVarOrBoundDef(tearedDisj.terminal))
-            val neg = negCodeOf(tearedDisj.terminal)
-            val newCtxs = tearedDisj.ctxs.withCond(neg)
+            val newCtxs = tearedDisj.ctxs.withNegatedCond(tearedDisj.terminal)
             (newAcc, newCtxs)
           }
       }.map(_._1)
