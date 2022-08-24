@@ -340,7 +340,9 @@ trait OCBSL extends Definitions { ocbsl =>
                   case Occurrence.Once(inCtxs, nesting, _) =>
                     // En gros: on se sert de la definitionOccurrence pour mettre a jour les occurrences des composant du terminal
                     u ++ compWoTerm.withInlinedOccurrences(inCtxs.withRemovedBinding(terminal), nesting)
-                  case Occurrence.Many => sys.error("cannot happen (would have fallen under 'MustBind' case)")
+                  case Occurrence.Many =>
+                    // Ce cas se passe pour les x.f1.fnField où l'on les inline au lieu de les bind
+                    u ++ compWoTerm.manyied
                 }
                 // TODO: Dire pk: en gros parce que ce bdg est removed
                 val u3 = u2.withRemovedBinding(terminal)
@@ -1648,6 +1650,13 @@ trait OCBSL extends Definitions { ocbsl =>
     case MustBind // ... the `e` must be bound (appears in `body` if pure, may not appear if impure)
   }
 
+  // x, x.a, x.a.b etc.
+  def isVarOrSelector(c: Code): Boolean = code2sig(c) match {
+    case Signature(Label.Var(_), Seq()) => true
+    case Signature(Label.ADTSelector(_, _, _), Seq(e)) => isVarOrSelector(e)
+    case _ => false
+  }
+
   def needsBinding(terminal: Code, terminalComposition: Occurrences, definitionOccurrence: Occurrence)(using env: OEnv, prefix: Ctxs): BindingCase = {
     assert(!isLitOrVar(terminal))
     assert(!prefix.isBoundDef(terminal))
@@ -1659,7 +1668,11 @@ trait OCBSL extends Definitions { ocbsl =>
         else {
           lazy val isPure = codePurity(terminal).isPure
           definitionOccurrence match {
-            case Occurrence.Many => BindingCase.MustBind
+            case Occurrence.Many =>
+              codeTpe(terminal) match {
+                case FunctionType(_, _) if isVarOrSelector(terminal) => BindingCase.Inlinable
+                case _ => BindingCase.MustBind
+              }
             case Occurrence.Zero =>
               // Si une expr impure n'apparait pas dans le body, on ne peut pas l'éliminer, il faut donc le bind
               if (!isPure) BindingCase.MustBind
