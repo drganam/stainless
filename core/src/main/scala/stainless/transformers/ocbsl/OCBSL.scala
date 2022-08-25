@@ -643,11 +643,13 @@ trait OCBSL extends Definitions { ocbsl =>
       // TODO: On pourrait p-e ignorer Annotated? De toute façon, si c'est pour avoir des DropVCs, cela ne change rien dans notre cas de figure?
       //  -> sauf p-e si on fait un "uncodeOf" et qu'on a besoin de restaurer certaines annotation, mais là on pourrait p-e envisager
       //  une map ad-hoc qui contient ces infos...?
-      case Annotated(e, flags) =>
+      case Annotated(e, _) => codeOfExpr(e)
+        /*
         // TODO: Gros gag: pourrait-on envisager d'assigner le même code pour la sig. de Annotated que pour la sig. de e ????
         //    Il faudra faire cette update un peu hacky à la fin. On aura besoin de manip les 2 maps par nous meme
         //    sans passer par updateCodeSig. On devra également avoir une map auxiliaire qui se souvient des exprs annotées pour ce uncodeOf...
         codeOfExprsBound(e, tpe)(mkAnnot(_, flags))
+        */
 
       // TODO: Ne pourrait-on pas envisager certains simplif. ici? Pk "attendre" codeOf?
       case and @ And(_) =>
@@ -680,7 +682,9 @@ trait OCBSL extends Definitions { ocbsl =>
       case BVWideningCast(e, newTpe) => codeOfExprsBound(e, tpe)(mkBVWideningCast(_, newTpe))
       case BVUnsignedToSigned(e) => codeOfExprsBound(e, tpe)(mkBVUnsignedToSigned)
       case BVSignedToUnsigned(e) => codeOfExprsBound(e, tpe)(mkBVSignedToUnsigned)
+
       case TupleSelect(e, index) => codeOfExprsBound(e, tpe)(mkTupleSelect(_, index))
+
       case FiniteSet(elems, base) => codeOfExprsBound(elems, tpe)(mkFiniteSet(_, base))
       case SetAdd(set, elem) => codeOfExprsBound(set, elem, tpe)(mkSetAdd)
       case ElementOfSet(elem, set) => codeOfExprsBound(elem, set, tpe)(mkElementOfSet)
@@ -688,11 +692,24 @@ trait OCBSL extends Definitions { ocbsl =>
       case SetIntersection(lhs, rhs) => codeOfExprsBound(lhs, rhs, tpe)(mkSetIntersection)
       case SetUnion(lhs, rhs) => codeOfExprsBound(lhs, rhs, tpe)(mkSetUnion)
       case SetDifference(lhs, rhs) => codeOfExprsBound(lhs, rhs, tpe)(mkSetDifference)
+
       case FiniteArray(elems, base) => codeOfExprsBound(elems, tpe)(mkFiniteArray(_, base))
-      case LargeArray(elems, default, size, base) => ???
+      case LargeArray(elems, default, size, base) =>
+        if (elems.nonEmpty) { ??? }
+        codeOfExprsBound(default, size, tpe)(mkLargeArray(Map.empty, _, _, base))
       case ArraySelect(array, index) => codeOfExprsBound(array, index, tpe)(mkArraySelect)
       case ArrayUpdated(array, index, v) => codeOfExprsBound(array, index, v, tpe)(mkArrayUpdated)
       case ArrayLength(array) => codeOfExprsBound(array, tpe)(mkArrayLength)
+
+      case FiniteMap(pairs, default, keyType, valueType) =>
+        codeOfExprsBound(pairs.flatMap(p => Seq(p._1, p._2)) :+ default, tpe) {
+          case cPairs :+ cDefault =>
+            assert(cPairs.size == 2 * pairs.size)
+            val cElems = cPairs.grouped(2).map { case Seq(fst, snd) => (fst, snd) }.toSeq
+            mkFiniteMap(cElems, cDefault, keyType, valueType)
+        }
+      case MapApply(map, key) => codeOfExprsBound(map, key, tpe)(mkMapApply)
+      case MapUpdated(map, key, value) => codeOfExprsBound(map, key, value, tpe)(mkMapUpdated)
 
       case Error(ofTpe, descr) => CodeRes.err(ofTpe, descr, tpe)
       case NoTree(ofTpe) => CodeRes.noTree(ofTpe, tpe)
@@ -1118,12 +1135,6 @@ trait OCBSL extends Definitions { ocbsl =>
     lazy val zero = codeOfIntLit(0, tpe)
     lazy val one = codeOfIntLit(1, tpe)
 
-//    // TODO: Dire qu'en gros, on n'opère certaines opération
-//    val atDefinitionSite = cr.ctxs.lastOption match {
-//      case Some(Ctx.BoundDef(bound)) => bound == cr.terminal
-//      case _ => false
-//    }
-
     val simp = code2sig(cr.terminal) match {
       // TODO: A gérer
       /*
@@ -1167,33 +1178,20 @@ trait OCBSL extends Definitions { ocbsl =>
             assert(ctxsEls.isPrefixOf(elsCr.ctxs))
             Some(elsCr)
           } else None
-          /*
-          if ((cond == trueCode && pEls.isPure) || thenn == els) {
-            val Some((thennCr, _)) = unplugged(thenn)(using env, ctxsThen)
-            assert(ctxsThen.isPrefixOf(thennCr.ctxs))
-            Some(thennCr)
-          } else if (cond == falseCode && pThen.isPure) {
-            val Some((elsCr, _)) = unplugged(els)(using env, ctxsEls)
-            assert(ctxsEls.isPrefixOf(elsCr.ctxs))
-            Some(elsCr)
-          } else None
-          */
         }
         def sndTry: CodeRes = (code2sig(thenn), code2sig(els)) match {
-          // TODO: Se souvenir que, comme on *remplace* le resultat, il faudra utiliser prevCtxs.addBoundDef(newIf) (curr ctxs sans le bdg du if)
-          // TODO: A revisiter une fois que l'on a ces conjuncts, etc.
-          /*
-          case (Signature(Label.IfExpr, Seq(cond2, thenn2, elze2)), _) if elze == elze2 =>
-            val combinedCond = conjunct(Seq(cond, cond2))
-            val c2 = codeOfSig(mkIfExpr(combinedCond, thenn2, elze2), tpe)
-            val c3 = withIncreasedDepth(1)(transform(c2, repl, ()))
-            code2sig(c3)
-          case (_, Signature(Label.IfExpr, Seq(cond2, thenn2, elze2))) if thenn == thenn2 =>
-            val combinedCond = simplifiedDisjunction(Seq(cond, cond2))
-            val c2 = codeOfSig(mkIfExpr(combinedCond, thenn2, elze2), tpe)
-            val c3 = withIncreasedDepth(1)(transform(c2, repl, ()))
-            code2sig(c3)
-          */
+          case (Signature(Label.IfExpr, Seq(cond2, thenn2, els2)), _) if els == els2 =>
+            val combinedCond = conjunct(Seq(cond, cond2))(using env, ctxs1)
+            val c2 = codeOfSig(mkIfExpr(combinedCond, thenn2, els2), tpe)
+            cr.derived(c2)
+            // val c3 = withIncreasedDepth(1)(transform(c2, repl, ()))
+            // code2sig(c3)
+          case (_, Signature(Label.IfExpr, Seq(cond2, thenn2, els2))) if thenn == thenn2 =>
+            val combinedCond = simplifiedDisjunction(Seq(cond, cond2))(using env, ctxs1)
+            val c2 = codeOfSig(mkIfExpr(combinedCond, thenn2, els2), tpe)
+            cr.derived(c2)
+            // val c3 = withIncreasedDepth(1)(transform(c2, repl, ()))
+            // code2sig(c3)
           case _ => cr
         }
         fstTry.getOrElse(sndTry)
@@ -1255,6 +1253,36 @@ trait OCBSL extends Definitions { ocbsl =>
           case Signature(Label.Tuple, args) => cr.derived(args(i))
           case _ => cr
         }
+
+      case Signature(Label.ArraySelect, Seq(arr, i)) =>
+        def collectIndicesValues(arr: Code, indices: Map[Code, Code]): Map[Code, Code] = code2sig(arr) match {
+          case Signature(Label.ArrayUpdated, Seq(arr2, j, newValue)) =>
+            collectIndicesValues(arr2, addIfAbsent(indices)(j -> newValue))
+          case Signature(Label.LargeArray(_, _), _ :+ default :+ _) =>
+            addIfAbsent(indices)(i -> default)
+          case Signature(Label.FiniteArray(_), elems) =>
+            code2sig(i) match {
+              case Signature(Label.Lit(Int32Literal(ii)), _) => addIfAbsent(indices)(i -> elems(ii))
+              case _ => indices
+            }
+          case _ => indices
+        }
+        collectIndicesValues(arr, Map.empty)
+          .get(i).map(cr.derived)
+          .getOrElse(cr)
+
+      case Signature(Label.ArrayLength, Seq(arr)) =>
+        def getLen(currArr: Code): CodeRes = code2sig(currArr) match {
+          case Signature(Label.ArrayUpdated, Seq(newArr, _, _)) => getLen(newArr)
+          case Signature(Label.FiniteArray(_), elems) =>
+            cr.derived(codeOfLit(Int32Literal(elems.size)))
+          case Signature(Label.LargeArray(_, _), _ :+ _ :+ size) =>
+            cr.derived(size)
+          case _ =>
+            if (currArr == arr) cr
+            else cr.derived(codeOfSig(mkArrayLength(currArr), tpe))
+        }
+        getLen(arr)
 
       case Signature(Label.Not, Seq(e)) =>
         code2sig(e) match {
@@ -2071,6 +2099,15 @@ trait OCBSL extends Definitions { ocbsl =>
       case Signature(Label.ArrayUpdated, Seq(arr, i, v)) => uncodeOfArgs(arr, i, v)(ArrayUpdated.apply)
       case Signature(Label.ArrayLength, Seq(arr)) => uncodeOfArgs(arr)(ArrayLength.apply)
 
+      case Signature(Label.FiniteMap(keyTpe, valueTpe), elems :+ default) =>
+        assert(elems.size % 2 == 0)
+        uncodeOfArgs(elems :+ default) { case exprElems :+ exprDefault =>
+          val paired = exprElems.grouped(2).map { case Seq(k, v) => (k, v) }.toSeq
+          FiniteMap(paired, exprDefault, keyTpe, valueTpe)
+        }
+      case Signature(Label.MapApply, Seq(map, k)) => uncodeOfArgs(map, k)(MapApply.apply)
+      case Signature(Label.MapUpdated, Seq(map, k, v)) => uncodeOfArgs(map, k, v)(MapUpdated.apply)
+
       case Signature(Label.Error(tpe, descr), Seq()) => RevRes(Error(tpe, descr), Set.empty)
       case Signature(Label.NoTree(tpe), Seq()) => RevRes(NoTree(tpe), Set.empty)
 
@@ -2460,20 +2497,6 @@ trait OCBSL extends Definitions { ocbsl =>
             .map(newAcc => (newAcc, ctxs.addBoundDef(arg)))
       }.map(_._1)
     }
-    /*
-    final def tryFoldDisjunctions(disjs: Seq[Code], acc: T, extra: Extra)(using env: OEnv, ctxs: Ctxs): Either[E, T] = {
-      ocbsl.tryFoldLeft(disjs, (acc, ctxs)) {
-        case ((acc, ctxs), disj) =>
-          given Ctxs = ctxs
-          tryFold(disj, acc, extra).map { newAcc =>
-            val tearedDisj = tearDown(disj)
-            assert(tearedDisj.ctxs.isLitVarOrBoundDef(tearedDisj.terminal))
-            val newCtxs = tearedDisj.ctxs.withNegatedCond(tearedDisj.terminal)
-            (newAcc, newCtxs)
-          }
-      }.map(_._1)
-    }
-    */
 
     final def tryFoldCase(scrut: Code, matchCase: LabMatchCase, acc: T, extra: Extra)
                          (using env: OEnv, ctxs0: Ctxs): Either[E, (T, Seq[Code])] = {
@@ -2606,6 +2629,9 @@ trait OCBSL extends Definitions { ocbsl =>
   def findMap[A, B](as: Seq[A])(f: A => Option[B]): Option[B] =
     if (as.isEmpty) None
     else f(as.head).orElse(findMap(as.tail)(f))
+
+  def addIfAbsent[K, V](map: Map[K, V])(kv: (K, V)): Map[K, V] =
+    if (map.contains(kv._1)) map else map + kv
 
   def tryFoldLeft[E, A, T](as: Seq[A], init: T)(f: (T, A) => Either[E, T]): Either[E, T] = {
     def rec(as: Seq[A], acc: T): Either[E, T] = as match {

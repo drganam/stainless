@@ -232,8 +232,9 @@ trait VerificationChecker { self =>
   private def removeAssertions(expr: Expr): Expr = {
     exprOps.postMap {
       case Assert(_, _, e) => Some(e)
-      case Annotated(e, Seq(DropVCs)) => Some(e)
-      case Annotated(e, Seq(DropConjunct)) => Some(e)
+      case Annotated(e, _) => Some(e)
+//      case Annotated(e, Seq(DropVCs)) => Some(e)
+//      case Annotated(e, Seq(DropConjunct)) => Some(e)
       case _ => None
     }(expr)
   }
