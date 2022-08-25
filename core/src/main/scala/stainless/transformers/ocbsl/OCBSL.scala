@@ -55,6 +55,14 @@ trait OCBSL extends Definitions { ocbsl =>
   private val pluggedMap = mutable.Map.empty[(CodeRes, Ctxs, OEnv), (Occurrences, Code)]
   private val unplugMap = mutable.Map.empty[(Code, OEnv), Map[Ctxs, (CodeRes, Occurrences)]]
 
+  private final inline val debug = true
+
+  private final inline def assert(cond: => Boolean): Unit =
+    inline if (debug) Predef.assert(cond)
+
+  private final inline def assert(cond: => Boolean, msg: => String): Unit =
+    inline if (debug) Predef.assert(cond, msg)
+
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
   //region Various simple ADTs
@@ -196,13 +204,11 @@ trait OCBSL extends Definitions { ocbsl =>
   //region Ctxs and CodeRes
 
   enum Ctx {
-    case Id
     case BoundDef(terminal: Code)
     case AssumeLike(lab: Label.AssumeLike, predTerminal: Code)
     case Assumed(cond: Code) // TODO: Dire que c'est p.ex. apres if (cond), où le assume(cond) ds la branche n'est pas nécessaire (car impliqué)
 
     lazy val hc: Int = this match {
-      case Ctx.Id => 31
       case Ctx.BoundDef(t) => java.util.Objects.hash(t)
       case Ctx.AssumeLike(l, p) => java.util.Objects.hash(l, p)
       case Ctx.Assumed(c) => java.util.Objects.hash(c)
@@ -250,7 +256,6 @@ trait OCBSL extends Definitions { ocbsl =>
       if (ctxs.isEmpty) None
       else Some((Ctxs(ctxs.init), ctxs.last))
     }
-    def popOrId: (Ctxs, Ctx) = pop.getOrElse((Ctxs(Seq.empty), Ctx.Id))
 
     def withRemovedBinding(c: Code): Ctxs = withRemovedBindings(Set(c))
 
@@ -279,6 +284,8 @@ trait OCBSL extends Definitions { ocbsl =>
       assert(inCtxs.isPrefixOf(this))
 
       def plugCtx(curr: Ctxs, prev: Ctxs, toPlug: Ctx, u: Occurrences, c: Code, inlinedLet: Set[Code]): (Occurrences, Code, Set[Code]) = {
+        if (Thread.interrupted()) throw new InterruptedException("Oh non :(")
+
         // TODO: Quid si inline dans un lambda mais pas ailleurs "plus loin"???
         // TODO: Cette histoire de assume(...) en début de lambda????
         // TODO: Dire qu'ici et pas ailleurs car on ne veut pas remettre des ctxs.addBoundDef pr les lambdas
@@ -315,7 +322,7 @@ trait OCBSL extends Definitions { ocbsl =>
         */
 
         val (u2, c2, inlinedLet2) = toPlug match {
-          case Ctx.Id | Ctx.Assumed(_) => (u, c, inlinedLet)
+          case Ctx.Assumed(_) => (u, c, inlinedLet)
 
           case Ctx.BoundDef(terminal) =>
             assert(CodeRes.isTerminal(terminal))
@@ -376,7 +383,7 @@ trait OCBSL extends Definitions { ocbsl =>
         if (curr.ctxs.size == inCtxs.ctxs.size) (u, c, inlinedLet)
         else {
           assert(curr.ctxs.nonEmpty)
-          val (prev, toPlug) = curr.popOrId
+          val (prev, toPlug) = curr.pop.get
           val (u2, c2, inlinedLet2) = plugCtx(curr, prev, toPlug, u, c, inlinedLet)
           rec(prev, u2, c2, inlinedLet2)
         }
@@ -443,10 +450,6 @@ trait OCBSL extends Definitions { ocbsl =>
   }
 
   object Ctxs {
-    def apply(ctxs: Seq[Ctx]): Ctxs = new Ctxs(ctxs.filter(_ != Ctx.Id))
-
-    def apply(ctx1: Ctx, ctxs: Ctx*): Ctxs = new Ctxs((ctx1 +: ctxs).filter(_ != Ctx.Id))
-
     def empty: Ctxs = new Ctxs(Seq.empty)
   }
 
@@ -1141,8 +1144,8 @@ trait OCBSL extends Definitions { ocbsl =>
         // (dans l'équivalent let v = e in body, on se trouve qqpart dans body, et on va simplifier 'v')
         // Dans le cas 1, on utilise le contexte mais sans ce BoundDef
         // Dans le cas 2, on utilise simplement cr.ctxs
-        val ctxs0 = cr.ctxs.popOrId match {
-          case (prevCtxs, Ctx.BoundDef(term)) if term == cr.terminal => prevCtxs
+        val ctxs0 = cr.ctxs.pop match {
+          case Some((prevCtxs, Ctx.BoundDef(term))) if term == cr.terminal => prevCtxs
           case _ => cr.ctxs
         }
         val ctxs1 = ctxs0.addBoundDef(cond)
@@ -1332,8 +1335,8 @@ trait OCBSL extends Definitions { ocbsl =>
         }
 
         // Voir explication IfExpr
-        val ctxs = cr.ctxs.popOrId match {
-          case (prevCtxs, Ctx.BoundDef(term)) if term == cr.terminal => prevCtxs
+        val ctxs = cr.ctxs.pop match {
+          case Some((prevCtxs, Ctx.BoundDef(term))) if term == cr.terminal => prevCtxs
           case _ => cr.ctxs
         }
         simplifyCases(scrut, cases)(using env, ctxs.addBoundDef(scrut)) match {
@@ -1500,7 +1503,7 @@ trait OCBSL extends Definitions { ocbsl =>
           visiting += fn
           val bodyCodeRes = codeOfExpr(getFunction(fn).fullBody)
           val bodyCode = bodyCodeRes.selfPlugged(Ctxs.empty)._2
-          val uncodedTest = uncodeOf(bodyCode)(using RevEnv(Map.empty, LambdaNesting(0)))
+          // val uncodedTest = uncodeOf(bodyCode)(using RevEnv(Map.empty, LambdaNesting(0)))
           val purity = codePurity(bodyCode)
           visiting -= fn
           purity match {
@@ -1728,7 +1731,6 @@ trait OCBSL extends Definitions { ocbsl =>
                   assert(running.isPrefixOf(inCtxs))
                   if (extras.isEmpty) true
                   else extras.head match {
-                    case Ctx.Id => sys.error("Les Id devraient être filtré!!!")
                     case Ctx.Assumed(_) | Ctx.AssumeLike(_, _) => false // Condition supplémentaire; donc impure
                     case Ctx.BoundDef(defn) =>
                       codePurity(defn)(using env, running).isPure &&
@@ -1848,10 +1850,12 @@ trait OCBSL extends Definitions { ocbsl =>
           slf ++ foldOcc(children)
       }
     }
-    val expected = codeOcc(c)
-    val eq = expected.c2u.toSet.intersect(res.c2u.toSet)
-    val diff = (expected.c2u.toSet ++ res.c2u.toSet) -- eq
-    assert(res == expected)
+    assert {
+      val expected = codeOcc(c)
+      val eq = expected.c2u.toSet.intersect(res.c2u.toSet)
+      val diff = (expected.c2u.toSet ++ res.c2u.toSet) -- eq
+      res == expected
+    }
     res
   }
 
