@@ -101,7 +101,7 @@ trait VerificationChecker { self =>
     import MainHelpers._
 
     val simplifyVC: Expr => Expr = {
-      if (false && context.options.findOptionOrDefault(optFullOCBSLSimp)) {
+      if (context.options.findOptionOrDefault(optFullOCBSLSimp)) {
         // Note: the class instance is outside of the closure scope to avoid repeated creation instances
         // (so that computation can be preserved across VCs)
         val ocbslSimp = OCBSLSimplifier(trees, symbols, PurityOptions.assumeChecked)

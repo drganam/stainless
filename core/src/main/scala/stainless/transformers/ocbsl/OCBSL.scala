@@ -774,52 +774,46 @@ trait OCBSL extends Definitions { ocbsl =>
     given x_x: Ctxs = sys.error("Carefully select ctxs")
     given ô_ô: LetValSubst = sys.error("Carefully select subst")
 
-    def convertPattern(scrut: Code, pat: Pattern, ctxs0: Ctxs, subst0: LetValSubst): (LabelledPattern, Ctxs, LetValSubst) = {
-      val ctxs1 = ctxs0.addBoundDef(scrut)
+    def convertPattern(scrut: Code, pat: Pattern, subst0: LetValSubst): (LabelledPattern, LetValSubst) = {
       val subst1 = pat.binder.map(vd => subst0 + (vd.toVariable -> scrut)).getOrElse(subst0)
 
-      def recHelper(subScruts: Seq[Code], subps: Seq[Pattern]): (Seq[LabelledPattern], Ctxs, LetValSubst) = {
+      def recHelper(subScruts: Seq[Code], subps: Seq[Pattern]): (Seq[LabelledPattern], LetValSubst) = {
         assert(subScruts.size == subps.size)
-        subScruts.zip(subps).foldLeft((Seq.empty[LabelledPattern], ctxs1, subst1)) {
-          case ((acc, ctxs, subst), (subScrut, subp)) =>
-            val (rsub, ctxs2, subst2) = convertPattern(subScrut, subp, ctxs, subst)
-            (acc :+ rsub, ctxs2, subst2)
+        subScruts.zip(subps).foldLeft((Seq.empty[LabelledPattern], subst1)) {
+          case ((acc, subst), (subScrut, subp)) =>
+            val (rsub, subst2) = convertPattern(subScrut, subp, subst)
+            (acc :+ rsub, subst2)
         }
       }
 
       pat match {
-        case WildcardPattern(_) => (LabelledPattern.Wildcard, ctxs1, subst1)
-        case LiteralPattern(_, lit) => (LabelledPattern.Lit(lit), ctxs1, subst1)
+        case WildcardPattern(_) => (LabelledPattern.Wildcard, subst1)
+        case LiteralPattern(_, lit) => (LabelledPattern.Lit(lit), subst1)
         case ADTPattern(_, id, tps, subps) =>
-          val subScruts = adtSubscrutinees(scrut, ADTType(id, tps))
-          val (rsubs, ctxs2, subst2) = recHelper(subScruts, subps)
-          (LabelledPattern.ADT(id, tps, rsubs), ctxs2, subst2)
+          val subScruts = adtSubScrutinees(scrut, ADTType(id, tps))
+          val (rsubs, subst2) = recHelper(subScruts, subps)
+          (LabelledPattern.ADT(id, tps, rsubs), subst2)
         case TuplePattern(_, subps) =>
           val tt@TupleType(_) = codeTpe(scrut)
           val subScruts = tupleSubscrutinees(scrut, tt)
-          val (rsubs, ctxs2, subst2) = recHelper(subScruts, subps)
-          (LabelledPattern.TuplePattern(rsubs), ctxs2, subst2)
+          val (rsubs, subst2) = recHelper(subScruts, subps)
+          (LabelledPattern.TuplePattern(rsubs), subst2)
         case UnapplyPattern(_, recs, id, tps, subps) =>
           assert(recs.isEmpty)
-          ???
-          /*
-          val subScruts = unapplySubScrutinees(scrut, id, tps)
-          val (rsubs, ctxs2, subst2) = recHelper(subScruts, subps)
-          (LabelledPattern.Unapply(Seq.empty, id, tps, rsubs), ctxs2, subst2)
-          */
+          val unapp = unapplySubScrutinees(scrut, id, tps)
+          val (rsubs, subst2) = recHelper(unapp.subs, subps)
+          (LabelledPattern.Unapply(Seq.empty, id, tps, rsubs), subst2)
       }
     }
 
-    val (labPat, ctxs1, subst1) = convertPattern(scrut, mc.pattern, ctxs0, subst0)
-    // patConds: sans le guard!
-    val patConds = collectPatternConds(scrut, labPat, recursive = true)(using env, ctxs1)
-    val patCtxs = ctxs1.withConds(patConds)
+    val (labPat, subst1) = convertPattern(scrut, mc.pattern, subst0)
+    val PatBdgsAndConds(ctxs1, _, patConds) = addPatternBindingsAndConds(ctxs0, scrut, labPat)
 
     // TODO: On pourrait conserver le ctx des guard pour le body? En gros, qu'on plug le body dans le ctx de guard
-    val rguard: Option[CodeRes] = mc.optGuard.map(codeOfExpr(_)(using env, patCtxs, subst1))
-    val (compGuard, cGuard) = rguard.map(_.selfPlugged(patCtxs)).getOrElse((Occurrences.empty, trueCode))
+    val rguard: Option[CodeRes] = mc.optGuard.map(codeOfExpr(_)(using env, ctxs1, subst1))
+    val (compGuard, cGuard) = rguard.map(_.selfPlugged(ctxs1)).getOrElse((Occurrences.empty, trueCode))
 
-    val rhsCtxs = patCtxs.withCond(cGuard)
+    val rhsCtxs = ctxs1.withCond(cGuard)
     val rrhs = codeOfExpr(mc.rhs)(using env, rhsCtxs, subst1)
     val (compRhs, rhs) = rrhs.selfPlugged(rhsCtxs)
 
@@ -1424,14 +1418,14 @@ trait OCBSL extends Definitions { ocbsl =>
   }
 
   def simplifyCase(scrut: Code, matchCase: LabMatchCase)(using env: OEnv, ctxs0: Ctxs): SimplifiedCase = {
-    val ctxs1 = addScrutineeBindings(scrut, matchCase.pattern, ctxs0)
+    val PatBdgsAndConds(ctxs1, _, patConds) = addPatternBindingsAndConds(ctxs0, scrut, matchCase.pattern)
     given Ctxs = ctxs1
-    val patConds = collectPatternConds(scrut, matchCase.pattern, recursive = true)
+    val rhsCtxs = ctxs1.withCond(matchCase.guard)
     val caseConds = patConds :+ matchCase.guard
-    val rhsCtxs = ctxs1.withConds(caseConds)
-    // lazy val isRhsPure = codePurity(matchCase.rhs)(using env, rhsCtxs).isPure
 
-    if (caseConds.forall(c => codePurity(c).isPure)) { // TODO: Calcul de la pureté imprécis, on devrait les accumuler...
+    // TODO: Ok? Après tout, ctxs1 contient les binding et les conds!!!
+    // TODO: ou alors: pure sauf s'il y a des unapply, dans ce cas on check fnpurity des unapply
+    if (caseConds.forall(c => codePurity(c).isPure)) {
       val caseCondsConj = conjunct(ctxs1.allConds ++ caseConds)
       if (caseCondsConj == trueCode) SimplifiedCase.Covered(rhsCtxs)
       else if (caseCondsConj == falseCode) SimplifiedCase.Unreachable
@@ -1595,6 +1589,8 @@ trait OCBSL extends Definitions { ocbsl =>
 
     def codePurity(c: Code)(using OEnv, Ctxs): Purity = tryFold(c, Pure, ()).getOrElse(Impure)
 
+    // TODO: Ok? Après tout, ctxs1 contient les binding et les conds!!!
+    // TODO: ou alors: pure sauf s'il y a des unapply, dans ce cas on check fnpurity des unapply
     def tryFoldPatternConditions(patConds: Seq[Code], acc: Purity, extra: Unit)(using OEnv, Ctxs): Either[Unit, Purity] =
       acc ++ foldPurity(patConds) match {
         case Impure => Left(())
@@ -1801,12 +1797,10 @@ trait OCBSL extends Definitions { ocbsl =>
 
   def occurrencesOf(c: Code)(using env: OEnv, ctxs: Ctxs): Occurrences = {
     def occOfCase(scrut: Code, matchCase: LabMatchCase)(using env: OEnv, ctxs0: Ctxs): (Occurrences, Seq[Code]) = {
-      val ctxs1 = addScrutineeBindings(scrut, matchCase.pattern, ctxs0)
-      val patConds = collectPatternConds(scrut, matchCase.pattern, recursive = true)(using env, ctxs1)
+      val PatBdgsAndConds(ctxs1, _, patConds) = addPatternBindingsAndConds(ctxs0, scrut, matchCase.pattern)
       // Les pattern conditions ne sont pas comptées comme "occurrences"
-      val ctxsGuard = ctxs1.withConds(patConds)
-      val occGuard = occurrencesOf(matchCase.guard)(using env, ctxsGuard)
-      val ctxsRhs = ctxsGuard.withCond(matchCase.guard)
+      val occGuard = occurrencesOf(matchCase.guard)(using env, ctxs1)
+      val ctxsRhs = ctxs1.withCond(matchCase.guard)
       val occRhs = occurrencesOf(matchCase.rhs)(using env, ctxsRhs)
       (occGuard ++ occRhs, patConds :+ matchCase.guard)
     }
@@ -2149,7 +2143,7 @@ trait OCBSL extends Definitions { ocbsl =>
     pat match {
       case LabelledPattern.Wildcard => WildcardPattern(bdg)
       case LabelledPattern.ADT(id, tps, subps) =>
-        val rsubs = recHelper(adtSubscrutinees(scrut, ADTType(id, tps)), subps)
+        val rsubs = recHelper(adtSubScrutinees(scrut, ADTType(id, tps)), subps)
         ADTPattern(bdg, id, tps, rsubs)
       case LabelledPattern.TuplePattern(subps) =>
         val tt@TupleType(bases) = codeTpe(scrut)
@@ -2157,27 +2151,26 @@ trait OCBSL extends Definitions { ocbsl =>
         val rsubs = recHelper(tupleSubscrutinees(scrut, tt), subps)
         TuplePattern(bdg, rsubs)
       case LabelledPattern.Lit(lit) => LiteralPattern(bdg, lit)
-      case LabelledPattern.Unapply(recs, id, tps, sub) =>
+      case LabelledPattern.Unapply(recs, id, tps, subps) =>
         assert(recs.isEmpty)
-        ???
+        val rsubs = recHelper(unapplySubScrutinees(scrut, id, tps).subs, subps)
+        UnapplyPattern(bdg, Seq.empty, id, tps, rsubs)
     }
   }
 
   case class UncodedCase(pat: Pattern, guard: RevRes, rhs: RevRes, caseConds: Seq[Code])
 
   def uncodeOfCase(cScrut: Code, cse: LabMatchCase)(using renv0: RevEnv, ctxs0: Ctxs): UncodedCase = {
-    val allScruts = allScrutinees(cScrut, cse.pattern)
+    import renv0.given
+    val PatBdgsAndConds(ctxs1, allScruts, patConds) = addPatternBindingsAndConds(ctxs0, cScrut, cse.pattern)
     val scrutBdgs = allScruts.zipWithIndex.map {
       case (subScrut, i) =>
         val vId = idOfVariable(Variable.fresh(s"bdg$i", codeTpe(subScrut)))
         vId -> subScrut
     }
     val renv1 = renv0.withLetBounds(scrutBdgs)
-    val ctxs1 = ctxs0.addBoundDefs(allScruts)
-    val patConds = collectPatternConds(cScrut, cse.pattern, recursive = true)(using renv0.env, ctxs1)
-    val ctxsForGuard = ctxs1.withConds(patConds)
-    val rguard = uncodeOf(cse.guard)(using renv1, ctxsForGuard)
-    val ctxsForRhs = ctxsForGuard.withCond(cse.guard)
+    val rguard = uncodeOf(cse.guard)(using renv1, ctxs1)
+    val ctxsForRhs = ctxs1.withCond(cse.guard)
     val rrhs = uncodeOf(cse.rhs)(using renv1, ctxsForRhs)
     // On retire les scrut. binding qui sont inutiles.
     val scrutVds = scrutBdgs.filter { case (v, _) => rguard.used(v) || rrhs.used(v) }
@@ -2185,7 +2178,8 @@ trait OCBSL extends Definitions { ocbsl =>
         val vd = new ValDef(varId2Var(v))
         c -> vd
       }.toMap
-    UncodedCase(convertPattern(cScrut, cse.pattern, scrutVds), rguard, rrhs, patConds :+ cse.guard)
+    val convertedPattern = convertPattern(cScrut, cse.pattern, scrutVds)
+    UncodedCase(convertedPattern, rguard, rrhs, patConds :+ cse.guard)
   }
 
   def uncodeOfCases(cScrut: Code, cases: Seq[LabMatchCase], transformedCases: Seq[MatchCase], used: Set[VarId])
@@ -2362,7 +2356,6 @@ trait OCBSL extends Definitions { ocbsl =>
           transform(body, repl, extra)(using env, rpred.ctxs.withAssumeLike(lab, rpred.terminal))
 
         case Signature(Label.Ensuring, Seq(body, pred)) =>
-          // TODO: Ok?
           val rbody = transform(body, repl, extra)
           val rpred = transform(pred, repl, extra)
           CodeRes.ensuring(rbody, rpred, tpe)
@@ -2384,9 +2377,6 @@ trait OCBSL extends Definitions { ocbsl =>
           }
           val rscrut = transform(scrut, repl, extra)
           assert(rscrut.ctxs.isLitVarOrBoundDef(rscrut.terminal))
-          // TODO: !!! Si rscrut est une var/lit !!! ?
-          // TODO: !!! Si rscrut est une var/lit !!! ?
-          // TODO: !!! Si rscrut est une var/lit !!! ?
           val rcases = transformCases(scrut, rscrut.terminal, cases, repl + (scrut -> rscrut.terminal), extra, Seq.empty)(using env, rscrut.ctxs)
           CodeRes.matchExpr(rscrut, rcases, tpe)
 
@@ -2408,24 +2398,20 @@ trait OCBSL extends Definitions { ocbsl =>
       combineCodeRes(ress, tpe)(mkSig)(using env, newCtxs)
     }
 
-    // TODO: Ok????
-    // TODO: Ok????
-    // TODO: Ok????
     def transformCase(oldScrut: Code, newScrut: Code, matchCase: LabMatchCase, repl0: Map[Code, Code], extra: Extra)
                      (using env: OEnv, ctxs0: Ctxs): (CodeResMatchCase, Seq[Code]) = {
       assert(repl0.get(oldScrut) == Some(newScrut), s"'repl0' ne contient pas $oldScrut -> $newScrut")
-      val oldBdgs = allScrutinees(oldScrut, matchCase.pattern)
-      val newBdgs = allScrutinees(newScrut, matchCase.pattern)
+      assert(ctxs0.isLitVarOrBoundDef(newScrut))
+
+      val PatBdgsAndConds(ctxs1, newBdgs, patConds) = addPatternBindingsAndConds(ctxs0, newScrut, matchCase.pattern)
+      val PatBdgsAndConds(_, oldBdgs, _) = addPatternBindingsAndConds(ctxs0, oldScrut, matchCase.pattern)
       assert(oldBdgs.size == newBdgs.size)
       val repl = repl0 ++ oldBdgs.zip(newBdgs).toMap
-      val ctxs1 = addScrutineeBindings(newScrut, matchCase.pattern, ctxs0)
-      val patConds = collectPatternConds(newScrut, matchCase.pattern, recursive = true)(using env, ctxs1)
-      val ctxsForGuard = ctxs1.withConds(patConds)
 
-      val rguard = transform(matchCase.guard, repl, extra)(using env, ctxsForGuard)
-      val (compGuard, cGuard) = rguard.selfPlugged(ctxsForGuard)
+      val rguard = transform(matchCase.guard, repl, extra)(using env, ctxs1)
+      val (compGuard, cGuard) = rguard.selfPlugged(ctxs1)
 
-      val ctxsForRhs = ctxsForGuard.withCond(cGuard)
+      val ctxsForRhs = ctxs1.withCond(cGuard)
       val rrhs = transform(matchCase.rhs, repl, extra)(using env, ctxsForRhs)
       val (compRhs, cRhs) = rrhs.selfPlugged(ctxsForRhs)
 
@@ -2524,13 +2510,13 @@ trait OCBSL extends Definitions { ocbsl =>
 
     final def tryFoldCase(scrut: Code, matchCase: LabMatchCase, acc: T, extra: Extra)
                          (using env: OEnv, ctxs0: Ctxs): Either[E, (T, Seq[Code])] = {
-      val ctxs1 = addScrutineeBindings(scrut, matchCase.pattern, ctxs0)
-      val patConds = collectPatternConds(scrut, matchCase.pattern, recursive = true)(using env, ctxs1)
+      val PatBdgsAndConds(ctxs1, _, patConds) = addPatternBindingsAndConds(ctxs0, scrut, matchCase.pattern)
       for {
+        // TODO: Ok? Après tout, ctxs1 contient les binding et les conds!!!
+        // TODO: ou alors: pure sauf s'il y a des unapply, dans ce cas on check fnpurity des unapply
         rpatConds <- tryFoldPatternConditions(patConds, acc, extra)(using env, ctxs1)
-        ctxsForGuard = ctxs1.withConds(patConds)
-        rguard <- tryFold(matchCase.guard, rpatConds, extra)(using env, ctxsForGuard)
-        ctxsForRhs = ctxsForGuard.withCond(matchCase.guard)
+        rguard <- tryFold(matchCase.guard, rpatConds, extra)(using env, ctxs1)
+        ctxsForRhs = ctxs1.withCond(matchCase.guard)
         rrhs <- tryFold(matchCase.rhs, rguard, extra)(using env, ctxsForRhs)
       } yield (rrhs, patConds :+ matchCase.guard)
     }
@@ -2565,111 +2551,115 @@ trait OCBSL extends Definitions { ocbsl =>
 
   //region Match expression utilities
 
-  def adtSubscrutinees(scrut: Code, adt: ADTType): Seq[Code] = {
-    val tcons = getConstructor(adt.id, adt.tps)
-    tcons.fields.map(fld => codeOfSig(mkADTSelector(scrut, adt, tcons, fld.id), fld.getType))
-  }
-
   def tupleSubscrutinees(scrut: Code, tt: TupleType): Seq[Code] = {
     tt.bases.zipWithIndex.map { case (base, i) => codeOfSig(mkTupleSelect(scrut, i + 1), base) }
   }
 
-  def unapplySubScrutinees(scrut: Code, id: Identifier, tps: Seq[Type]): Seq[Code] = {
+  case class ADTSubScruts(subs: Seq[Code], patCond: Code)
+
+  def adtSubScrutinees(scrut: Code, adt: ADTType): Seq[Code] = {
+    val tcons = getConstructor(adt.id, adt.tps)
+    tcons.fields.map(fld => codeOfSig(mkADTSelector(scrut, adt, tcons, fld.id), fld.getType))
+  }
+
+  def adtMatchCond(scrut: Code, adt: ADTType)(using OEnv, Ctxs): Code = {
+    isConstructor(scrut, adt, adt.id) match {
+      case Some(true) => trueCode
+      case Some(false) => falseCode
+      case None => codeOfSig(mkIsCtor(scrut, adt, adt.id), BoolTy)
+    }
+  }
+
+  case class UnapplySubScruts(unapplyInvoc: Code, getInvoc: Code, subs: Seq[Code], patCond: Code)
+
+  def unapplySubScrutinees(scrut: Code, id: Identifier, tps: Seq[Type]): UnapplySubScruts = {
     val fdUnapply = getFunction(id)
     val unapplyInvocSig = mkFunInvoc(id, tps, Seq(scrut))
     val unapplyInvoc = codeOfSig(unapplyInvocSig, fdUnapply.returnType)
+
+    // The accessor in question is either get or isEmpty so fnId = get or isEmpty
+    // En gros: get(unapplyInvoc) ou isEmpty(unapplyInvoc) en fonction de ce qu'on passe pour fnId
+    // See Expression#UnapplyPattern
+    def unapplyAccessor(fnId: Identifier): Code = {
+      val fdAcc = getFunction(fnId)
+      assert(fdAcc.params.size == 1)
+      val tpMap = instantiation(fdAcc.params.head.tpe, fdUnapply.returnType)
+        .getOrElse(sys.error("Unapply pattern failed type instantiation"))
+      val typedFd = fdAcc.typed(fdAcc.typeArgs map tpMap)
+
+      val accInvocSig = mkFunInvoc(typedFd.id, typedFd.tps, Seq(unapplyInvoc))
+      codeOfSig(accInvocSig, typedFd.returnType)
+    }
 
     val isUnapplyFlag = fdUnapply.flags.collectFirst {
       case f@IsUnapply(_, _) => f
     }.getOrElse(sys.error("Oh non, on nous a menti encore une fois :("))
 
-    val fdGet = getFunction(isUnapplyFlag.get)
-    assert(fdGet.params.size == 1)
+    val getInvoc = unapplyAccessor(isUnapplyFlag.get)
+    val isEmptyInvoc = unapplyAccessor(isUnapplyFlag.isEmpty)
+    val nonEmpty = codeOfSig(mkNot(isEmptyInvoc), BoolTy)
 
-    val tpMap = instantiation(fdGet.params.head.tpe, fdUnapply.returnType)
-      .getOrElse(sys.error("Unapply pattern failed type instantiation"))
-    val typedFd = fdGet.typed(fdGet.typeArgs map tpMap)
-
-    val getInvocSig = mkFunInvoc(typedFd.id, typedFd.tps, Seq(unapplyInvoc))
-    val getInvoc = codeOfSig(getInvocSig, typedFd.returnType)
-
-    // TODO: unapplyInvoc et getInvoc à bind
-    typedFd.returnType match {
-      case tt@TupleType(_) => tupleSubscrutinees(getInvoc, tt)
-      case _ => Seq(getInvoc)
+    codeTpe(getInvoc) match {
+      case tt@TupleType(_) =>
+        val subs = tupleSubscrutinees(getInvoc, tt)
+        UnapplySubScruts(unapplyInvoc, getInvoc, subs, nonEmpty)
+      case _ =>
+        // The subpattern is getInvoc itself, as we don't need to de-structure it into a tuple
+        UnapplySubScruts(unapplyInvoc, getInvoc, Seq(getInvoc), nonEmpty)
     }
   }
 
-  def allScrutinees(scrut: Code, pat: LabelledPattern): Seq[Code] = {
+  case class PatBdgsAndConds(ctxs: Ctxs, bdgs: Seq[Code], patConds: Seq[Code])
+
+  def addPatternBindingsAndConds(ctxs: Ctxs, scrut: Code, pat: LabelledPattern)(using env: OEnv): PatBdgsAndConds = {
+    def recHelper(ctxs: Ctxs, subscruts: Seq[Code], subps: Seq[LabelledPattern]): PatBdgsAndConds = {
+      assert(subscruts.size == subps.size)
+      subscruts.zip(subps).foldLeft(PatBdgsAndConds(ctxs, Seq.empty[Code], Seq.empty[Code])) {
+        case (PatBdgsAndConds(ctxs, bdgsAcc, condsAcc), (subscrut, subpat)) =>
+          val PatBdgsAndConds(ctxs2, bdgs2, conds2) = addPatternBindingsAndConds(ctxs.addBoundDef(subscrut), subscrut, subpat)
+          PatBdgsAndConds(ctxs2, bdgsAcc ++ bdgs2, condsAcc ++ conds2)
+      }
+    }
+
+    assert(ctxs.isLitVarOrBoundDef(scrut))
     pat match {
-      case LabelledPattern.Wildcard | LabelledPattern.Lit(_) => Seq(scrut)
+      case LabelledPattern.Wildcard | LabelledPattern.Lit(_) => PatBdgsAndConds(ctxs, Seq.empty, Seq.empty)
+
       case LabelledPattern.ADT(id, tps, subps) =>
-        val subscruts = adtSubscrutinees(scrut, ADTType(id, tps))
-        assert(subscruts.size == subps.size)
-        scrut +: subscruts.zip(subps).flatMap {
-          case (subscrut, subp) => allScrutinees(subscrut, subp)
-        }
+        val subscruts = adtSubScrutinees(scrut, ADTType(id, tps))
+        val adtPatCond = adtMatchCond(scrut, ADTType(id, tps))(using env, ctxs)
+        val PatBdgsAndConds(newCtxs, recBdgs, recPatConds) = recHelper(ctxs, subscruts, subps)
+        assert(ctxs.isPrefixOf(newCtxs))
+        PatBdgsAndConds(newCtxs, subscruts ++ recBdgs, adtPatCond +: recPatConds)
+
       case LabelledPattern.TuplePattern(subps) =>
         val tt@TupleType(bases) = codeTpe(scrut)
         assert(bases.size == subps.size)
         val subscruts = tupleSubscrutinees(scrut, tt)
-        assert(subscruts.size == subps.size)
-        scrut +: subscruts.zip(subps).flatMap {
-          case (subscrut, subp) => allScrutinees(subscrut, subp)
-        }
-      case LabelledPattern.Unapply(recs, id, tps, sub) =>
-        assert(recs.isEmpty)
-        sys.error("Oh non, un Unapply :(")
-    }
-  }
+        val PatBdgsAndConds(newCtxs, recBdgs, recPatConds) = recHelper(ctxs, subscruts, subps)
+        assert(ctxs.isPrefixOf(newCtxs))
+        PatBdgsAndConds(newCtxs, subscruts ++ recBdgs, recPatConds)
 
-  def addScrutineeBindings(scrut: Code, pat: LabelledPattern, ctxs: Ctxs): Ctxs = {
-    allScrutinees(scrut, pat).foldLeft(ctxs) {
-      case (ctxs, scrut) => ctxs.addBoundDef(scrut)
-    }
-  }
-
-  // TODO: Ordre ok???
-  // TODO: Ordre ok???
-  // TODO: Ordre ok???
-  def collectPatternConds(scrut: Code, pat: LabelledPattern, recursive: Boolean)(using env: OEnv, ctxs: Ctxs): Seq[Code] = {
-    assert(ctxs.isLitVarOrBoundDef(scrut))
-
-    def recHelper(subscruts: Seq[Code], subps: Seq[LabelledPattern], patConds: Seq[Code]): Seq[Code] = {
-      assert(subscruts.size == subps.size)
-      subscruts.zip(subps).foldLeft((patConds, ctxs.withConds(patConds))) {
-        case ((acc, ctxs), (subscrut, subpat)) =>
-          val conds2 = collectPatternConds(subscrut, subpat, true)(using env, ctxs)
-          (acc ++ conds2, ctxs.withConds(conds2))
-      }._1
-    }
-
-    pat match {
-      case LabelledPattern.Wildcard | LabelledPattern.Lit(_) => Seq.empty
-      case LabelledPattern.ADT(id, tps, subps) =>
-        val adt = ADTType(id, tps)
-        val tcons = getConstructor(id, tps)
-        assert(tcons.fields.size == subps.size)
-        val patConds = isConstructor(scrut, adt, id) match {
-          case Some(true) => Seq.empty[Code]
-          case Some(false) => return Seq(falseCode) // Cela ne sert à rien de continuer plus loin
-          case None => Seq(codeOfSig(mkIsCtor(scrut, adt, id), BoolTy))
-        }
-        if (recursive) recHelper(adtSubscrutinees(scrut, adt), subps, patConds)
-        else patConds
-      case LabelledPattern.TuplePattern(subps) =>
-        if (recursive) {
-          val tt@TupleType(bases) = codeTpe(scrut)
-          assert(bases.size == subps.size)
-          val subscruts = tupleSubscrutinees(scrut, tt)
-          recHelper(subscruts, subps, Seq.empty)
-        }
-        else Seq.empty
       case LabelledPattern.Unapply(recs, id, tps, subps) =>
         assert(recs.isEmpty)
-        sys.error(s"Does not know how to handle $pat")
+        val unapp = unapplySubScrutinees(scrut, id, tps)
+        // 1. On bind unapply(scrut): Option[...]
+        // 2. On s'assure à ce que l'Option retourné est un Some (avec unapp.patCond)
+        // 3. On bind unapply(scrut).get
+        val ctxs2 = ctxs.addBoundDef(unapp.unapplyInvoc)
+          .withCond(unapp.patCond)
+          .addBoundDef(unapp.getInvoc)
+        val PatBdgsAndConds(newCtxs, recBdgs, recPatConds) = recHelper(ctxs2, unapp.subs, subps)
+        assert(ctxs.isPrefixOf(newCtxs))
+
+        val theseBdgs =
+          if (unapp.subs == Seq(unapp.getInvoc)) Seq(unapp.patCond, unapp.getInvoc) // pour éviter d'avoir 2x unapp.getInvoc dans les subs
+          else Seq(unapp.patCond, unapp.getInvoc) ++ unapp.subs
+
+        PatBdgsAndConds(newCtxs, theseBdgs ++ recBdgs, unapp.patCond +: recPatConds)
     }
   }
+
   //endregion
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
