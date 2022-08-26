@@ -283,100 +283,6 @@ trait OCBSL extends Definitions { ocbsl =>
     def plugged(inCtxs: Ctxs, u: Occurrences, c: Code)(using env: OEnv): (Occurrences, Code, Set[Code]) = {
       assert(inCtxs.isPrefixOf(this))
 
-      def plugCtx(curr: Ctxs, prev: Ctxs, toPlug: Ctx, u: Occurrences, c: Code, inlinedLet: Set[Code]): (Occurrences, Code, Set[Code]) = {
-        if (Thread.interrupted()) throw new InterruptedException("Oh non :(")
-
-        // TODO: Quid si inline dans un lambda mais pas ailleurs "plus loin"???
-        // TODO: Cette histoire de assume(...) en début de lambda????
-        // TODO: Dire qu'ici et pas ailleurs car on ne veut pas remettre des ctxs.addBoundDef pr les lambdas
-        def inlineAppliedLambda(cLam: Code, in: Code): (Occurrences, Code, Set[Code]) = {
-          val Signature(Label.Lambda(params), Seq(body)) = code2sig(cLam)
-          object inliner extends CodeTransformer {
-            override type Extra = Unit
-            // TODO: Test inline lambda dans lambda?
-            override def transformImpl(c: Code, repl: Map[Code, Code], extra: Unit)
-                                      (using env: OEnv, ctxs: Ctxs): CodeRes = code2sig(c) match {
-              case Signature(Label.Application, `cLam` +: args) =>
-                assert(params.size == args.size)
-                inlineLambda(ctxs, params.zip(args), body)
-              case _ => super.transformImpl(c, repl, ())
-            }
-          }
-
-          val inlined = inliner.transform(in, Map.empty, ())(using env, prev)
-          assert(prev.isPrefixOf(inlined.ctxs))
-          val inlinedOcc = occurrencesOf(inlined.terminal)(using env, inlined.ctxs)
-          inlined.ctxs.plugged(prev, inlinedOcc, inlined.terminal)
-        }
-
-        assert(curr.ctxs == prev.ctxs :+ toPlug)
-        assert(u.allSuffixes(curr))
-        /*
-        val uuu0 = occurrencesOf(c)(using env, curr)
-        val uuu = uuu0.withRemovedBindings(inlinedLet)
-        if (u != uuu) {
-          val eq = u.c2u.toSet.intersect(uuu.c2u.toSet)
-          val diff = (u.c2u.toSet ++ uuu.c2u.toSet) -- eq
-          assert(false, "!!! Pas d'égalité")
-        }
-        */
-
-        val (u2, c2, inlinedLet2) = toPlug match {
-          case Ctx.Assumed(_) => (u, c, inlinedLet)
-
-          case Ctx.BoundDef(terminal) =>
-            assert(CodeRes.isTerminal(terminal))
-            assert(!isLitOrVar(terminal))
-            val composition = occurrencesOf(terminal)(using env, prev) // La composition comprend le terminal
-            assert(composition(terminal).isOnce)
-            val compWoTerm = composition - terminal
-            val definitionOccurrence = u(terminal)
-            val bdgCase = needsBinding(terminal, compWoTerm, definitionOccurrence)(using env, prev)
-
-            (bdgCase, definitionOccurrence) match {
-              case (BindingCase.MustBind, _) =>
-                val cLet = codeOfSig(mkLet(terminal, c), codeTpe(c))
-                val u2 = compWoTerm ++ u.setTo(terminal, Occurrence.Once(prev, env.nesting, OccurrenceKind.Expanded))
-                (u2, cLet, inlinedLet)
-              case (BindingCase.Inlinable, Occurrence.Once(_, _, OccurrenceKind.Applied)) if isLambda(terminal) =>
-                inlineAppliedLambda(terminal, c)
-              case _ =>
-                // TODO: Est-ce que c'est si important de se préoccuper de réajuster les occurrences en cas d'inlining???
-                val u2 = definitionOccurrence match {
-                  case Occurrence.Zero => u
-                  case Occurrence.Once(inCtxs, nesting, _) =>
-                    // En gros: on se sert de la definitionOccurrence pour mettre a jour les occurrences des composant du terminal
-                    u ++ compWoTerm.withInlinedOccurrences(inCtxs.withRemovedBinding(terminal), nesting)
-                  case Occurrence.Many =>
-                    // Ce cas se passe pour les x.f1.fnField où l'on les inline au lieu de les bind
-                    u ++ compWoTerm.manyied
-                }
-                // TODO: Dire pk: en gros parce que ce bdg est removed
-                val u3 = u2.withRemovedBinding(terminal)
-                (u3, c, inlinedLet + terminal)
-            }
-
-          case Ctx.AssumeLike(lab, predTerminal) =>
-            assert(CodeRes.isTerminal(predTerminal))
-            assert(prev.isLitVarOrBoundDef(predTerminal))
-            val c2 = codeOfSig(mkAssumeLike(lab, predTerminal, c), codeTpe(c))
-            (u ++ occurrencesOf(predTerminal)(using env, prev), c2, inlinedLet)
-        }
-
-        assert(u2.allSuffixes(prev))
-        /*
-        val uuu20 = occurrencesOf(c2)(using env, prev)
-        val uuu2 = uuu20.withRemovedBindings(inlinedLet2)
-        if (u2 != uuu2) {
-          val eq = u2.c2u.toSet.intersect(uuu2.c2u.toSet)
-          val diff = (u2.c2u.toSet ++ uuu2.c2u.toSet) -- eq
-          assert(false, "!!! Pas d'égalité2")
-        }
-        */
-        (u2, c2, inlinedLet2)
-      }
-
-
       def rec(curr: Ctxs, u: Occurrences, c: Code, inlinedLet: Set[Code]): (Occurrences, Code, Set[Code]) = {
         assert(inCtxs.isPrefixOf(curr))
         assert(curr.isPrefixOf(this))
@@ -384,7 +290,7 @@ trait OCBSL extends Definitions { ocbsl =>
         else {
           assert(curr.ctxs.nonEmpty)
           val (prev, toPlug) = curr.pop.get
-          val (u2, c2, inlinedLet2) = plugCtx(curr, prev, toPlug, u, c, inlinedLet)
+          val (u2, c2, inlinedLet2) = Ctxs.plugCtx(curr, prev, toPlug, u, c, inlinedLet)
           rec(prev, u2, c2, inlinedLet2)
         }
       }
@@ -450,7 +356,113 @@ trait OCBSL extends Definitions { ocbsl =>
   }
 
   object Ctxs {
+    // private val plugCtxsMap = mutable.Map.empty[(Ctxs, Occurrences, Code, OEnv), (Occurrences, Code, Set[Code])]
+
     def empty: Ctxs = new Ctxs(Seq.empty)
+
+    private def plugCtx(curr: Ctxs, prev: Ctxs, toPlug: Ctx, u: Occurrences, c: Code, inlinedLet: Set[Code])
+                       (using env: OEnv): (Occurrences, Code, Set[Code]) = {
+      if (Thread.interrupted()) throw new InterruptedException("Oh non :(")
+
+      /*
+      plugCtxsMap.get((curr, u, c, env)) match {
+        case Some(r) => return r
+        case None => ()
+      }
+      */
+      // TODO: Quid si inline dans un lambda mais pas ailleurs "plus loin"???
+      // TODO: Cette histoire de assume(...) en début de lambda????
+      // TODO: Dire qu'ici et pas ailleurs car on ne veut pas remettre des ctxs.addBoundDef pr les lambdas
+      def inlineAppliedLambda(cLam: Code, in: Code): (Occurrences, Code, Set[Code]) = {
+        val Signature(Label.Lambda(params), Seq(body)) = code2sig(cLam)
+        object inliner extends CodeTransformer {
+          override type Extra = Unit
+
+          // TODO: Test inline lambda dans lambda?
+          override def transformImpl(c: Code, repl: Map[Code, Code], extra: Unit)
+                                    (using env: OEnv, ctxs: Ctxs): CodeRes = code2sig(c) match {
+            case Signature(Label.Application, `cLam` +: args) =>
+              assert(params.size == args.size)
+              inlineLambda(ctxs, params.zip(args), body)
+            case _ => super.transformImpl(c, repl, ())
+          }
+        }
+
+        val inlined = inliner.transform(in, Map.empty, ())(using env, prev)
+        assert(prev.isPrefixOf(inlined.ctxs))
+        val inlinedOcc = occurrencesOf(inlined.terminal)(using env, inlined.ctxs)
+        inlined.ctxs.plugged(prev, inlinedOcc, inlined.terminal)
+      }
+
+      assert(curr.ctxs == prev.ctxs :+ toPlug)
+      assert(u.allSuffixes(curr))
+      /*
+      val uuu0 = occurrencesOf(c)(using env, curr)
+      val uuu = uuu0.withRemovedBindings(inlinedLet)
+      if (u != uuu) {
+        val eq = u.c2u.toSet.intersect(uuu.c2u.toSet)
+        val diff = (u.c2u.toSet ++ uuu.c2u.toSet) -- eq
+        assert(false, "!!! Pas d'égalité")
+      }
+      */
+
+      val (u2, c2, inlinedLet2) = toPlug match {
+        case Ctx.Assumed(_) => (u, c, inlinedLet)
+
+        case Ctx.BoundDef(terminal) =>
+          assert(CodeRes.isTerminal(terminal))
+          assert(!isLitOrVar(terminal))
+          val composition = occurrencesOf(terminal)(using env, prev) // La composition comprend le terminal
+          assert(composition(terminal).isOnce)
+          val compWoTerm = composition - terminal
+          val definitionOccurrence = u(terminal)
+          val bdgCase = needsBinding(terminal, compWoTerm, definitionOccurrence)(using env, prev)
+
+          (bdgCase, definitionOccurrence) match {
+            case (BindingCase.MustBind, _) =>
+              val cLet = codeOfSig(mkLet(terminal, c), codeTpe(c))
+              val u2 = compWoTerm ++ u.setTo(terminal, Occurrence.Once(prev, env.nesting, OccurrenceKind.Expanded))
+              (u2, cLet, inlinedLet)
+            case (BindingCase.Inlinable, Occurrence.Once(_, _, OccurrenceKind.Applied)) if isLambda(terminal) =>
+              inlineAppliedLambda(terminal, c)
+            case _ =>
+              // TODO: Est-ce que c'est si important de se préoccuper de réajuster les occurrences en cas d'inlining???
+              val u2 = definitionOccurrence match {
+                case Occurrence.Zero => u
+                case Occurrence.Once(inCtxs, nesting, _) =>
+                  // En gros: on se sert de la definitionOccurrence pour mettre a jour les occurrences des composant du terminal
+                  u ++ compWoTerm.withInlinedOccurrences(inCtxs.withRemovedBinding(terminal), nesting)
+                case Occurrence.Many =>
+                  // Ce cas se passe pour les x.f1.fnField où l'on les inline au lieu de les bind
+                  u ++ compWoTerm.manyied
+              }
+              // TODO: Dire pk: en gros parce que ce bdg est removed
+              val u3 = u2.withRemovedBinding(terminal)
+              (u3, c, inlinedLet + terminal)
+          }
+
+        case Ctx.AssumeLike(lab, predTerminal) =>
+          assert(CodeRes.isTerminal(predTerminal))
+          assert(prev.isLitVarOrBoundDef(predTerminal))
+          val c2 = codeOfSig(mkAssumeLike(lab, predTerminal, c), codeTpe(c))
+          (u ++ occurrencesOf(predTerminal)(using env, prev), c2, inlinedLet)
+      }
+
+      assert(u2.allSuffixes(prev))
+      /*
+      val uuu20 = occurrencesOf(c2)(using env, prev)
+      val uuu2 = uuu20.withRemovedBindings(inlinedLet2)
+      if (u2 != uuu2) {
+        val eq = u2.c2u.toSet.intersect(uuu2.c2u.toSet)
+        val diff = (u2.c2u.toSet ++ uuu2.c2u.toSet) -- eq
+        assert(false, "!!! Pas d'égalité2")
+      }
+      */
+
+      // plugCtxsMap += (curr, u, c, env) -> (u2, c2, inlinedLet2)
+
+      (u2, c2, inlinedLet2)
+    }
   }
 
   case class CodeRes(terminal: Code, ctxs: Ctxs) {
@@ -766,30 +778,35 @@ trait OCBSL extends Definitions { ocbsl =>
       val ctxs1 = ctxs0.addBoundDef(scrut)
       val subst1 = pat.binder.map(vd => subst0 + (vd.toVariable -> scrut)).getOrElse(subst0)
 
+      def recHelper(subScruts: Seq[Code], subps: Seq[Pattern]): (Seq[LabelledPattern], Ctxs, LetValSubst) = {
+        assert(subScruts.size == subps.size)
+        subScruts.zip(subps).foldLeft((Seq.empty[LabelledPattern], ctxs1, subst1)) {
+          case ((acc, ctxs, subst), (subScrut, subp)) =>
+            val (rsub, ctxs2, subst2) = convertPattern(subScrut, subp, ctxs, subst)
+            (acc :+ rsub, ctxs2, subst2)
+        }
+      }
+
       pat match {
         case WildcardPattern(_) => (LabelledPattern.Wildcard, ctxs1, subst1)
         case LiteralPattern(_, lit) => (LabelledPattern.Lit(lit), ctxs1, subst1)
         case ADTPattern(_, id, tps, subps) =>
           val subScruts = adtSubscrutinees(scrut, ADTType(id, tps))
-          assert(subScruts.size == subps.size)
-          val (rsubs, ctxs2, subst2) = subScruts.zip(subps).foldLeft((Seq.empty[LabelledPattern], ctxs1, subst1)) {
-            case ((acc, ctxs, subst), (subScrut, subp)) =>
-              val (rsub, ctxs2, subst2) = convertPattern(subScrut, subp, ctxs, subst)
-              (acc :+ rsub, ctxs2, subst2)
-          }
+          val (rsubs, ctxs2, subst2) = recHelper(subScruts, subps)
           (LabelledPattern.ADT(id, tps, rsubs), ctxs2, subst2)
         case TuplePattern(_, subps) =>
           val tt@TupleType(_) = codeTpe(scrut)
           val subScruts = tupleSubscrutinees(scrut, tt)
-          assert(subScruts.size == subps.size)
-          val (rsubs, ctxs2, subst2) = subScruts.zip(subps).foldLeft((Seq.empty[LabelledPattern], ctxs1, subst1)) {
-            case ((acc, ctxs, subst), (subScrut, subp)) =>
-              val (rsub, ctxs2, subst2) = convertPattern(subScrut, subp, ctxs, subst)
-              (acc :+ rsub, ctxs2, subst2)
-          }
+          val (rsubs, ctxs2, subst2) = recHelper(subScruts, subps)
           (LabelledPattern.TuplePattern(rsubs), ctxs2, subst2)
         case UnapplyPattern(_, recs, id, tps, subps) =>
+          assert(recs.isEmpty)
           ???
+          /*
+          val subScruts = unapplySubScrutinees(scrut, id, tps)
+          val (rsubs, ctxs2, subst2) = recHelper(subScruts, subps)
+          (LabelledPattern.Unapply(Seq.empty, id, tps, rsubs), ctxs2, subst2)
+          */
       }
     }
 
@@ -937,9 +954,14 @@ trait OCBSL extends Definitions { ocbsl =>
           } else {
             val (_, accPlugged) = acc.selfPlugged(last.ctxs.withNegatedCond(last.terminal))
             val newDisjs = simplifiedDisjunction(Seq(last.terminal, accPlugged))(using env, last.ctxs)
-            val toRm = Seq(last.terminal, accPlugged).filter(c => code2sig(c).label == Label.Or)
+            val toRm = Seq(last.terminal, accPlugged)
+              .filter(c => code2sig(c).label == Label.Or && !(outerCtxs +: init.map(_.ctxs)).exists(_.isBoundDef(c)))
             val ctxs = rmBindings(last.ctxs, toRm).addBoundDef(newDisjs)
             val newAcc = CodeRes(newDisjs, ctxs)
+//            val newInit =
+//              if (toRm.isEmpty) init
+//              else init.map(cr => cr.copy(ctxs = rmBindings(cr.ctxs, toRm)))
+
             val res = combineRec(init, newAcc)
             val noTailRecPls = last.ctxs.addBoundDef(newDisjs)
             res
@@ -2135,7 +2157,9 @@ trait OCBSL extends Definitions { ocbsl =>
         val rsubs = recHelper(tupleSubscrutinees(scrut, tt), subps)
         TuplePattern(bdg, rsubs)
       case LabelledPattern.Lit(lit) => LiteralPattern(bdg, lit)
-      case LabelledPattern.Unapply(recs, id, tps, sub) => ???
+      case LabelledPattern.Unapply(recs, id, tps, sub) =>
+        assert(recs.isEmpty)
+        ???
     }
   }
 
@@ -2550,6 +2574,32 @@ trait OCBSL extends Definitions { ocbsl =>
     tt.bases.zipWithIndex.map { case (base, i) => codeOfSig(mkTupleSelect(scrut, i + 1), base) }
   }
 
+  def unapplySubScrutinees(scrut: Code, id: Identifier, tps: Seq[Type]): Seq[Code] = {
+    val fdUnapply = getFunction(id)
+    val unapplyInvocSig = mkFunInvoc(id, tps, Seq(scrut))
+    val unapplyInvoc = codeOfSig(unapplyInvocSig, fdUnapply.returnType)
+
+    val isUnapplyFlag = fdUnapply.flags.collectFirst {
+      case f@IsUnapply(_, _) => f
+    }.getOrElse(sys.error("Oh non, on nous a menti encore une fois :("))
+
+    val fdGet = getFunction(isUnapplyFlag.get)
+    assert(fdGet.params.size == 1)
+
+    val tpMap = instantiation(fdGet.params.head.tpe, fdUnapply.returnType)
+      .getOrElse(sys.error("Unapply pattern failed type instantiation"))
+    val typedFd = fdGet.typed(fdGet.typeArgs map tpMap)
+
+    val getInvocSig = mkFunInvoc(typedFd.id, typedFd.tps, Seq(unapplyInvoc))
+    val getInvoc = codeOfSig(getInvocSig, typedFd.returnType)
+
+    // TODO: unapplyInvoc et getInvoc à bind
+    typedFd.returnType match {
+      case tt@TupleType(_) => tupleSubscrutinees(getInvoc, tt)
+      case _ => Seq(getInvoc)
+    }
+  }
+
   def allScrutinees(scrut: Code, pat: LabelledPattern): Seq[Code] = {
     pat match {
       case LabelledPattern.Wildcard | LabelledPattern.Lit(_) => Seq(scrut)
@@ -2567,7 +2617,9 @@ trait OCBSL extends Definitions { ocbsl =>
         scrut +: subscruts.zip(subps).flatMap {
           case (subscrut, subp) => allScrutinees(subscrut, subp)
         }
-      case LabelledPattern.Unapply(recs, id, tps, sub) => sys.error("Oh non, un Unapply :(")
+      case LabelledPattern.Unapply(recs, id, tps, sub) =>
+        assert(recs.isEmpty)
+        sys.error("Oh non, un Unapply :(")
     }
   }
 
@@ -2614,6 +2666,7 @@ trait OCBSL extends Definitions { ocbsl =>
         }
         else Seq.empty
       case LabelledPattern.Unapply(recs, id, tps, subps) =>
+        assert(recs.isEmpty)
         sys.error(s"Does not know how to handle $pat")
     }
   }

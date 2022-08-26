@@ -101,7 +101,7 @@ trait VerificationChecker { self =>
     import MainHelpers._
 
     val simplifyVC: Expr => Expr = {
-      if (context.options.findOptionOrDefault(optFullOCBSLSimp)) {
+      if (false && context.options.findOptionOrDefault(optFullOCBSLSimp)) {
         // Note: the class instance is outside of the closure scope to avoid repeated creation instances
         // (so that computation can be preserved across VCs)
         val ocbslSimp = OCBSLSimplifier(trees, symbols, PurityOptions.assumeChecked)
@@ -157,7 +157,7 @@ trait VerificationChecker { self =>
     }.map(_.flatten)
 
     results.map(initMap ++ _).map { res =>
-      println(s"Total time: ${res.values.flatMap(_.time).sum}")
+      println(s"HERE-IS-TOTALTIME ${res.values.flatMap(_.time).sum}")
       res
     }
   }
@@ -366,6 +366,11 @@ trait VerificationChecker { self =>
   protected def debugVC(simplifiedVC: VC, origVC: VC)(using inox.DebugSection): Unit = {
     import stainless.utils.StringUtils.indent
 
+    def exprSize(e: Expr): Long = {
+      val Operator(es, _) = e
+      es.map(exprSize).sum + 1
+    }
+
     if (reporter.isDebugEnabled) {
       if (!reporter.isDebugEnabled(using DebugSectionFullVC)) {
         reporter.debug(prettify(simplifiedVC.condition).asString)
@@ -373,17 +378,17 @@ trait VerificationChecker { self =>
         reporter.whenDebug(DebugSectionFullVC) { debug =>
           println(s"")
           println(s" - Original VC:")
+          val orig = simplifyLets(removeAssertions(origVC.condition))
           // debug(indent(prettify(origVC.condition).asString, 3))
-          println(indent(prettify(simplifyLets(removeAssertions(origVC.condition))).asString, 3))
+          println(indent(prettify(orig).asString, 3))
           println(s"")
           println(s" - Simplified VC:")
           println(indent(prettify(simplifiedVC.condition).asString, 3))
           println(s"")
           println(s" - Vanilla Simplified VC:")
-          val simp = simplifyExpr(
-            simplifyLets(removeAssertions(origVC.condition))
-          )(using PurityOptions.assumeChecked)
+          val simp = simplifyExpr(orig)(using PurityOptions.assumeChecked)
           println(indent(prettify(simp).asString, 3))
+          println(s"HERE-IS-SIZES ${Seq(orig, simplifiedVC.condition, simp).map(exprSize).mkString("     ")}")
           println(s"")
         }
       }
