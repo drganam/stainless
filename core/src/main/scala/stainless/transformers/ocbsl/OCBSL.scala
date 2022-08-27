@@ -55,7 +55,7 @@ trait OCBSL extends Definitions { ocbsl =>
   private val pluggedMap = mutable.Map.empty[(CodeRes, Ctxs, OEnv), (Occurrences, Code)]
   private val unplugMap = mutable.Map.empty[(Code, OEnv), Map[Ctxs, (CodeRes, Occurrences)]]
 
-  private final inline val debug = true
+  private final inline val debug = false
 
   private final inline def assert(cond: => Boolean): Unit =
     inline if (debug) Predef.assert(cond)
@@ -236,7 +236,6 @@ trait OCBSL extends Definitions { ocbsl =>
     lazy val hc: Int = java.util.Objects.hash(ctxs)
     override def hashCode(): Int = hc
 
-    // TODO: Stripped annotation
     lazy val allConds: Seq[Code] = ctxs.foldLeft(Seq.empty[Code]) {
       case (acc, Ctx.AssumeLike(lab, c)) if !lab.isDecreases => acc :+ c
       case (acc, Ctx.Assumed(c)) => acc :+ c
@@ -318,13 +317,7 @@ trait OCBSL extends Definitions { ocbsl =>
       else Ctxs(ctxs :+ Ctx.BoundDef(df))
     }
 
-    def addBoundDefs(dfs: Seq[Code]): Ctxs =
-      dfs.foldLeft(this)((acc, df) => acc.addBoundDef(df))
-
-    // TODO: Stripped annotation
     def withCond(cond: Code): Ctxs = {
-      // TODO: Bind si nécessaire (voir autre branche)
-      // assert(isLitOrVar(cond) || isBoundDef(cond)) // TODO: Non, c'est que pr les Or, if branch etc.
       if (cond == trueCode || allCondsSet.contains(cond)) this
       else Ctxs(ctxs :+ Ctx.Assumed(cond))
     }
@@ -334,19 +327,9 @@ trait OCBSL extends Definitions { ocbsl =>
       withCond(neg)
     }
 
-    // TODO: Stripped annotation
-    def withConds(conds: Seq[Code]): Ctxs = {
+    def withConds(conds: Seq[Code]): Ctxs =
       conds.foldLeft(this)((acc, c) => acc.withCond(c))
-      /*
-      // TODO: Bind si nécessaire (voir autre branche)
-      // assert(conds.forall(c => isLitOrVar(c) || isBoundDef(c))) // TODO: Non, c'est que pr les Or, if branch etc.
-      val toAdd = conds.distinct.filterNot(c => allCondsSet(c) || c == trueCode)
-      if (toAdd.isEmpty) this
-      else Ctxs(ctxs ++ toAdd.map(Ctx.Assumed.apply))
-      */
-    }
 
-    // TODO: Stripped annotation
     def withAssumeLike(kind: Label.AssumeLike, pred: Code): Ctxs = {
       assert(CodeRes.isTerminal(pred))
       assert(isLitVarOrBoundDef(pred))
@@ -467,8 +450,6 @@ trait OCBSL extends Definitions { ocbsl =>
 
   case class CodeRes(terminal: Code, ctxs: Ctxs) {
     assert(CodeRes.isTerminal(terminal), s"Gag: $terminal n'est pas un terminal (est un ${code2sig(terminal)})")
-    // assert(!isLambda(terminal)) // TODO: Non, car comment pourrait on repr. un lambda sans bdg? (= eta expand/inlined)
-    // assert(terminalComposition(terminal).isZero, s"Gag: $terminal (${code2sig(terminal)}) apparait dans $terminalComposition !!!") // TODO: Bah non...
 
     lazy val hc: Int = java.util.Objects.hash(terminal, ctxs)
     override def hashCode(): Int = hc
@@ -503,8 +484,7 @@ trait OCBSL extends Definitions { ocbsl =>
 
   object CodeRes {
     def isTerminal(c: Code): Boolean = code2sig(c) match {
-      // TODO: Ensuring?
-      case Signature(Label.Assume | Label.Assert | Label.Require | Label.Decreases /* | Label.Ensuring*/ | Label.Let, _) => false
+      case Signature(Label.Assume | Label.Assert | Label.Require | Label.Decreases | Label.Let, _) => false
       case _ => true
     }
 
@@ -2404,7 +2384,7 @@ trait OCBSL extends Definitions { ocbsl =>
       assert(ctxs0.isLitVarOrBoundDef(newScrut))
 
       val PatBdgsAndConds(ctxs1, newBdgs, patConds) = addPatternBindingsAndConds(ctxs0, newScrut, matchCase.pattern)
-      val PatBdgsAndConds(_, oldBdgs, _) = addPatternBindingsAndConds(ctxs0, oldScrut, matchCase.pattern)
+      val PatBdgsAndConds(_, oldBdgs, _) = addPatternBindingsAndConds(ctxs0.addBoundDef(oldScrut), oldScrut, matchCase.pattern)
       assert(oldBdgs.size == newBdgs.size)
       val repl = repl0 ++ oldBdgs.zip(newBdgs).toMap
 
