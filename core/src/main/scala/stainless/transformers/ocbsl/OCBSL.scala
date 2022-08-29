@@ -420,7 +420,9 @@ trait OCBSL extends Definitions { ocbsl =>
         val inlined = inliner.transform(in, Map.empty, ())(using env, prev)
         assert(prev.isPrefixOf(inlined.ctxs))
         val inlinedOcc = occurrencesOf(inlined.terminal)(using env, inlined.ctxs)
-        inlined.ctxs.plugged(prev, inlinedOcc, inlined.terminal)
+        val res = inlined.ctxs.plugged(prev, inlinedOcc, inlined.terminal)
+        assert(res._3(inlined.terminal))
+        res
       }
 
       assert(curr.ctxs == prev.ctxs :+ toPlug)
@@ -445,7 +447,7 @@ trait OCBSL extends Definitions { ocbsl =>
           assert(composition(terminal).isOnce)
           val compWoTerm = composition - terminal
           val definitionOccurrence = u(terminal)
-          val bdgCase = needsBinding(terminal, compWoTerm, isPure, u)(using env, prev)
+          val bdgCase = needsBinding(terminal, compWoTerm, isPure, u, inlinedLet)(using env, prev)
 
           (bdgCase, definitionOccurrence) match {
             case (BindingCase.MustBind, _) =>
@@ -524,11 +526,14 @@ trait OCBSL extends Definitions { ocbsl =>
         }
         locally {
           val currEntry = pluggedOccMap.getOrElseUpdate((env, c), mutable.Map.empty)
-          val got = currEntry.get(inCtxs.impureParts).map { expected =>
+          val got = currEntry.get(inCtxs).map { expected =>
             val eq = u2.c2u.toSet.intersect(expected.c2u.toSet)
             val diff = (u2.c2u.toSet ++ expected.c2u.toSet) -- eq
             (expected, eq, diff)
           }
+//          val thirdOne = occurrencesOf(c)(using env, inCtxs)
+//          val eq = u2.c2u.toSet.intersect(thirdOne.c2u.toSet)
+//          val diff = (u2.c2u.toSet ++ thirdOne.c2u.toSet) -- eq
           assert(got.forall(_._1 == u2))
 //          assert(currEntry.get(inCtxs.impureParts).forall(_ == u2))
 
@@ -539,7 +544,7 @@ trait OCBSL extends Definitions { ocbsl =>
 //            (got, eq, diff)
 //          }
 //          assert(got.forall(_._1 == u2))
-          currEntry += inCtxs.impureParts -> u2
+          currEntry += inCtxs -> u2
         }
         (u2, c)
       })
@@ -1467,7 +1472,7 @@ trait OCBSL extends Definitions { ocbsl =>
 
     // TODO: Ok? Après tout, ctxs1 contient les binding et les conds!!!
     // TODO: ou alors: pure sauf s'il y a des unapply, dans ce cas on check fnpurity des unapply
-    if (caseConds.forall(c => codePurity(c).isPure)) {
+    if (caseConds.forall(c => codePurity(c).isPure)) { // TODO: v v v Faux v v v ça doit etre "implied"
       val caseCondsConj = conjunct(ctxs1.allConds ++ caseConds)
       if (caseCondsConj == trueCode) SimplifiedCase.Covered(rhsCtxs, guardComp ++ bodyComp)
       else if (caseCondsConj == falseCode) SimplifiedCase.Unreachable
@@ -1773,7 +1778,7 @@ trait OCBSL extends Definitions { ocbsl =>
     case _ => false
   }
 
-  def needsBinding(terminal: Code, terminalComposition: Occurrences, terminalIsPure: Boolean, bodyOccurrences: Occurrences)(using env: OEnv, prefix: Ctxs): BindingCase = {
+  def needsBinding(terminal: Code, terminalComposition: Occurrences, terminalIsPure: Boolean, bodyOccurrences: Occurrences, inlinedLets: Set[Code])(using env: OEnv, prefix: Ctxs): BindingCase = {
     assert(!isLitOrVar(terminal))
     assert(!prefix.isBoundDef(terminal))
 
@@ -1786,7 +1791,7 @@ trait OCBSL extends Definitions { ocbsl =>
           definitionOccurrence match {
             case Occurrence.Many =>
               codeTpe(terminal) match {
-                case FunctionType(_, _) if isVarOrSelector(terminal) => BindingCase.Inlinable
+                case FunctionType(_, _) if !isLambda(terminal) && isVarOrSelector(terminal) => BindingCase.Inlinable
                 case _ => BindingCase.MustBind
               }
             case Occurrence.Zero =>
@@ -1816,14 +1821,15 @@ trait OCBSL extends Definitions { ocbsl =>
                   case Ctx.Assumed(_) | Ctx.AssumeLike(_, _) => false // Condition supplémentaire; donc impure
                   case Ctx.BoundDef(extra, _, pure) =>
                     assert(!pure)
-                    val extraOccurrences = bodyOccurrences(extra)
-                    extraOccurrences match {
-                      case Occurrence.Many | Occurrence.Zero => false // `extra` est bound, donc l'apparition du terminal concerné "crosses" ce binding, on ne peut donc inline le terminal
-                      case Occurrence.Once(extraInCtxs, extraNesting, _) =>
-                        // TODO: Applied vs expanded?
-                        assert(inCtxs.isPrefixOf(extraInCtxs))
-                        extraNesting.level == occurrenceNesting.level // Si `extra` apparait à un autre nesting, il sera bound et on a le même cas que le dessus
-                    }
+//                    val extraOccurrences = bodyOccurrences(extra)
+                    inlinedLets(extra)
+//                    extraOccurrences match {
+//                      case Occurrence.Many | Occurrence.Zero => false // `extra` est bound, donc l'apparition du terminal concerné "crosses" ce binding, on ne peut donc inline le terminal
+//                      case Occurrence.Once(extraInCtxs, extraNesting, _) =>
+//                        // TODO: Applied vs expanded?
+//                        assert(inCtxs.isPrefixOf(extraInCtxs))
+//                        extraNesting.level == occurrenceNesting.level // Si `extra` apparait à un autre nesting, il sera bound et on a le même cas que le dessus
+//                    }
                 }
               }
 
@@ -1893,10 +1899,13 @@ trait OCBSL extends Definitions { ocbsl =>
     if (ctxs.isBoundDef(c)) Occurrences.of(c)
     else if (!CodeRes.isTerminal(c)) {
       val entries = pluggedOccMap.getOrElse((env, c), sys.error("Oh non :("))
-      entries.getOrElse(ctxs.impureParts, {
+      entries.getOrElse(ctxs, {
 //        val (prefix, occ) = entries.head // N'importe quelle entry
 //        occ.withReplacedPrefix(prefix, ctxs.impureParts)
-        sys.error("Oh non, y a rien :(")
+//        sys.error("Oh non, y a rien :(")
+        val teared = tearDown(c)
+        val (occ, plugged) = teared.selfPlugged(ctxs)
+        occ
       })
     } else {
       code2sig(c) match {
@@ -2532,12 +2541,29 @@ trait OCBSL extends Definitions { ocbsl =>
     def tryFoldPatternConditions(patConds: Seq[Code], acc: T, extra: Extra)(using OEnv, Ctxs): Either[E, T]
   }
 
-  object idTransformer extends CodeTransformer {
-    override type Extra = Unit
-  }
-
   // TODO: Use unplugMap if we can do so!
-  def tearDown(c: Code)(using OEnv, Ctxs): CodeRes = idTransformer.transform(c, Map.empty, ())
+  def tearDown(c: Code)(using env: OEnv, ctxs: Ctxs): CodeRes = {
+
+    object tear extends CodeTransformer {
+      override type Extra = Unit
+
+      override def transformImpl(c: Code, repl: Map[Code, Code], extra: Extra)(using env: OEnv, ctxs: Ctxs): CodeRes = code2sig(c) match {
+        case Signature(Label.Or, first +: _) =>
+          val firstTeared = transform(first, repl, ())
+          CodeRes(c, Occurrences.empty, firstTeared.ctxs.addBoundDef(c))
+        case Signature(Label.IfExpr, Seq(cond, _, _)) =>
+          val condTeared = transform(cond, repl, ())
+          CodeRes(c, Occurrences.empty, condTeared.ctxs.addBoundDef(c))
+        case Signature(_: (Label.Ensuring.type | Label.LambdaLike), _) => CodeRes(c, Occurrences.empty, ctxs.addBoundDef(c))
+        case Signature(Label.MatchExpr(_), scrut +: _) =>
+          val scrutTeared = transform(scrut, repl, ())
+          CodeRes(c, Occurrences.empty, scrutTeared.ctxs.addBoundDef(c))
+        case _ => super.transformImpl(c, repl, ())
+      }
+    }
+    unplugged(c).map(_._1)
+      .getOrElse(tear.transform(c, Map.empty, ()))
+  }
 
   //endregion
 
