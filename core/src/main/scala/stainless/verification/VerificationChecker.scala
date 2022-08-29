@@ -5,7 +5,7 @@ package verification
 
 import inox.Options
 import inox.solvers._
-import stainless.transformers.OCBSLSimplifier
+import stainless.transformers.LatticesSimplifier
 
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 import scala.util.{Failure, Success}
@@ -15,7 +15,7 @@ import scala.collection.mutable
 object optFailEarly extends inox.FlagOptionDef("fail-early", false)
 object optFailInvalid extends inox.FlagOptionDef("fail-invalid", false)
 object optVCCache extends inox.FlagOptionDef("vc-cache", true)
-object optFullOCBSLSimp extends inox.FlagOptionDef("full-ocbsl", true) // TODO: Set default to false once done
+object optOCBSLSimp extends inox.FlagOptionDef("ocbsl", true) // TODO: Set default to false once done
 
 object DebugSectionVerification extends inox.DebugSection("verification")
 object DebugSectionFullVC extends inox.DebugSection("full-vc")
@@ -101,10 +101,10 @@ trait VerificationChecker { self =>
     import MainHelpers._
 
     val simplifyVC: Expr => Expr = {
-      if (context.options.findOptionOrDefault(optFullOCBSLSimp)) {
+      if (context.options.findOptionOrDefault(optOCBSLSimp)) {
         // Note: the class instance is outside of the closure scope to avoid repeated creation instances
         // (so that computation can be preserved across VCs)
-        val ocbslSimp = OCBSLSimplifier(trees, symbols, PurityOptions.assumeChecked)
+        val ocbslSimp = LatticesSimplifier(trees, symbols, PurityOptions.assumeChecked)
         (e: Expr) => ocbslSimp.simplify(
           simplifyLets(removeAssertions(e)))
       } else {

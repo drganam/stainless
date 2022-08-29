@@ -1,6 +1,6 @@
 package stainless
 package transformers
-package ocbsl
+package lattices
 
 import inox.solvers
 
