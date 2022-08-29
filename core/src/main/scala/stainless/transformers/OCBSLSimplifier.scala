@@ -19,7 +19,7 @@ trait OCBSLSimplifier { self =>
 
   private val vcNum: AtomicInteger = new AtomicInteger(0)
 
-  val poi = 84
+  val poi = 142
 
   def simplify(e: Expr): Expr = {
 //    if (vcNum.get() < poi) {
