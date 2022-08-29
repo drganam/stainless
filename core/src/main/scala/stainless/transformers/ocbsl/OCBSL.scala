@@ -263,6 +263,8 @@ trait OCBSL extends Definitions { ocbsl =>
     private val impurePartsCache = mutable.Map.empty[OEnv, Ctxs]
 
     def impureParts(using env: OEnv): Ctxs = {
+      if (env.forceBinding) return this
+
       impurePartsCache.getOrElseUpdate(env, {
         Ctxs(ctxs.foldLeft((Seq.empty[Ctx], Seq.empty[Ctx])) {
           case ((prevCtxs, impureCtxs), assm@(Ctx.Assumed(_) | Ctx.AssumeLike(_, _))) => (prevCtxs :+ assm, impureCtxs :+ assm)
@@ -367,11 +369,6 @@ trait OCBSL extends Definitions { ocbsl =>
       assert(CodeRes.isTerminal(df))
       if (isLitOrVar(df) || isBoundDef(df)) this
       else {
-//        val composition = composition0
-//        val expected = occurrencesOf(df)(using env, this)
-//        val eq = composition.c2u.toSet.intersect(expected.c2u.toSet)
-//        val diff = (composition.c2u.toSet ++ expected.c2u.toSet) -- eq
-//        assert(composition == expected)
         Ctxs(ctxs :+ Ctx.BoundDef(df))
       }
     }
