@@ -1481,10 +1481,10 @@ trait OCBSL extends Definitions { ocbsl =>
 
     // TODO: Ok? Après tout, ctxs1 contient les binding et les conds!!!
     // TODO: ou alors: pure sauf s'il y a des unapply, dans ce cas on check fnpurity des unapply
-    if (caseConds.forall(c => codePurity(c).isPure)) { // TODO: v v v Faux v v v ça doit etre "implied"
-      val caseCondsConj = conjunct(ctxs1.allConds ++ caseConds)
-      if (caseCondsConj == trueCode) SimplifiedCase.Covered(rhsCtxs, guardComp ++ bodyComp)
-      else if (caseCondsConj == falseCode) SimplifiedCase.Unreachable
+    if (caseConds.forall(c => codePurity(c).isPure)) {
+      given Ctxs = ctxs1
+      if (implied(trueCode)) SimplifiedCase.Covered(rhsCtxs, guardComp ++ bodyComp)
+      else if (implied(falseCode)) SimplifiedCase.Unreachable
       else unchanged
     } else unchanged
   }
