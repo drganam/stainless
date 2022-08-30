@@ -121,7 +121,7 @@ trait Common extends Definitions { ocbsl =>
   }
 
   case class Occurrences(c2u: Map[Code, Occurrence]) {
-    def hasLambda: Boolean = c2u.keys.exists(c => code2sig(c).label.isLambda)
+    def hasLambda: Boolean = c2u.keys.exists(isLambda)
 
     def apply(c: Code): Occurrence = c2u.getOrElse(c, Occurrence.Zero)
 
@@ -180,7 +180,7 @@ trait Common extends Definitions { ocbsl =>
     def empty: Occurrences = Occurrences(Map.empty)
 
     def of(c: Code)(using env: Env, ctxs: Ctxs): Occurrences = {
-      if (code2sig(c).label.isLiteral) Occurrences.empty
+      if (isLit(c)) Occurrences.empty
       else {
         val impures = ctxs.impureParts
         Occurrences(Map(c -> Occurrence.Once(impures, env.nesting, OccurrenceKind.Expanded)))
@@ -496,7 +496,6 @@ trait Common extends Definitions { ocbsl =>
 
   case class CodeRes(terminal: Code, ctxs: Ctxs) {
     assert(CodeRes.isTerminal(terminal), s"Gag: $terminal n'est pas un terminal (est un ${code2sig(terminal)})")
-//    assert(code2sig(terminal).label.isLiteral || composition(terminal).isOnce)
 
     lazy val hc: Int = java.util.Objects.hash(terminal, ctxs)
     override def hashCode(): Int = hc
@@ -913,7 +912,45 @@ trait Common extends Definitions { ocbsl =>
 
   def implied(rhs: Code)(using env: Env, ctxs: Ctxs): Boolean
 
-  def simplifiedDisjunction(disj: Seq[Code], polarity: Boolean)(using Env, Ctxs): Code
+  def doSimplifyDisjunction(disj0: Seq[Code])(using Env, Ctxs): Seq[Code]
+
+  def checkForContradiction(disjs: Seq[Code], polarity: Boolean)(using Env, Ctxs): Option[Int]
+
+  final def simplifiedDisjunction(disj0: Seq[Code], polarity: Boolean)(using Env, Ctxs): Code = {
+    assert(disj0.forall(c => codeTpe(c) == BoolTy))
+    val disjs1 = unOrCodes(disj0).filter(_ != falseCode).distinct
+    val disjs2 = doSimplifyDisjunction(disjs1)
+    val simp = {
+      if (disjs2.isEmpty) falseCode
+      else if (disjs2.size == 1) disjs2.head
+      else {
+        val lastKeptIx = Some(disjs2.indexOf(trueCode)).filter(_ >= 0)
+          .orElse(checkForContradiction(disjs2, polarity))
+          .getOrElse(disjs2.length - 1)
+
+        if (lastKeptIx == disjs2.length - 1 && disjs2.last != trueCode) {
+          // Nothing simplified, so just make the disjunction and return
+          // TODO: Sort if "truly pure" and not pure due to binding!
+          // val disjs2 = if (purities.forall(_.isPure)) disjs1.sorted else disjs1
+          codeOfSig(mkOr(disjs2), BoolTy)
+        } else {
+          // Due to short-circuiting, once the disjunction evaluates to true, the remaining disjuncts won't ever be evaluated
+          // so it is safe to drop them -- including impure expressions.
+          val disjs3 = disjs2.take(lastKeptIx + 1)
+          val disjs3Purities = disjs3.map(codePurity)
+          // TODO: Pureté imprécise! Il faudrait accumuler les disjs
+          if (disjs3Purities.forall(_.isPure)) trueCode
+          else {
+            // Add a trailing `true` if not already present (because the disjunction will evaluate to true,
+            // but due to the presence of impure expressions, we are not allowed to simplify the whole expr to true
+            val disjs4 = if (disjs3.contains(trueCode)) disjs3 else disjs3 :+ trueCode
+            codeOfSig(mkOr(disjs4), BoolTy)
+          }
+        }
+      }
+    }
+    if (polarity) simp else negCodeOf(simp)
+  }
 
   final def tryFoldLeftDisjunction[E, T](disjs: Seq[Code], init: T)
                                         (f: Ctxs ?=> (T, Code) => Either[E, T])
@@ -1008,10 +1045,10 @@ trait Common extends Definitions { ocbsl =>
     code2sig(c) match {
       case Signature(Label.Not, Seq(cc)) => cc
       case Signature(Label.Lit(BooleanLiteral(b)), Seq()) => b2c(!b)
-      case Signature(Label.LessThan, Seq(lhs, rhs)) if invertSigns(c, lhs, rhs) => codeOfSig(mkGreaterEquals(lhs, rhs), BoolTy)
-      case Signature(Label.GreaterEquals, Seq(lhs, rhs)) if invertSigns(c, lhs, rhs) => codeOfSig(mkLessThan(lhs, rhs), BoolTy)
-      case Signature(Label.GreaterThan, Seq(lhs, rhs)) if invertSigns(c, lhs, rhs) => codeOfSig(mkLessEquals(lhs, rhs), BoolTy)
-      case Signature(Label.LessEquals, Seq(lhs, rhs)) if invertSigns(c, lhs, rhs) => codeOfSig(mkGreaterThan(lhs, rhs), BoolTy)
+      case LtSig(lhs, rhs) if invertSigns(c, lhs, rhs) => codeOfSig(mkGreaterEquals(lhs, rhs), BoolTy)
+      case GeqSig(lhs, rhs) if invertSigns(c, lhs, rhs) => codeOfSig(mkLessThan(lhs, rhs), BoolTy)
+      case GtSig(lhs, rhs) if invertSigns(c, lhs, rhs) => codeOfSig(mkLessEquals(lhs, rhs), BoolTy)
+      case LeqSig(lhs, rhs) if invertSigns(c, lhs, rhs) => codeOfSig(mkGreaterThan(lhs, rhs), BoolTy)
       case _ =>
         // TODO: Push la négation pour IfExpr et MatchExpr
         if (CodeRes.isTerminal(c)) codeOfSig(mkNot(c), BoolTy)
@@ -2503,6 +2540,41 @@ trait Common extends Definitions { ocbsl =>
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
   //region Misc
+
+  object EqSig {
+    def unapply(sig: Signature): Option[(Code, Code)] = sig match {
+      case Signature(Label.Equals, Seq(lhs, rhs)) => Some((lhs, rhs))
+      case _ => None
+    }
+  }
+
+  object LeqSig {
+    def unapply(sig: Signature): Option[(Code, Code)] = sig match {
+      case Signature(Label.LessEquals, Seq(lhs, rhs)) => Some((lhs, rhs))
+      case _ => None
+    }
+  }
+
+  object LtSig {
+    def unapply(sig: Signature): Option[(Code, Code)] = sig match {
+      case Signature(Label.LessThan, Seq(lhs, rhs)) => Some((lhs, rhs))
+      case _ => None
+    }
+  }
+
+  object GeqSig {
+    def unapply(sig: Signature): Option[(Code, Code)] = sig match {
+      case Signature(Label.GreaterEquals, Seq(lhs, rhs)) => Some((lhs, rhs))
+      case _ => None
+    }
+  }
+
+  object GtSig {
+    def unapply(sig: Signature): Option[(Code, Code)] = sig match {
+      case Signature(Label.GreaterThan, Seq(lhs, rhs)) => Some((lhs, rhs))
+      case _ => None
+    }
+  }
 
   final def isPrefixOf[T](lhs: Seq[T], rhs: Seq[T]): Boolean =
     lhs.size <= rhs.size && lhs.zip(rhs).forall { case (l, r) => l == r }

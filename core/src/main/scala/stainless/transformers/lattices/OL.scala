@@ -11,7 +11,7 @@ trait OL extends Common {
   import Purity._
   import scala.collection.mutable
 
-  private val leqCache = mutable.Map.empty[(Code, Code), Boolean]
+  private val leqCache = mutable.Map.empty[(Env, Ctxs, Code, Code), Boolean]
 
   override final def implied(rhs: Code)(using env: Env, ctxs: Ctxs): Boolean = {
     if (rhs == trueCode) true
@@ -22,64 +22,54 @@ trait OL extends Common {
     }
   }
 
-  // TODO: Unored?
   final def latticesLeq(lhs: Code, rhs: Code)(using env: Env, ctxs: Ctxs): Boolean = {
     if (lhs == rhs) true
-    // TODO: Le cache
-    else leqCache.getOrElseUpdate((lhs, rhs), (code2sig(lhs), code2sig(rhs)) match {
+    else leqCache.getOrElseUpdate((env, ctxs, lhs, rhs), (code2sig(lhs), code2sig(rhs)) match {
       case (BoolLitSig(b), _) => !b
       case (_, BoolLitSig(b)) => b
-      case (VarSig(v1, polarity1), VarSig(v2, polarity2)) =>
-        v1 == v2 && polarity1 == polarity2
       case (_, OrSig(disjs, false)) =>
         disjs.forall(d => latticesLeq(lhs, negCodeOf(d)))
       case (OrSig(disjs, true), _) =>
         disjs.forall(latticesLeq(_, rhs))
-      case (OrSig(disjs, false), VarSig(_, _)) =>
-        disjs.exists(c => latticesLeq(negCodeOf(c), rhs))
       case (OrSig(disjs1, false), OrSig(disjs2, true)) =>
         disjs1.exists(c => latticesLeq(negCodeOf(c), rhs)) || disjs2.exists(c => latticesLeq(lhs, c))
-      // TODO: <= < >= > ==
+      case (OrSig(disjs, false), _) =>
+        disjs.exists(c => latticesLeq(negCodeOf(c), rhs))
+      case (EqSig(lhs1, rhs1), LeqSig(lhs2, rhs2)) => lhs1 == lhs2 && rhs1 == rhs2
+      case (EqSig(lhs1, rhs1), GeqSig(lhs2, rhs2)) => lhs1 == lhs2 && rhs1 == rhs2
+      case (LtSig(lhs1, rhs1), LeqSig(lhs2, rhs2)) => lhs1 == lhs2 && rhs1 == rhs2
+      case (GtSig(lhs1, rhs1), GeqSig(lhs2, rhs2)) => lhs1 == lhs2 && rhs1 == rhs2
       case _ => false
     })
   }
 
-  override final def simplifiedDisjunction(disjs: Seq[Code], polarity: Boolean)(using Env, Ctxs): Code = {
-    val flattened = disjs.flatMap(c => code2sig(c) match {
-      case OrSig(disjs2, true) => disjs2
-      case _ => Seq(c)
-    })
-
+  override final def doSimplifyDisjunction(disjs: Seq[Code])(using Env, Ctxs): Seq[Code] = {
     def rec(remaining: Seq[Code], accepted: Seq[Code]): Seq[Code] = remaining match {
       case Seq() => accepted
       case current +: rest =>
         val accept = (!remaining.exists(e => latticesLeq(current, e)) &&
           !accepted.exists(e => latticesLeq(current, e))) ||
+          // TODO: Pureté imprécise! Il faudrait accumuler les disjs
           !codePurity(current).isPure
         rec(rest, if (accept) accepted :+ current else accepted)
     }
 
-    val accepted = rec(flattened, Seq.empty)
-    accepted match {
-      case Seq() => b2c(!polarity)
-      case Seq(single) => if (polarity) single else negCodeOf(single)
-      case _ =>
-        val disjs2 = codeOfSig(mkOr(accepted), BoolTy)
-        ???
-//        if (checkForContradiction2(disjs2, accepted)) b2c(polarity)
-//        else if (polarity) disjs2
-//        else negCodeOf(disjs2)
-    }
+    rec(disjs, Seq.empty)
   }
 
-  final def checkForContradiction2(disjCode: Code, disjs: Seq[Code], polarity: Boolean)(using Env, Ctxs): Boolean = {
-    assert(code2sig(disjCode) == Signature(Label.Or, disjs))
-    if (polarity) {
-      val shadowChildren = disjs map negCodeOf
-      shadowChildren.exists(sc => latticesLeq(sc, disjCode))
-    } else {
-      disjs.exists(c => latticesLeq(disjCode, c))
+  override def checkForContradiction(disjs: Seq[Code], polarity: Boolean)(using Env, Ctxs): Option[Int] = {
+    assert(disjs.size >= 2)
+    val disjCode = codeOfSig(mkOr(disjs), BoolTy)
+    val ix = {
+      if (polarity) {
+        val shadowChildren = disjs map negCodeOf
+        shadowChildren.indexWhere(sc => latticesLeq(sc, disjCode))
+      } else {
+        val disjNegCode = negCodeOf(disjCode) // Car polarity inversé, donc c'est la négation qu'on passe
+        disjs.indexWhere(c => latticesLeq(disjNegCode, c))
+      }
     }
+    if (ix < 0) None else Some(ix)
   }
 
   object NegSig {
@@ -117,7 +107,6 @@ trait OL extends Common {
       case _ => None
     }
   }
-
 }
 
 object OL {

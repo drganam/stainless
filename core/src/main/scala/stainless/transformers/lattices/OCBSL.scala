@@ -21,42 +21,9 @@ trait OCBSL extends Common {
     }
   }
 
-  override final def simplifiedDisjunction(disj0: Seq[Code], polarity: Boolean)(using Env, Ctxs): Code = {
-    assert(disj0.forall(c => codeTpe(c) == BoolTy))
-    val disj = unOrCodes(disj0)
-    val disjs1 = disj.filter(_ != falseCode).distinct
-    val simp = {
-      if (disjs1.isEmpty) falseCode
-      else if (disjs1.size == 1) disjs1.head
-      else {
-        val lastKeptIx = Some(disjs1.indexOf(trueCode)).filter(_ >= 0)
-          .orElse(checkForContradiction(disjs1))
-          .getOrElse(disjs1.length - 1)
+  override final def doSimplifyDisjunction(disj0: Seq[Code])(using Env, Ctxs): Seq[Code] = disj0
 
-        if (lastKeptIx == disjs1.length - 1 && disjs1.last != trueCode) {
-          // Nothing simplified, so just make the disjunction and return
-          // TODO: Sort if "truly pure" and not pure due to binding!
-          // val disjs2 = if (purities.forall(_.isPure)) disjs1.sorted else disjs1
-          codeOfSig(mkOr(disjs1), BoolTy)
-        } else {
-          // Due to short-circuiting, once the disjunction evaluates to true, the remaining disjuncts won't ever be evaluated
-          // so it is safe to drop them -- including impure expressions.
-          val disjs2 = disjs1.take(lastKeptIx + 1)
-          val disjs2Purities = disjs2.map(codePurity)
-          if (disjs2Purities.forall(_.isPure)) trueCode
-          else {
-            // Add a trailing `true` if not already present (because the disjunction will evaluate to true,
-            // but due to the presence of impure expressions, we are not allowed to simplify the whole expr to true
-            val disjs3 = if (disjs2.contains(trueCode)) disjs2 else disjs2 :+ trueCode
-            codeOfSig(mkOr(disjs3), BoolTy)
-          }
-        }
-      }
-    }
-    if (polarity) simp else negCodeOf(simp)
-  }
-
-  final def checkForContradiction(disjs0: Seq[Code]): Option[Int] = {
+  override final def checkForContradiction(disjs0: Seq[Code], polarityUnused: Boolean)(using Env, Ctxs): Option[Int] = {
     // Convert a >= b and a > b to !(a < b) and !(a <= b) respectively.
     // This will ease the work of for the rest of the fn.
     // Assumes that disjs is normalized (i.e. we have `a` instead of !!a, a <= b instead of !(a > b) etc.)
@@ -66,10 +33,10 @@ trait OCBSL extends Common {
     def denormalize(disjs: Seq[Code]): Seq[Code] = {
       disjs.map { c =>
         code2sig(c) match {
-          case Signature(Label.GreaterEquals, Seq(a, b)) =>
+          case GeqSig(a, b) =>
             val lt = codeOfSig(mkLessThan(a, b), BoolTy)
             codeOfSig(mkNot(lt), BoolTy)
-          case Signature(Label.GreaterThan, Seq(a, b)) =>
+          case GtSig(a, b) =>
             val leq = codeOfSig(mkLessEquals(a, b), BoolTy)
             codeOfSig(mkNot(leq), BoolTy)
           case _ => c
@@ -108,8 +75,8 @@ trait OCBSL extends Common {
         if (found) Some(disjs.length - 1) else None
     }
   }
-
 }
+
 object OCBSL {
   def apply(t: ast.Trees, s: t.Symbols, opts: solvers.PurityOptions): OCBSL{val trees: t.type; val symbols: s.type} = {
     class Impl(override val trees: t.type, override val symbols: s.type, override val opts: solvers.PurityOptions) extends OCBSL
