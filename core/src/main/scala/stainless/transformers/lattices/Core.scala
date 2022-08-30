@@ -1380,8 +1380,10 @@ trait Core extends Definitions { ocbsl =>
     // TODO: ou alors: pure sauf s'il y a des unapply, dans ce cas on check fnpurity des unapply
     if (caseConds.forall(c => codePurity(c).isPure)) {
       given Ctxs = ctxs1
-      if (implied(trueCode)) SimplifiedCase.Covered(rhsCtxs, guardComp ++ bodyComp)
-      else if (implied(falseCode)) SimplifiedCase.Unreachable
+      val caseCondsConj = conjunct(caseConds)
+      lazy val negCondsConj = negatedConjunction(caseConds)
+      if (implied(caseCondsConj)) SimplifiedCase.Covered(rhsCtxs, guardComp ++ bodyComp)
+      else if (implied(negCondsConj)) SimplifiedCase.Unreachable
       else unchanged
     } else unchanged
   }

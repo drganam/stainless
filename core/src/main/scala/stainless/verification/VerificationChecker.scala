@@ -105,6 +105,9 @@ trait VerificationChecker { self =>
       val useOCBSL = context.options.findOptionOrDefault(optOCBSLSimp)
       val useOL = context.options.findOptionOrDefault(optOLSimp)
       if (useOCBSL || useOL) {
+        if (useOCBSL && useOL) {
+          reporter.warning("Both OCBSL and OL are selected, defaulting to OCBSL")
+        }
         // Note: the class instance is outside of the closure scope to avoid repeated creation instances
         // (so that computation can be preserved across VCs)
         val algo = {
