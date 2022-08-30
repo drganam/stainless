@@ -108,13 +108,6 @@ trait OL extends Core {
       case _ => None
     }
   }
-
-  object BoolLitSig {
-    def unapply(sig: Signature): Option[Boolean] = sig match {
-      case Signature(Label.Lit(BooleanLiteral(b)), _) => Some(b)
-      case _ => None
-    }
-  }
 }
 
 object OL {

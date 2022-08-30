@@ -1013,6 +1013,9 @@ trait Core extends Definitions { ocbsl =>
         case Seq() => acc
         case init :+ last =>
           assert(last.ctxs.isPrefixOf(acc.ctxs))
+          assert(init.forall(_.ctxs.isPrefixOf(last.ctxs)))
+          assert(init.forall(i => outerCtxs.isPrefixOf(i.ctxs)))
+
           if (last.terminal == falseCode) {
             // On skip celui-ci (on ne drop pas son ctxs, car il est préfixe de acc par construction de transformRec)
             combineRec(init, acc)
@@ -1038,14 +1041,44 @@ trait Core extends Definitions { ocbsl =>
     val res = combineRec(disjsCodeRes, CodeRes(falseCode, lastCtxs))
     res
   }
+  /*
+  // TODO: Explication
+  def simplifiedDisjunctionAndBound(first: CodeRes, rest: Seq[Code], polarity: Boolean)(using env: Env, outerCtxs: Ctxs): CodeRes = {
+    // TODO: Explication
+    def removeNestedOrBindings(simpDisjs: Seq[Code]): Ctxs = {
+      def rmOrBinding(ctxs: Ctxs, terminal: Code): Ctxs = {
+        assert(code2sig(terminal).label == Label.Or, "Que pour des Or!!!")
+        val prefix0 = ctxs.ctxs.takeWhile {
+          case Ctx.BoundDef(`terminal`) => false
+          case _ => true
+        }
+        if (ctxs.ctxs.size == prefix0.size) ctxs // `terminal` n'est en fait même pas bound, donc rien à retirer
+        else {
+          val prefix = Ctxs(prefix0).addBoundDef(terminal)
+          val occ = ctxs.occurrences(prefix)
+          if (occ(terminal).isZero) ctxs.withRemovedBinding(terminal)
+          else ctxs
+        }
+      }
+      val toRm = simpDisjs.filter(c => code2sig(c).label == Label.Or && !outerCtxs.isBoundDef(c))
+      toRm.foldLeft(first.ctxs)(rmOrBinding)
+    }
 
+    assert(rest.nonEmpty)
+    assert(outerCtxs.isPrefixOf(first.ctxs))
+    val origDisjs = first.terminal +: rest
+    val simpDisjs = simplifiedDisjunction(first.terminal +: rest, polarity)(using env, first.ctxs)
+    val ctxs = removeNestedOrBindings(unOrCode(simpDisjs))
+    CodeRes(simpDisjs, ctxs.addBoundDef(simpDisjs))
+  }
+  */
   final def negCodeOf(c: Code)(using env: Env, ctxs: Ctxs): Code = negCodeOf(c)((_, _, _) => true)
 
   final def negCodeOf(c: Code)(invertSigns: Ctxs ?=> (Code, Code, Code) => Boolean)(using env: Env, ctxs: Ctxs): Code = {
     assert(codeTpe(c) == BoolTy, s"Got ${codeTpe(c)}")
     code2sig(c) match {
       case Signature(Label.Not, Seq(cc)) => cc
-      case Signature(Label.Lit(BooleanLiteral(b)), Seq()) => b2c(!b)
+      case BoolLitSig(b) => b2c(!b)
       case LtSig(lhs, rhs) if invertSigns(c, lhs, rhs) => codeOfSig(mkGreaterEquals(lhs, rhs), BoolTy)
       case GeqSig(lhs, rhs) if invertSigns(c, lhs, rhs) => codeOfSig(mkLessThan(lhs, rhs), BoolTy)
       case GtSig(lhs, rhs) if invertSigns(c, lhs, rhs) => codeOfSig(mkLessEquals(lhs, rhs), BoolTy)
@@ -1090,50 +1123,77 @@ trait Core extends Definitions { ocbsl =>
         // (dans l'équivalent let v = e in body, on se trouve qqpart dans body, et on va simplifier 'v')
         // Dans le cas 1, on utilise le contexte mais sans ce BoundDef
         // Dans le cas 2, on utilise simplement cr.ctxs
-        // TODO: En fait, condCr.ctxs suffit ici?
-        val condCr = cr.ctxs.ctxs match {
+        val (prevCtxs, condCtxs) = cr.ctxs.ctxs match {
           case prevCtxs :+ (bCond@Ctx.BoundDef(cond2)) :+ Ctx.BoundDef(ifExpr2) if cond2 == cond && cr.terminal == ifExpr2 =>
-            CodeRes(cond, Ctxs(prevCtxs :+ bCond))
+            (Ctxs(prevCtxs), Ctxs(prevCtxs :+ bCond))
 
           case prevCtxs :+ Ctx.BoundDef(ifExpr2) if cr.terminal == ifExpr2 =>
             val prevCtxss = Ctxs(prevCtxs)
             assert(prevCtxss.isLitVarOrBoundDef(cond))
-            CodeRes(cond, prevCtxss)
+            (prevCtxss, prevCtxss)
 
           case _ =>
             assert(cr.ctxs.isLitVarOrBoundDef(cond))
-            CodeRes(cond, cr.ctxs)
+            (cr.ctxs, cr.ctxs)
         }
-        val ctxsThen = condCr.ctxs.withCond(cond)
-        val ctxsEls = condCr.ctxs.withNegatedCond(cond)
+        val ctxsForThen = condCtxs.withCond(cond)
+        val ctxsForEls = condCtxs.withNegatedCond(cond)
 
         // TODO: On peut faire des trucs comme ifExpr
         val fstTry: Option[CodeRes] = {
-          // TODO: utiliser plutot implied(trueCode)? -> pas besoin, car devrait deja être simplifié avant
-          // TODO: Pas besoin de la pureté:
+          // Remarque: pas besoin de la pureté:
           //  -Pour cond: car bound
           //  -Pour la branche "morte": car unreachable
           if (cond == trueCode || thenn == els) {
-            val Some((thennCr, _)) = unplugged(thenn)(using env, ctxsThen)
-            assert(ctxsThen.isPrefixOf(thennCr.ctxs))
+            val Some((thennCr, _)) = unplugged(thenn)(using env, ctxsForThen)
+            assert(ctxsForThen.isPrefixOf(thennCr.ctxs))
             Some(thennCr)
           } else if (cond == falseCode) {
-            val Some((elsCr, _)) = unplugged(els)(using env, ctxsEls)
-            assert(ctxsEls.isPrefixOf(elsCr.ctxs))
+            val Some((elsCr, _)) = unplugged(els)(using env, ctxsForEls)
+            assert(ctxsForEls.isPrefixOf(elsCr.ctxs))
             Some(elsCr)
           } else None
         }
         def sndTry: CodeRes = (code2sig(thenn), code2sig(els)) match {
+          case (BoolLitSig(true), BoolLitSig(false)) => CodeRes(cond, condCtxs)
+
+          case (BoolLitSig(false), BoolLitSig(true)) =>
+            val negCond = negCodeOf(cond)(using env, condCtxs)
+            CodeRes(negCond, condCtxs.addBoundDef(negCond))
+          /*
+          case (BoolLitSig(true), _) =>
+            val disjs = simplifiedDisjunction(Seq(cond, els), polarity = true)(using env, condCtxs)
+            ???
+
+          case (_, BoolLitSig(true)) =>
+            val negCond = negCodeOf(cond)(using env, condCtxs)
+            val disjs = simplifiedDisjunction(Seq(negCond, thenn), polarity = true)(using env, condCtxs)
+            ???
+
+          case (BoolLitSig(false), _) =>
+            val negCond = negCodeOf(cond)(using env, condCtxs)
+            val conj = conjunct(Seq(negCond, els))(using env, condCtxs)
+            ???
+
+          case (_, BoolLitSig(false)) =>
+            val conj = conjunct(Seq(cond, thenn))(using env, condCtxs)
+            ???
+          */
           case (Signature(Label.IfExpr, Seq(cond2, thenn2, els2)), _) if els == els2 =>
-            // TODO: Un peu bancal non???
-            val combinedCond = conjunct(Seq(cond, cond2))(using env, condCr.ctxs)
-            val c2 = codeOfSig(mkIfExpr(combinedCond, thenn2, els2), tpe)
-            cr.derived(c2)
+            val combinedCond = conjunct(Seq(cond, cond2))(using env, condCtxs)
+            assert(CodeRes.isTerminal(combinedCond))
+            val newIfCode = codeOfSig(mkIfExpr(combinedCond, thenn2, els2), tpe)
+            CodeRes(newIfCode, condCtxs.addBoundDef(cond2).addBoundDef(combinedCond).addBoundDef(newIfCode))
+
           case (_, Signature(Label.IfExpr, Seq(cond2, thenn2, els2))) if thenn == thenn2 =>
-            // TODO: Un peu bancal non???
-            val combinedCond = simplifiedDisjunction(Seq(cond, cond2), polarity = true)(using env, condCr.ctxs)
-            val c2 = codeOfSig(mkIfExpr(combinedCond, thenn2, els2), tpe)
-            cr.derived(c2)
+            val combinedCond = simplifiedDisjunction(Seq(cond, cond2), polarity = true)(using env, condCtxs)
+            assert(CodeRes.isTerminal(combinedCond))
+            val newIfCode = codeOfSig(mkIfExpr(combinedCond, thenn2, els2), tpe)
+            val combinedCondDisjs = unOrCode(combinedCond)
+            val condsToBind = Seq(cond, cond2).filter(combinedCondDisjs.contains)
+            val newCtxs = condsToBind.foldLeft(prevCtxs)(_.addBoundDef(_)).addBoundDef(combinedCond).addBoundDef(newIfCode)
+            CodeRes(newIfCode, newCtxs)
+
           case _ => cr
         }
         fstTry.getOrElse(sndTry)
@@ -1238,7 +1298,18 @@ trait Core extends Definitions { ocbsl =>
           case Label.LessThan | Label.GreaterThan => falseCode
         }
         if (e1 == e2) cr.derived(resIfEq)
-        else cr
+        else (code2sig(e1), code2sig(e2)) match {
+          case (IntLikeLitSig(b1), IntLikeLitSig(b2)) =>
+            val res = lab match {
+              case Label.Equals => b1 == b2 // should already be taken care of by e1 == e2 above
+              case Label.GreaterEquals => b1 >= b2
+              case Label.LessEquals => b1 <= b2
+              case Label.LessThan => b1 < b2
+              case Label.GreaterThan => b1 > b2
+            }
+            cr.derived(b2c(res))
+          case _ => cr
+        }
 
       case Signature(Label.UMinus, Seq(e)) =>
         code2sig(e) match {
@@ -1246,20 +1317,17 @@ trait Core extends Definitions { ocbsl =>
           case _ => cr
         }
 
-      case Signature(Label.Plus, Seq(e1, e2)) =>
-        if (e1 == zero) cr.derived(e2)
-        else if (e2 == zero) cr.derived(e1)
-        else cr
+      case Signature(lab@(Label.Plus | Label.Times), Seq(e1, e2)) =>
+        cr.derived(simplifyAssocArith(lab, e1, e2))
 
       case Signature(Label.Minus, Seq(e1, e2)) =>
+        assert(codeTpe(e1) == codeTpe(e2))
         if (e1 == e2) cr.derived(zero)
-        else cr
-
-      case Signature(Label.Times, Seq(e1, e2)) =>
-        if (e1 == zero || e2 == zero) cr.derived(zero)
-        else if (e1 == one) cr.derived(e2)
-        else if (e2 == one) cr.derived(e1)
-        else cr
+        else (code2sig(e1), code2sig(e2)) match {
+          case (IntLikeLitSig(i1), IntLikeLitSig(i2)) =>
+            cr.derived(codeOfIntLit(i1 - i2, codeTpe(e1)))
+          case _ => cr
+        }
 
       case Signature(lab@(Label.Division | Label.Remainder | Label.Modulo), Seq(e1, e2)) =>
         val resIfEq = lab match {
@@ -1268,7 +1336,16 @@ trait Core extends Definitions { ocbsl =>
         }
         if (opts.assumeChecked && e2 != zero && e1 == zero) cr.derived(zero)
         else if (opts.assumeChecked && e2 != zero && e1 == e2) cr.derived(resIfEq)
-        else cr
+        else (code2sig(e1), code2sig(e2)) match {
+          case (IntLikeLitSig(i1), IntLikeLitSig(i2)) if i2 != 0 =>
+            val res = lab match {
+              case Label.Division => i1 / i2
+              case Label.Remainder => i1 % i2
+              case Label.Modulo => if (i2 < 0) i1 mod (-i2) else i1 mod i2
+            }
+            cr.derived(codeOfIntLit(res, codeTpe(e1)))
+          case _ => cr
+        }
 
       case Signature(Label.BVNot, Seq(e)) =>
         code2sig(e) match {
@@ -1324,23 +1401,7 @@ trait Core extends Definitions { ocbsl =>
             CodeRes.matchExpr(scrutCr, newCases, tpe)
         }
 
-        /*
-        val ctxs = cr.ctxs.pop match {
-          case Some((prevCtxs, Ctx.BoundDef(term, _, _))) if term == cr.terminal => prevCtxs
-          case _ => cr.ctxs
-        }
-        assert(ctxs.isLitVarOrBoundDef(scrut))
-        simplifyCases(scrut, cases)(using env, ctxs) match {
-          case SimplifiedCases.Empty => sys.error("ah bah là, je sais pas quoi faire...")
-          case SimplifiedCases.ElidableMatchExpr(rhs) => rhs
-          case SimplifiedCases.Cases(newCases) =>
-            val scrutCr = CodeRes()
-            CodeRes.matchExpr(scrut, newCases, tpe)
-            val newMatch = codeOfSig(mkMatchExpr(scrut, newCases.map(_.mc)), tpe)
-            CodeRes(newMatch, ???, ctxs.addBoundDef(newMatch))
-        }
-        */
-      // TODO: Or not etc.
+      // TODO: For Or: call to simplify?
 
       case _ => cr
     }
@@ -1352,6 +1413,45 @@ trait Core extends Definitions { ocbsl =>
       else simp
     }
     else simp
+  }
+
+  final def simplifyAssocArith(op: Label.Plus.type | Label.Times.type, lhs: Code, rhs: Code): Code = {
+    assert(codeTpe(lhs) == codeTpe(rhs))
+    val tpe = codeTpe(lhs)
+    val neutral = if (op == Label.Plus) 0 else 1
+
+    def flatten(c: Code): Seq[Code] = code2sig(c) match {
+      case Signature(`op`, Seq(c1, c2)) => flatten(c1) ++ flatten(c2)
+      case _ => Seq(c)
+    }
+    def cstFold(remaining: Seq[Code], acc: Seq[Code], cst: BigInt): (Seq[Code], BigInt) = remaining match {
+      case Seq() => (acc, cst)
+      case h +: rest => code2sig(h) match {
+        case IntLikeLitSig(c) =>
+          if (op == Label.Plus) cstFold(rest, acc, cst + c)
+          else {
+            if (c == 0) (Seq.empty, 0)
+            else cstFold(rest, acc, cst * c)
+          }
+        case _ => cstFold(rest, acc :+ h, cst)
+      }
+    }
+    def recons(terms0: Seq[Code]): Code = {
+      assert(terms0.nonEmpty)
+      if (terms0.size == 1) terms0.head
+      else {
+        val terms = terms0.sorted
+        val sig = if (op == Label.Plus) mkPlus(terms) else mkTimes(terms)
+        codeOfSig(sig, tpe)
+      }
+    }
+
+    val terms = flatten(lhs) ++ flatten(rhs)
+    val (nonLits, cst) = cstFold(terms, Seq.empty, neutral)
+    lazy val cstCode = codeOfIntLit(cst, tpe)
+    if (nonLits.isEmpty) cstCode
+    else if (cst == neutral) recons(nonLits)
+    else recons(nonLits :+ cstCode)
   }
 
   enum SimplifiedCase {
@@ -1407,7 +1507,11 @@ trait Core extends Definitions { ocbsl =>
         acc match {
           case Seq() => SimplifiedCases.Empty
           case Seq((soleCase, rhsCtxs, _)) => mkElidable(soleCase.rhs, rhsCtxs)
-          case _ => SimplifiedCases.Cases(acc2cases(acc))
+          case (fst, fstCtxs, _) +: rest =>
+            // TODO: Ok? Quid pureté des caseConds?
+            val allSameBodies = rest.forall(_._1.rhs == fst.rhs)
+            if (allSameBodies) mkElidable(fst.rhs, fstCtxs)
+            else SimplifiedCases.Cases(acc2cases(acc))
         }
       case currCase +: rest =>
         simplifyCase(scrut, currCase) match {
@@ -1954,9 +2058,15 @@ trait Core extends Definitions { ocbsl =>
       case Signature(Label.LessEquals, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(LessEquals.apply)
       case Signature(Label.GreaterEquals, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(GreaterEquals.apply)
       case Signature(Label.UMinus, Seq(c)) => uncodeOfArgs(c)(UMinus.apply)
-      case Signature(Label.Plus, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(Plus.apply)
+
+      case Signature(lab@(Label.Plus | Label.Times), terms) =>
+        assert(terms.size >= 2)
+        val recons: (Expr, Expr) => Expr = if (lab == Label.Plus) Plus.apply else Times.apply
+        uncodeOfArgs(terms) { case init :+ e1 :+ e2 =>
+          init.foldRight(recons(e1, e2))(recons)
+        }
+
       case Signature(Label.Minus, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(Minus.apply)
-      case Signature(Label.Times, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(Times.apply)
       case Signature(Label.Division, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(Division.apply)
       case Signature(Label.Remainder, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(Remainder.apply)
       case Signature(Label.Modulo, Seq(c1, c2)) => uncodeOfArgs(c1, c2)(Modulo.apply)
@@ -2543,6 +2653,21 @@ trait Core extends Definitions { ocbsl =>
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
   //region Misc
+
+  object IntLikeLitSig {
+    def unapply(sig: Signature): Option[BigInt] = sig match {
+      case Signature(Label.Lit(bv@BVLiteral(_, _, _)), _) => Some(bv.toBigInt)
+      case Signature(Label.Lit(IntegerLiteral(v)), _) => Some(v)
+      case _ => None
+    }
+  }
+
+  object BoolLitSig {
+    def unapply(sig: Signature): Option[Boolean] = sig match {
+      case Signature(Label.Lit(BooleanLiteral(b)), _) => Some(b)
+      case _ => None
+    }
+  }
 
   object EqSig {
     def unapply(sig: Signature): Option[(Code, Code)] = sig match {

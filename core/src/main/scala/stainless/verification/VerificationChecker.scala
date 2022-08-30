@@ -166,10 +166,7 @@ trait VerificationChecker { self =>
       else Future.successful(processVC(vc))
     }.map(_.flatten)
 
-    results.map(initMap ++ _).map { res =>
-      println(s"HERE-IS-TOTALTIME ${res.values.flatMap(_.time).sum}")
-      res
-    }
+    results.map(initMap ++ _)
   }
 
   /** Check whether the model for the ADT invariant specified by the given (invalid) VC is

@@ -294,8 +294,16 @@ trait Definitions {
   final def mkLessEquals(e1: Code, e2: Code): Signature = Signature(Label.LessEquals, Seq(e1, e2))
   final def mkGreaterEquals(e1: Code, e2: Code): Signature = Signature(Label.GreaterEquals, Seq(e1, e2))
   final def mkUMinus(e: Code): Signature = Signature(Label.UMinus, Seq(e))
+  final def mkPlus(cs: Seq[Code]): Signature = {
+    assert(cs.size >= 2)
+    Signature(Label.Plus, cs)
+  }
   final def mkPlus(e1: Code, e2: Code): Signature = Signature(Label.Plus, Seq(e1, e2))
   final def mkMinus(e1: Code, e2: Code): Signature = Signature(Label.Minus, Seq(e1, e2))
+  final def mkTimes(cs: Seq[Code]): Signature = {
+    assert(cs.size >= 2)
+    Signature(Label.Times, cs)
+  }
   final def mkTimes(e1: Code, e2: Code): Signature = Signature(Label.Times, Seq(e1, e2))
   final def mkDivision(e1: Code, e2: Code): Signature = Signature(Label.Division, Seq(e1, e2))
   final def mkRemainder(e1: Code, e2: Code): Signature = Signature(Label.Remainder, Seq(e1, e2))
