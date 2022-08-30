@@ -27,14 +27,22 @@ trait OL extends Core {
     else leqCache.getOrElseUpdate((env, ctxs, lhs, rhs), (code2sig(lhs), code2sig(rhs)) match {
       case (BoolLitSig(b), _) => !b
       case (_, BoolLitSig(b)) => b
+
       case (_, OrSig(disjs, false)) =>
         disjs.forall(d => latticesLeq(lhs, negCodeOf(d)))
+
       case (OrSig(disjs, true), _) =>
         disjs.forall(latticesLeq(_, rhs))
-      case (OrSig(disjs1, false), OrSig(disjs2, true)) =>
-        disjs1.exists(c => latticesLeq(negCodeOf(c), rhs)) || disjs2.exists(c => latticesLeq(lhs, c))
+
+      case (_, OrSig(disjs, true)) =>
+        disjs.exists(latticesLeq(lhs, _))
+
       case (OrSig(disjs, false), _) =>
         disjs.exists(c => latticesLeq(negCodeOf(c), rhs))
+
+//      case (OrSig(disjs1, false), OrSig(disjs2, true)) =>
+//        disjs1.exists(c => latticesLeq(negCodeOf(c), rhs)) || disjs2.exists(c => latticesLeq(lhs, c))
+
       case (EqSig(lhs1, rhs1), LeqSig(lhs2, rhs2)) => lhs1 == lhs2 && rhs1 == rhs2
       case (EqSig(lhs1, rhs1), GeqSig(lhs2, rhs2)) => lhs1 == lhs2 && rhs1 == rhs2
       case (LtSig(lhs1, rhs1), LeqSig(lhs2, rhs2)) => lhs1 == lhs2 && rhs1 == rhs2
@@ -46,12 +54,12 @@ trait OL extends Core {
   override final def doSimplifyDisjunction(disjs: Seq[Code])(using Env, Ctxs): Seq[Code] = {
     def rec(remaining: Seq[Code], accepted: Seq[Code]): Seq[Code] = remaining match {
       case Seq() => accepted
-      case current +: rest =>
+      case current +: remaining =>
         val accept = (!remaining.exists(e => latticesLeq(current, e)) &&
           !accepted.exists(e => latticesLeq(current, e))) ||
           // TODO: Pureté imprécise! Il faudrait accumuler les disjs
           !codePurity(current).isPure
-        rec(rest, if (accept) accepted :+ current else accepted)
+        rec(remaining, if (accept) accepted :+ current else accepted)
     }
 
     rec(disjs, Seq.empty)
@@ -63,10 +71,10 @@ trait OL extends Core {
     val ix = {
       if (polarity) {
         val shadowChildren = disjs map negCodeOf
-        shadowChildren.indexWhere(sc => latticesLeq(sc, disjCode))
+        shadowChildren.indexWhere(latticesLeq(_, disjCode))
       } else {
         val disjNegCode = negCodeOf(disjCode) // Car polarity inversé, donc c'est la négation qu'on passe
-        disjs.indexWhere(c => latticesLeq(disjNegCode, c))
+        disjs.indexWhere(latticesLeq(disjNegCode, _))
       }
     }
     if (ix < 0) None else Some(ix)

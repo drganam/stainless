@@ -1023,6 +1023,7 @@ trait Core extends Definitions { ocbsl =>
             val toRm = Seq(last.terminal, accPlugged)
               .filter(c => code2sig(c).label == Label.Or && !(outerCtxs +: init.map(_.ctxs)).exists(_.isBoundDef(c)))
             val ctxs1 = rmBindings(last.ctxs, toRm)
+            // TODO: Pas si vite! newDisjs peut très bien retourner un non terminal!
             val newAcc = CodeRes(newDisjs, ctxs1.addBoundDef(newDisjs))
 
             val res = combineRec(init, newAcc)

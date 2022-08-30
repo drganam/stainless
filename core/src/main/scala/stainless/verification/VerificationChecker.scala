@@ -106,13 +106,13 @@ trait VerificationChecker { self =>
       val useOL = context.options.findOptionOrDefault(optOLSimp)
       if (useOCBSL || useOL) {
         if (useOCBSL && useOL) {
-          reporter.warning("Both OCBSL and OL are selected, defaulting to OCBSL")
+          reporter.warning("Both OCBSL and OL are selected, defaulting to OL")
         }
         // Note: the class instance is outside of the closure scope to avoid repeated creation instances
         // (so that computation can be preserved across VCs)
         val algo = {
-          if (useOCBSL) LatticesSimplifier.UnderlyingAlgo.OCBSL
-          else LatticesSimplifier.UnderlyingAlgo.OL
+          if (useOL) LatticesSimplifier.UnderlyingAlgo.OL
+          else LatticesSimplifier.UnderlyingAlgo.OCBSL
         }
         val latticeSimp = LatticesSimplifier(trees, symbols, PurityOptions.assumeChecked, algo)
         (e: Expr) => latticeSimp.simplify(
