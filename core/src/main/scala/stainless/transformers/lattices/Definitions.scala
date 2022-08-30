@@ -11,7 +11,7 @@ trait Definitions {
   import trees._
   import symbols.{given, _}
 
-  // TODO: Si on fait un summon[Ordering[Int]] dans Opaques, ça loop...
+  // Si on fait un summon[Ordering[Int]] dans Opaques, ça loop...
   private val intOrdering = summon[Ordering[Int]]
 
   object Opaques {
@@ -22,33 +22,13 @@ trait Definitions {
       def fromInt(i: Int): Code = i
     }
 
-//    opaque type BinderIx = Int
-//
-//    object BinderIx {
-//      def fromScopeLevel(scopeLevel: Int): BinderIx = scopeLevel
-//    }
-//    extension (bIx: BinderIx) {
-//      def toVarIx(scopeLevel: Int): VarIx = {
-//        assert(bIx < scopeLevel, s"$bIx >= $scopeLevel")
-//        scopeLevel - bIx
-//      }
-//    }
-
     opaque type VarId = Int
 
     object VarId {
       def fromInt(i: Int): VarId = i
     }
 
-//    extension (vIx: VarIx) {
-//      def toBinderIx(scopeLevel: Int): BinderIx = {
-//        assert(vIx <= scopeLevel, s"$vIx > $scopeLevel")
-//        scopeLevel - vIx
-//      }
-//    }
-
     given Ordering[Code] = intOrdering
-//    given Ordering[BinderIx] = intOrdering
     given Ordering[VarId] = intOrdering
   }
   import Opaques.{given, _}
@@ -138,8 +118,8 @@ trait Definitions {
     case MapMerge
 
     case FiniteArray(base: Type)
-    // TODO: Comme args, il y a elems.values ++ Seq(default, size)
-    //  On utilise indices pour reconstruire elems
+    // Comme args, il y a elems.values ++ Seq(default, size)
+    // On utilise indices pour reconstruire elems
     case LargeArray(elemsIndices: Seq[Int], base: Type)
     case ArraySelect
     case ArrayUpdated
@@ -277,101 +257,101 @@ trait Definitions {
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-  def mkVar(v: VarId): Signature = Signature(Label.Var(v), Seq.empty)
-  def mkLet(e: Code, body: Code): Signature = Signature(Label.Let, Seq(e, body))
-  def mkTuple(args: Seq[Code]): Signature = {
+  final def mkVar(v: VarId): Signature = Signature(Label.Var(v), Seq.empty)
+  final def mkLet(e: Code, body: Code): Signature = Signature(Label.Let, Seq(e, body))
+  final def mkTuple(args: Seq[Code]): Signature = {
     assert(args.size >= 2)
     Signature(Label.Tuple, args)
   }
-  def mkADT(id: Identifier, tps: Seq[Type], args: Seq[Code]): Signature = Signature(Label.ADT(id, tps), args)
-  def mkADTSelector(recv: Code, adt: ADTType, ctor: TypedADTConstructor, selector: Identifier): Signature = Signature(Label.ADTSelector(adt, ctor, selector), Seq(recv))
-  def mkFunInvoc(id: Identifier, tps: Seq[Type], args: Seq[Code]): Signature = Signature(Label.FunctionInvocation(id, tps), args)
-  def mkAnnot(e: Code, flags: Seq[Flag]): Signature = Signature(Label.Annotated(flags), Seq(e))
-  def mkIsCtor(e: Code, adt: ADTType, id: Identifier): Signature = Signature(Label.IsConstructor(adt, id), Seq(e))
-  def mkAssume(pred: Code, body: Code): Signature = Signature(Label.Assume, Seq(pred, body))
-  def mkAssert(pred: Code, body: Code): Signature = Signature(Label.Assert, Seq(pred, body))
-  def mkRequire(pred: Code, body: Code): Signature = Signature(Label.Require, Seq(pred, body))
-  def mkEnsuring(body: Code, pred: Code): Signature = Signature(Label.Ensuring, Seq(body, pred))
-  def mkDecreases(measure: Code, body: Code): Signature = Signature(Label.Decreases, Seq(measure, body))
-  def mkMatchExpr(scrut: Code, cases: Seq[LabMatchCase]): Signature = {
+  final def mkADT(id: Identifier, tps: Seq[Type], args: Seq[Code]): Signature = Signature(Label.ADT(id, tps), args)
+  final def mkADTSelector(recv: Code, adt: ADTType, ctor: TypedADTConstructor, selector: Identifier): Signature = Signature(Label.ADTSelector(adt, ctor, selector), Seq(recv))
+  final def mkFunInvoc(id: Identifier, tps: Seq[Type], args: Seq[Code]): Signature = Signature(Label.FunctionInvocation(id, tps), args)
+  final def mkAnnot(e: Code, flags: Seq[Flag]): Signature = Signature(Label.Annotated(flags), Seq(e))
+  final def mkIsCtor(e: Code, adt: ADTType, id: Identifier): Signature = Signature(Label.IsConstructor(adt, id), Seq(e))
+  final def mkAssume(pred: Code, body: Code): Signature = Signature(Label.Assume, Seq(pred, body))
+  final def mkAssert(pred: Code, body: Code): Signature = Signature(Label.Assert, Seq(pred, body))
+  final def mkRequire(pred: Code, body: Code): Signature = Signature(Label.Require, Seq(pred, body))
+  final def mkEnsuring(body: Code, pred: Code): Signature = Signature(Label.Ensuring, Seq(body, pred))
+  final def mkDecreases(measure: Code, body: Code): Signature = Signature(Label.Decreases, Seq(measure, body))
+  final def mkMatchExpr(scrut: Code, cases: Seq[LabMatchCase]): Signature = {
     assert(cases.nonEmpty)
     val (pats, guards, rhs) = cases.map(mc => (mc.pattern, mc.guard, mc.rhs)).unzip3
     Signature(Label.MatchExpr(pats), scrut +: guards.zip(rhs).flatMap((g, r) => Seq(g, r)))
   }
-  def mkIfExpr(cond: Code, thn: Code, els: Code): Signature = Signature(Label.IfExpr, Seq(cond, thn, els))
-  def mkApp(callee: Code, args: Seq[Code]): Signature = Signature(Label.Application, callee +: args)
-  def mkLambda(params: Seq[VarId], body: Code): Signature = Signature(Label.Lambda(params), Seq(body))
-  def mkWickedChoose(v: VarId, pred: Code): Signature = Signature(Label.Choose(v), Seq(pred))
-  def mkForall(params: Seq[VarId], pred: Code): Signature = Signature(Label.Forall(params), Seq(pred))
-  def mkOr(es: Seq[Code]): Signature = {
+  final def mkIfExpr(cond: Code, thn: Code, els: Code): Signature = Signature(Label.IfExpr, Seq(cond, thn, els))
+  final def mkApp(callee: Code, args: Seq[Code]): Signature = Signature(Label.Application, callee +: args)
+  final def mkLambda(params: Seq[VarId], body: Code): Signature = Signature(Label.Lambda(params), Seq(body))
+  final def mkWickedChoose(v: VarId, pred: Code): Signature = Signature(Label.Choose(v), Seq(pred))
+  final def mkForall(params: Seq[VarId], pred: Code): Signature = Signature(Label.Forall(params), Seq(pred))
+  final def mkOr(es: Seq[Code]): Signature = {
     assert(es.size >= 2)
     Signature(Label.Or, es)
   }
-  def mkNot(e: Code): Signature = Signature(Label.Not, Seq(e))
-  def mkEquals(e1: Code, e2: Code): Signature = Signature(Label.Equals, Seq(e1, e2))
-  def mkLessThan(e1: Code, e2: Code): Signature = Signature(Label.LessThan, Seq(e1, e2))
-  def mkGreaterThan(e1: Code, e2: Code): Signature = Signature(Label.GreaterThan, Seq(e1, e2))
-  def mkLessEquals(e1: Code, e2: Code): Signature = Signature(Label.LessEquals, Seq(e1, e2))
-  def mkGreaterEquals(e1: Code, e2: Code): Signature = Signature(Label.GreaterEquals, Seq(e1, e2))
-  def mkUMinus(e: Code): Signature = Signature(Label.UMinus, Seq(e))
-  def mkPlus(e1: Code, e2: Code): Signature = Signature(Label.Plus, Seq(e1, e2))
-  def mkMinus(e1: Code, e2: Code): Signature = Signature(Label.Minus, Seq(e1, e2))
-  def mkTimes(e1: Code, e2: Code): Signature = Signature(Label.Times, Seq(e1, e2))
-  def mkDivision(e1: Code, e2: Code): Signature = Signature(Label.Division, Seq(e1, e2))
-  def mkRemainder(e1: Code, e2: Code): Signature = Signature(Label.Remainder, Seq(e1, e2))
-  def mkModulo(e1: Code, e2: Code): Signature = Signature(Label.Modulo, Seq(e1, e2))
-  def mkBVNot(e: Code): Signature = Signature(Label.BVNot, Seq(e))
-  def mkBVAnd(e1: Code, e2: Code): Signature = Signature(Label.BVAnd, Seq(e1, e2))
-  def mkBVOr(e1: Code, e2: Code): Signature = Signature(Label.BVOr, Seq(e1, e2))
-  def mkBVXor(e1: Code, e2: Code): Signature = Signature(Label.BVXor, Seq(e1, e2))
-  def mkBVShiftLeft(e1: Code, e2: Code): Signature = Signature(Label.BVShiftLeft, Seq(e1, e2))
-  def mkBVAShiftRight(e1: Code, e2: Code): Signature = Signature(Label.BVAShiftRight, Seq(e1, e2))
-  def mkBVLShiftRight(e1: Code, e2: Code): Signature = Signature(Label.BVLShiftRight, Seq(e1, e2))
-  def mkBVNarrowingCast(e: Code, newType: BVType): Signature = Signature(Label.BVNarrowingCast(newType), Seq(e))
-  def mkBVWideningCast(e: Code, newType: BVType): Signature = Signature(Label.BVWideningCast(newType), Seq(e))
-  def mkBVUnsignedToSigned(e: Code): Signature = Signature(Label.BVUnsignedToSigned, Seq(e))
-  def mkBVSignedToUnsigned(e: Code): Signature = Signature(Label.BVSignedToUnsigned, Seq(e))
-  def mkLit[T](l: Literal[T]): Signature = Signature(Label.Lit(l), Seq.empty)
-  def mkTupleSelect(recv: Code, i: Int): Signature = Signature(Label.TupleSelect(i), Seq(recv))
-  def mkFiniteSet(elems: Seq[Code], base: Type): Signature = Signature(Label.FiniteSet(base), elems)
-  def mkSetAdd(set: Code, elem: Code): Signature = Signature(Label.SetAdd, Seq(set, elem))
-  def mkElementOfSet(elem: Code, set: Code): Signature = Signature(Label.ElementOfSet, Seq(elem, set))
-  def mkSubsetOf(lhs: Code, rhs: Code): Signature = Signature(Label.SubsetOf, Seq(lhs, rhs))
-  def mkSetIntersection(lhs: Code, rhs: Code): Signature = Signature(Label.SetIntersection, Seq(lhs, rhs))
-  def mkSetUnion(lhs: Code, rhs: Code): Signature = Signature(Label.SetUnion, Seq(lhs, rhs))
-  def mkSetDifference(lhs: Code, rhs: Code): Signature = Signature(Label.SetDifference, Seq(lhs, rhs))
+  final def mkNot(e: Code): Signature = Signature(Label.Not, Seq(e))
+  final def mkEquals(e1: Code, e2: Code): Signature = Signature(Label.Equals, Seq(e1, e2))
+  final def mkLessThan(e1: Code, e2: Code): Signature = Signature(Label.LessThan, Seq(e1, e2))
+  final def mkGreaterThan(e1: Code, e2: Code): Signature = Signature(Label.GreaterThan, Seq(e1, e2))
+  final def mkLessEquals(e1: Code, e2: Code): Signature = Signature(Label.LessEquals, Seq(e1, e2))
+  final def mkGreaterEquals(e1: Code, e2: Code): Signature = Signature(Label.GreaterEquals, Seq(e1, e2))
+  final def mkUMinus(e: Code): Signature = Signature(Label.UMinus, Seq(e))
+  final def mkPlus(e1: Code, e2: Code): Signature = Signature(Label.Plus, Seq(e1, e2))
+  final def mkMinus(e1: Code, e2: Code): Signature = Signature(Label.Minus, Seq(e1, e2))
+  final def mkTimes(e1: Code, e2: Code): Signature = Signature(Label.Times, Seq(e1, e2))
+  final def mkDivision(e1: Code, e2: Code): Signature = Signature(Label.Division, Seq(e1, e2))
+  final def mkRemainder(e1: Code, e2: Code): Signature = Signature(Label.Remainder, Seq(e1, e2))
+  final def mkModulo(e1: Code, e2: Code): Signature = Signature(Label.Modulo, Seq(e1, e2))
+  final def mkBVNot(e: Code): Signature = Signature(Label.BVNot, Seq(e))
+  final def mkBVAnd(e1: Code, e2: Code): Signature = Signature(Label.BVAnd, Seq(e1, e2))
+  final def mkBVOr(e1: Code, e2: Code): Signature = Signature(Label.BVOr, Seq(e1, e2))
+  final def mkBVXor(e1: Code, e2: Code): Signature = Signature(Label.BVXor, Seq(e1, e2))
+  final def mkBVShiftLeft(e1: Code, e2: Code): Signature = Signature(Label.BVShiftLeft, Seq(e1, e2))
+  final def mkBVAShiftRight(e1: Code, e2: Code): Signature = Signature(Label.BVAShiftRight, Seq(e1, e2))
+  final def mkBVLShiftRight(e1: Code, e2: Code): Signature = Signature(Label.BVLShiftRight, Seq(e1, e2))
+  final def mkBVNarrowingCast(e: Code, newType: BVType): Signature = Signature(Label.BVNarrowingCast(newType), Seq(e))
+  final def mkBVWideningCast(e: Code, newType: BVType): Signature = Signature(Label.BVWideningCast(newType), Seq(e))
+  final def mkBVUnsignedToSigned(e: Code): Signature = Signature(Label.BVUnsignedToSigned, Seq(e))
+  final def mkBVSignedToUnsigned(e: Code): Signature = Signature(Label.BVSignedToUnsigned, Seq(e))
+  final def mkLit[T](l: Literal[T]): Signature = Signature(Label.Lit(l), Seq.empty)
+  final def mkTupleSelect(recv: Code, i: Int): Signature = Signature(Label.TupleSelect(i), Seq(recv))
+  final def mkFiniteSet(elems: Seq[Code], base: Type): Signature = Signature(Label.FiniteSet(base), elems)
+  final def mkSetAdd(set: Code, elem: Code): Signature = Signature(Label.SetAdd, Seq(set, elem))
+  final def mkElementOfSet(elem: Code, set: Code): Signature = Signature(Label.ElementOfSet, Seq(elem, set))
+  final def mkSubsetOf(lhs: Code, rhs: Code): Signature = Signature(Label.SubsetOf, Seq(lhs, rhs))
+  final def mkSetIntersection(lhs: Code, rhs: Code): Signature = Signature(Label.SetIntersection, Seq(lhs, rhs))
+  final def mkSetUnion(lhs: Code, rhs: Code): Signature = Signature(Label.SetUnion, Seq(lhs, rhs))
+  final def mkSetDifference(lhs: Code, rhs: Code): Signature = Signature(Label.SetDifference, Seq(lhs, rhs))
 
-  def mkFiniteArray(elems: Seq[Code], base: Type): Signature = Signature(Label.FiniteArray(base), elems)
-  def mkLargeArray(elems: Map[Int, Code], default: Code, size: Code, base: Type): Signature = {
+  final def mkFiniteArray(elems: Seq[Code], base: Type): Signature = Signature(Label.FiniteArray(base), elems)
+  final def mkLargeArray(elems: Map[Int, Code], default: Code, size: Code, base: Type): Signature = {
     val (elemsIndices, elemsCodes) = elems.toSeq.sortBy(_._1).unzip
     Signature(Label.LargeArray(elemsIndices, base), elemsCodes ++ Seq(default, size))
   }
-  def mkArraySelect(arr: Code, i: Code): Signature = Signature(Label.ArraySelect, Seq(arr, i))
-  def mkArrayUpdated(arr: Code, i: Code, v: Code): Signature = Signature(Label.ArrayUpdated, Seq(arr, i, v))
-  def mkArrayLength(arr: Code): Signature = Signature(Label.ArrayLength, Seq(arr))
+  final def mkArraySelect(arr: Code, i: Code): Signature = Signature(Label.ArraySelect, Seq(arr, i))
+  final def mkArrayUpdated(arr: Code, i: Code, v: Code): Signature = Signature(Label.ArrayUpdated, Seq(arr, i, v))
+  final def mkArrayLength(arr: Code): Signature = Signature(Label.ArrayLength, Seq(arr))
 
-  def mkStringConcat(lhs: Code, rhs: Code): Signature = Signature(Label.StringConcat, Seq(lhs, rhs))
-  def mkSubString(expr: Code, start: Code, end: Code): Signature = Signature(Label.SubString, Seq(expr, start, end))
-  def mkStringLength(expr: Code): Signature = Signature(Label.StringLength, Seq(expr))
+  final def mkStringConcat(lhs: Code, rhs: Code): Signature = Signature(Label.StringConcat, Seq(lhs, rhs))
+  final def mkSubString(expr: Code, start: Code, end: Code): Signature = Signature(Label.SubString, Seq(expr, start, end))
+  final def mkStringLength(expr: Code): Signature = Signature(Label.StringLength, Seq(expr))
 
-  def mkFiniteBag(elems: Seq[(Code, Code)], base: Type): Signature =
+  final def mkFiniteBag(elems: Seq[(Code, Code)], base: Type): Signature =
     Signature(Label.FiniteBag(base), elems.flatMap { case (c1, c2) => Seq(c1, c2) })
-  def mkBagAdd(bag: Code, elem: Code): Signature = Signature(Label.BagAdd, Seq(bag, elem))
-  def mkMultiplicityInBag(elem: Code, bag: Code): Signature = Signature(Label.MultiplicityInBag, Seq(elem, bag))
-  def mkBagIntersection(lhs: Code, rhs: Code): Signature = Signature(Label.BagIntersection, Seq(lhs, rhs))
-  def mkBagUnion(lhs: Code, rhs: Code): Signature = Signature(Label.BagUnion, Seq(lhs, rhs))
-  def mkBagDifference(lhs: Code, rhs: Code): Signature = Signature(Label.BagDifference, Seq(lhs, rhs))
+  final def mkBagAdd(bag: Code, elem: Code): Signature = Signature(Label.BagAdd, Seq(bag, elem))
+  final def mkMultiplicityInBag(elem: Code, bag: Code): Signature = Signature(Label.MultiplicityInBag, Seq(elem, bag))
+  final def mkBagIntersection(lhs: Code, rhs: Code): Signature = Signature(Label.BagIntersection, Seq(lhs, rhs))
+  final def mkBagUnion(lhs: Code, rhs: Code): Signature = Signature(Label.BagUnion, Seq(lhs, rhs))
+  final def mkBagDifference(lhs: Code, rhs: Code): Signature = Signature(Label.BagDifference, Seq(lhs, rhs))
 
-  def mkFiniteMap(elems: Seq[(Code, Code)], default: Code, keyTpe: Type, valueTpe: Type): Signature =
+  final def mkFiniteMap(elems: Seq[(Code, Code)], default: Code, keyTpe: Type, valueTpe: Type): Signature =
     Signature(Label.FiniteMap(keyTpe, valueTpe),
       elems.flatMap { case (c1, c2) => Seq(c1, c2) } :+ default)
-  def mkMapApply(map: Code, key: Code): Signature = Signature(Label.MapApply, Seq(map, key))
-  def mkMapUpdated(map: Code, elem: Code, value: Code): Signature = Signature(Label.MapUpdated, Seq(map, elem, value))
-  def mkMapMerge(mask: Code, map1: Code, map2: Code): Signature = Signature(Label.MapMerge, Seq(mask, map1, map2))
+  final def mkMapApply(map: Code, key: Code): Signature = Signature(Label.MapApply, Seq(map, key))
+  final def mkMapUpdated(map: Code, elem: Code, value: Code): Signature = Signature(Label.MapUpdated, Seq(map, elem, value))
+  final def mkMapMerge(mask: Code, map1: Code, map2: Code): Signature = Signature(Label.MapMerge, Seq(mask, map1, map2))
 
-  def mkError(tpe: Type, description: String): Signature = Signature(Label.Error(tpe, description), Seq.empty)
-  def mkNoTree(tpe: Type): Signature = Signature(Label.NoTree(tpe), Seq.empty)
+  final def mkError(tpe: Type, description: String): Signature = Signature(Label.Error(tpe, description), Seq.empty)
+  final def mkNoTree(tpe: Type): Signature = Signature(Label.NoTree(tpe), Seq.empty)
 
-  def mkAssumeLike(kind: Label.AssumeLike, pred: Code, body: Code): Signature = Signature(kind, Seq(pred, body))
-  def mkLambdaLike(kind: Label.LambdaLike, body: Code): Signature = Signature(kind, Seq(body))
+  final def mkAssumeLike(kind: Label.AssumeLike, pred: Code, body: Code): Signature = Signature(kind, Seq(pred, body))
+  final def mkLambdaLike(kind: Label.LambdaLike, body: Code): Signature = Signature(kind, Seq(body))
 }

@@ -14,7 +14,7 @@ trait LatticesSimplifier { self =>
   import trees._
   import symbols.{given, _}
 
-  private val ocbslTL: ThreadLocal[lattices.OCBSL{val trees: self.trees.type; val symbols: self.symbols.type}] =
+  private val ocbslTL: ThreadLocal[lattices.Common{val trees: self.trees.type; val symbols: self.symbols.type}] =
     ThreadLocal.withInitial(() => lattices.OCBSL(trees, symbols, opts))
 
   private val vcNum: AtomicInteger = new AtomicInteger(0)
@@ -33,7 +33,7 @@ trait LatticesSimplifier { self =>
 //    println("SIMPLIFY:")
 //    println(e)
     val oc = ocbslTL.get()
-    given oc.OEnv = oc.OEnv.empty
+    given oc.Env = oc.Env.empty
     given oc.Ctxs = oc.Ctxs.empty
     given oc.LetValSubst = oc.LetValSubst.empty
 
