@@ -4,7 +4,7 @@ package lattices
 
 import inox.solvers
 
-trait OL extends Common {
+trait OL extends Core {
   import trees._
   import symbols.{given, _}
   import Opaques.{given, _}

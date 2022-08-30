@@ -7,15 +7,20 @@ import java.util.concurrent.atomic.AtomicInteger
 
 // Wrapper that sets up a thread-local ocbsl algo instance
 trait LatticesSimplifier { self =>
+  import LatticesSimplifier._
   val trees: ast.Trees
   val symbols: trees.Symbols
   val opts: solvers.PurityOptions
+  val algo: UnderlyingAlgo
 
   import trees._
   import symbols.{given, _}
 
-  private val ocbslTL: ThreadLocal[lattices.Common{val trees: self.trees.type; val symbols: self.symbols.type}] =
-    ThreadLocal.withInitial(() => lattices.OCBSL(trees, symbols, opts))
+  private val coreTL: ThreadLocal[lattices.Core{val trees: self.trees.type; val symbols: self.symbols.type}] =
+    ThreadLocal.withInitial(() => algo match {
+      case UnderlyingAlgo.OCBSL => lattices.OCBSL(trees, symbols, opts)
+      case UnderlyingAlgo.OL => lattices.OL(trees, symbols, opts)
+    })
 
   private val vcNum: AtomicInteger = new AtomicInteger(0)
 
@@ -32,21 +37,27 @@ trait LatticesSimplifier { self =>
 //    println("")
 //    println("SIMPLIFY:")
 //    println(e)
-    val oc = ocbslTL.get()
-    given oc.Env = oc.Env.empty
-    given oc.Ctxs = oc.Ctxs.empty
-    given oc.LetValSubst = oc.LetValSubst.empty
+    val core = coreTL.get()
+    given core.Env = core.Env.empty
+    given core.Ctxs = core.Ctxs.empty
+    given core.LetValSubst = core.LetValSubst.empty
 
-    val resE = oc.codeOfExpr(e)
-    val codeE = resE.selfPlugged(oc.Ctxs.empty)._2
-    val res = oc.uncodeOf(codeE)(using oc.RevEnv.empty).expr.copiedFrom(e)
+    val resE = core.codeOfExpr(e)
+    val codeE = resE.selfPlugged(core.Ctxs.empty)._2
+    val res = core.uncodeOf(codeE)(using core.RevEnv.empty).expr.copiedFrom(e)
     vcNum.incrementAndGet()
     res
   }
 }
 object LatticesSimplifier {
-  def apply(t: ast.Trees, s: t.Symbols, opts: solvers.PurityOptions): LatticesSimplifier{val trees: t.type; val symbols: s.type} = {
-    class Impl(override val trees: t.type, override val symbols: s.type, override val opts: solvers.PurityOptions) extends LatticesSimplifier
-    new Impl(t, s, opts)
+
+  enum UnderlyingAlgo {
+    case OCBSL
+    case OL
+  }
+
+  def apply(t: ast.Trees, s: t.Symbols, opts: solvers.PurityOptions, algo: UnderlyingAlgo): LatticesSimplifier{val trees: t.type; val symbols: s.type} = {
+    class Impl(override val trees: t.type, override val symbols: s.type, override val opts: solvers.PurityOptions, override val algo: UnderlyingAlgo) extends LatticesSimplifier
+    new Impl(t, s, opts, algo)
   }
 }

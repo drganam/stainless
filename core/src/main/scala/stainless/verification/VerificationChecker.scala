@@ -15,7 +15,8 @@ import scala.collection.mutable
 object optFailEarly extends inox.FlagOptionDef("fail-early", false)
 object optFailInvalid extends inox.FlagOptionDef("fail-invalid", false)
 object optVCCache extends inox.FlagOptionDef("vc-cache", true)
-object optOCBSLSimp extends inox.FlagOptionDef("ocbsl", true) // TODO: Set default to false once done
+object optOCBSLSimp extends inox.FlagOptionDef("ocbsl-simp", true) // TODO: Set default to false once done
+object optOLSimp extends inox.FlagOptionDef("ol-simp", false)
 
 object DebugSectionVerification extends inox.DebugSection("verification")
 object DebugSectionFullVC extends inox.DebugSection("full-vc")
@@ -101,11 +102,17 @@ trait VerificationChecker { self =>
     import MainHelpers._
 
     val simplifyVC: Expr => Expr = {
-      if (context.options.findOptionOrDefault(optOCBSLSimp)) {
+      val useOCBSL = context.options.findOptionOrDefault(optOCBSLSimp)
+      val useOL = context.options.findOptionOrDefault(optOLSimp)
+      if (useOCBSL || useOL) {
         // Note: the class instance is outside of the closure scope to avoid repeated creation instances
         // (so that computation can be preserved across VCs)
-        val ocbslSimp = LatticesSimplifier(trees, symbols, PurityOptions.assumeChecked)
-        (e: Expr) => ocbslSimp.simplify(
+        val algo = {
+          if (useOCBSL) LatticesSimplifier.UnderlyingAlgo.OCBSL
+          else LatticesSimplifier.UnderlyingAlgo.OL
+        }
+        val latticeSimp = LatticesSimplifier(trees, symbols, PurityOptions.assumeChecked, algo)
+        (e: Expr) => latticeSimp.simplify(
           simplifyLets(removeAssertions(e)))
       } else {
         (e: Expr) => simplifyExpr(

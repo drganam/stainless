@@ -4,7 +4,7 @@ package lattices
 
 import inox.solvers
 
-trait Common extends Definitions { ocbsl =>
+trait Core extends Definitions { ocbsl =>
   val opts: solvers.PurityOptions
 
   import trees._
