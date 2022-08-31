@@ -24,7 +24,7 @@ trait LatticesSimplifier { self =>
 
   private val vcNum: AtomicInteger = new AtomicInteger(0)
 
-  val poi = 142
+  val poi = 17
 
   def simplify(e: Expr): Expr = {
 //    if (vcNum.get() < poi) {
@@ -33,7 +33,7 @@ trait LatticesSimplifier { self =>
 //      println("TAKING THE EASY ROUTE #3")
 //      vcNum.incrementAndGet()
 //      return BooleanLiteral(true)
-//    } // else if (vcNum.get() > poi) ???
+//    } else if (vcNum.get() > poi) ???
 //    println("")
 //    println("SIMPLIFY:")
 //    println(e)

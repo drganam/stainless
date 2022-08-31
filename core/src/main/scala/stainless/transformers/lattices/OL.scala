@@ -11,7 +11,7 @@ trait OL extends Core {
   import Purity._
   import scala.collection.mutable
 
-  private val leqCache = mutable.Map.empty[(Env, Ctxs, Code, Code), Boolean]
+  private val leqCache = mutable.Map.empty[(Code, Code), Boolean]
 
   override final def implied(rhs: Code)(using env: Env, ctxs: Ctxs): Boolean = {
     if (rhs == trueCode) true
@@ -22,9 +22,9 @@ trait OL extends Core {
     }
   }
 
-  final def latticesLeq(lhs: Code, rhs: Code)(using env: Env, ctxs: Ctxs): Boolean = {
+  final def latticesLeq(lhs: Code, rhs: Code): Boolean = {
     if (lhs == rhs) true
-    else leqCache.getOrElseUpdate((env, ctxs, lhs, rhs), (code2sig(lhs), code2sig(rhs)) match {
+    else leqCache.getOrElseUpdate((lhs, rhs), (code2sig(lhs), code2sig(rhs)) match {
       case (BoolLitSig(b), _) => !b
       case (_, BoolLitSig(b)) => b
 
@@ -39,9 +39,6 @@ trait OL extends Core {
 
       case (OrSig(disjs, false), _) =>
         disjs.exists(c => latticesLeq(negCodeOf(c), rhs))
-
-//      case (OrSig(disjs1, false), OrSig(disjs2, true)) =>
-//        disjs1.exists(c => latticesLeq(negCodeOf(c), rhs)) || disjs2.exists(c => latticesLeq(lhs, c))
 
       case (EqSig(lhs1, rhs1), LeqSig(lhs2, rhs2)) => lhs1 == lhs2 && rhs1 == rhs2
       case (EqSig(lhs1, rhs1), GeqSig(lhs2, rhs2)) => lhs1 == lhs2 && rhs1 == rhs2
