@@ -1022,12 +1022,20 @@ trait Core extends Definitions { ocbsl =>
           } else {
             val (pluggedOcc, accPlugged) = acc.selfPlugged(last.ctxs.withNegatedCond(last.terminal))
             val newDisjs = simplifiedDisjunction(Seq(last.terminal, accPlugged), polarity = true)(using env, last.ctxs)
+            // TODO: Pas si vite! newDisjs peut très bien retourner un non terminal!
+            /*
             // TODO: Explication
             val toRm = Seq(last.terminal, accPlugged)
               .filter(c => code2sig(c).label == Label.Or && !(outerCtxs +: init.map(_.ctxs)).exists(_.isBoundDef(c)))
             val ctxs1 = rmBindings(last.ctxs, toRm)
-            // TODO: Pas si vite! newDisjs peut très bien retourner un non terminal!
             val newAcc = CodeRes(newDisjs, ctxs1.addBoundDef(newDisjs))
+            */
+            val newCtxs = last.ctxs.pop match {
+              case Some((prevCtxs, Ctx.BoundDef(bnd))) if bnd == last.terminal && code2sig(last.terminal).label == Label.Or =>
+                prevCtxs.addBoundDef(newDisjs)
+              case _ => last.ctxs.addBoundDef(newDisjs)
+            }
+            val newAcc = CodeRes(newDisjs, newCtxs)
 
             val res = combineRec(init, newAcc)
             val noTailRecPls = Ctxs(last.ctxs.ctxs)
@@ -1205,23 +1213,8 @@ trait Core extends Definitions { ocbsl =>
           case None => cr
         }
 
-      case Signature(Label.ADTSelector(_, ctor, sel), Seq(e)) =>
-        code2sig(e) match {
-          case Signature(Label.ADT(id, _), args) if id == ctor.id =>
-            // il se peut dans certains cas que id != ctor.id.
-            // p.ex. dans
-            //  None() match {
-            //    case Some(r) =>
-            //      /* utilisation de r, qui va causer ce cas */
-            //    case None() =>
-            //  }
-            // C'est plus tard que cette branche va être éliminée; en attendant, ne paniquons pas!
-            // Contentons-nous de ne rien faire et de retourner le résultat inchangé...
-            // assert(id == ctor.id, "woot? les ids ne correspondent pas!!!!")
-            val index = ctor.definition.selectorID2Index(sel)
-            cr.derived(args(index))
-          case _ => cr
-        }
+      case Signature(lab@Label.ADTSelector(_, _, _), Seq(e)) =>
+        cr.derived(adtSelect(e, lab, tpe))
 
       case Signature(Label.ADT(id, tps), args) =>
         // Simplification de ADT(base.fld1, base.fld2, etc.) en base si base est de meme nature que l'adt construite
@@ -1249,12 +1242,8 @@ trait Core extends Definitions { ocbsl =>
           case None => cr
         }
 
-      case Signature(Label.TupleSelect(ii), Seq(e)) =>
-        val i = ii - 1
-        code2sig(e) match {
-          case Signature(Label.Tuple, args) => cr.derived(args(i))
-          case _ => cr
-        }
+      case Signature(Label.TupleSelect(i), Seq(e)) =>
+        cr.derived(tupleSelect(e, i, tpe))
 
       case Signature(Label.ArraySelect, Seq(arr, i)) =>
         def collectIndicesValues(arr: Code, indices: Map[Code, Code]): Map[Code, Code] = code2sig(arr) match {
@@ -1413,6 +1402,33 @@ trait Core extends Definitions { ocbsl =>
       else simp
     }
     else simp
+  }
+
+  final def adtSelect(recv: Code, lab: Label.ADTSelector, tpe: Type): Code = {
+    code2sig(recv) match {
+      case Signature(Label.ADT(id, _), args) if id == lab.ctor.id =>
+        // il se peut dans certains cas que id != ctor.id.
+        // p.ex. dans
+        //  None() match {
+        //    case Some(r) =>
+        //      /* utilisation de r, qui va causer ce cas */
+        //    case None() =>
+        //  }
+        // C'est plus tard que cette branche va être éliminée; en attendant, ne paniquons pas!
+        // Contentons-nous de ne rien faire et de retourner le résultat inchangé...
+        // assert(id == ctor.id, "woot? les ids ne correspondent pas!!!!")
+        val index = lab.ctor.definition.selectorID2Index(lab.selector)
+        args(index)
+      case _ => codeOfSig(mkADTSelector(recv, lab.adt, lab.ctor, lab.selector), tpe)
+    }
+  }
+
+  final def tupleSelect(recv: Code, i: Int, tpe: Type): Code = {
+    assert(i >= 1)
+    code2sig(recv) match {
+      case Signature(Label.Tuple, args) => args(i - 1)
+      case _ => codeOfSig(mkTupleSelect(recv, i), tpe)
+    }
   }
 
   final def simplifyAssocArith(op: Label.Plus.type | Label.Times.type, lhs: Code, rhs: Code): Code = {
@@ -2542,12 +2558,12 @@ trait Core extends Definitions { ocbsl =>
   //region Match expression utilities
 
   final def tupleSubscrutinees(scrut: Code, tt: TupleType): Seq[Code] = {
-    tt.bases.zipWithIndex.map { case (base, i) => codeOfSig(mkTupleSelect(scrut, i + 1), base) }
+    tt.bases.zipWithIndex.map { case (base, i) => tupleSelect(scrut, i + 1, base) }
   }
 
   final def adtSubScrutinees(scrut: Code, adt: ADTType): Seq[Code] = {
     val tcons = getConstructor(adt.id, adt.tps)
-    tcons.fields.map(fld => codeOfSig(mkADTSelector(scrut, adt, tcons, fld.id), fld.getType))
+    tcons.fields.map(fld => adtSelect(scrut, Label.ADTSelector(adt, tcons, fld.id), fld.getType))
   }
 
   final def adtMatchCond(scrut: Code, adt: ADTType)(using Env, Ctxs): Code = {
