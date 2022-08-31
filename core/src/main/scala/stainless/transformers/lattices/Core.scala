@@ -144,36 +144,6 @@ trait Core extends Definitions { ocbsl =>
       case Occurrence.Once(inCtxs, _, _) => ctxs.isPrefixOf(inCtxs)
       case _ => true
     }
-
-    def withInlinedOccurrences(newInCtxs: Ctxs, nesting: LambdaNesting)(using env: Env): Occurrences = {
-      assert(env.nesting.level <= nesting.level)
-      Occurrences(c2u.map {
-        case (c, Occurrence.Once(prevInCtxs, nesting2, kind)) =>
-          assert(env.nesting.level <= nesting2.level)
-          val nbNestedLambdas = nesting2.level - env.nesting.level
-          val ctxs = prevInCtxs.movedAfter(newInCtxs)
-          c -> Occurrence.Once(ctxs, LambdaNesting(nesting.level + nbNestedLambdas), kind)
-        case (c, occ) => c -> occ
-      })
-    }
-
-    def withReplacedPrefix(oldPrefix: Ctxs, newPrefix: Ctxs): Occurrences = {
-      Occurrences(c2u.map {
-        case (c, Occurrence.Once(inCtxs, nesting, kind)) =>
-          assert(oldPrefix.isPrefixOf(inCtxs))
-          val newInCtxs = inCtxs.withReplacedPrefix(oldPrefix, newPrefix)
-          c -> Occurrence.Once(newInCtxs, nesting, kind)
-        case other => other
-      })
-    }
-
-    def withRemovedBinding(bound: Code): Occurrences = withRemovedBindings(Set(bound))
-
-    def withRemovedBindings(bound: Set[Code]): Occurrences = Occurrences(c2u.map {
-      case (c, Occurrence.Once(inCtxs, nesting, kind)) =>
-        c -> Occurrence.Once(inCtxs.withRemovedBindings(bound), nesting, kind)
-      case (c, occ) => c -> occ
-    })
   }
 
   object Occurrences {
@@ -296,28 +266,6 @@ trait Core extends Definitions { ocbsl =>
     def pop: Option[(Ctxs, Ctx)] = {
       if (ctxs.isEmpty) None
       else Some((Ctxs(ctxs.init), ctxs.last))
-    }
-
-    def withRemovedBinding(c: Code): Ctxs = withRemovedBindings(Set(c))
-
-    def withRemovedBindings(cs: Set[Code]): Ctxs = {
-      Ctxs(ctxs.filterNot {
-        case Ctx.BoundDef(c) => cs(c)
-        case _ => false
-      })
-    }
-
-    def occurrences(inCtxs: Ctxs)(using Env): Occurrences = {
-      assert(inCtxs.isPrefixOf(this))
-      CodeRes(unitCode, this).selfPlugged(inCtxs)._1
-    }
-
-    def movedAfter(after: Ctxs): Ctxs = {
-      val common = this.ctxs.zip(after.ctxs).takeWhile { case (slf, after) => slf == after }.map(_._1)
-      val suffixThis = this.ctxs.drop(common.size)
-      val suffixAfter = after.ctxs.drop(common.size)
-      val merged = common ++ suffixAfter ++ suffixThis
-      Ctxs(merged)
     }
 
     // En gros: On plug jusqu'à ce que l'on atteigne inCtxs
@@ -456,7 +404,7 @@ trait Core extends Definitions { ocbsl =>
             case _ =>
               val u2 = definitionOccurrence match {
                 case Occurrence.Zero => u
-                case Occurrence.Once(inCtxs, nesting, _) =>
+                case Occurrence.Once(_, _, _) =>
                   u ++ compWoTerm
                 case Occurrence.Many =>
                   // Ce cas se passe pour les x.f1.fnField où l'on les inline au lieu de les bind
@@ -546,10 +494,8 @@ trait Core extends Definitions { ocbsl =>
       })
     }
 
-    def derived(newTerminal: Code)(using env: Env): CodeRes = {
-//      val newComp = occurrencesOf(newTerminal)(using env, ctxs)
+    def derived(newTerminal: Code)(using env: Env): CodeRes =
       CodeRes(newTerminal, ctxs.addBoundDef(newTerminal))
-    }
   }
 
   object CodeRes {
@@ -986,24 +932,6 @@ trait Core extends Definitions { ocbsl =>
         else transformRec(disjs.tail, rdisjsAcc :+ re)(using newCtxs)
       }
     }
-
-    def rmBinding(ctxs: Ctxs, terminal: Code): Ctxs = {
-      assert(code2sig(terminal).label == Label.Or, "Que pour des Or!!!")
-      val prefix0 = ctxs.ctxs.takeWhile {
-        case Ctx.BoundDef(`terminal`) => false
-        case _ => true
-      }
-      if (ctxs.ctxs.size == prefix0.size) ctxs // `terminal` n'est en fait même pas bound, donc rien à retirer
-      else {
-        val prefix = Ctxs(prefix0).addBoundDef(terminal)
-        val occ = ctxs.occurrences(prefix)
-        if (occ(terminal).isZero) ctxs.withRemovedBinding(terminal)
-        else ctxs
-      }
-    }
-
-    // Un terminal - des terminaux, et pas des terminals!!!!
-    def rmBindings(ctxs: Ctxs, terminaux: Seq[Code]): Ctxs = terminaux.foldLeft(ctxs)(rmBinding)
 
     def combineRec(disjs: Seq[CodeRes], acc: CodeRes): CodeRes = {
       disjs match {
@@ -2242,21 +2170,6 @@ trait Core extends Definitions { ocbsl =>
             // Comme on est en négation, pour le next ctxs, on souhaite avoir ctxs avec comme bounddef la négation
             // du terminal de disj et comme condition le terminal de disj
             (acc :+ negExpr, negCr.ctxs.withNegatedCond(negCr.terminal))
-
-            /*
-            val negated = negCodeOf(disj)(mayRmNeg)
-            val negRes = uncodeOf(negated)
-            val newCtxs = {
-              // Comme on est en négation, pour le next ctxs, on souhaite avoir ctxs avec comme bounddef la négation
-              // du terminal de disj et comme condition le terminal de disj
-              val tearedDisj = tearDown(disj)
-              assert(tearedDisj.ctxs.isLitVarOrBoundDef(tearedDisj.terminal))
-              val negatedDisjTerminal = negCodeOf(tearedDisj.terminal)(using renv.env, tearedDisj.ctxs)
-              tearedDisj.ctxs.addBoundDef(negatedDisjTerminal)
-                .withCond(tearedDisj.terminal)
-            }
-            (acc :+ negRes, newCtxs)
-            */
         }._1
         RevRes(And(negDisjs.map(_.expr)), negDisjs.flatMap(_.used).toSet)
 
@@ -2592,7 +2505,7 @@ trait Core extends Definitions { ocbsl =>
   case class UnapplySubScruts(unapplyInvoc: Code, getInvoc: Code, subs: Seq[Code], patCond: Code)
 
   final def unapplySubScrutinees(scrut: Code, id: Identifier, tps: Seq[Type]): UnapplySubScruts = {
-    val fdUnapply = getFunction(id)
+    val fdUnapply = getFunction(id, tps)
     val unapplyInvocSig = mkFunInvoc(id, tps, Seq(scrut))
     val unapplyInvoc = codeOfSig(unapplyInvocSig, fdUnapply.returnType)
 
