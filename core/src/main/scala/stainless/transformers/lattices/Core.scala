@@ -1063,6 +1063,7 @@ trait Core extends Definitions { ocbsl =>
 
     if (mayRmNeg eq mayAlwaysRmNeg) {
       negCodeCache += c -> res
+      negCodeCache += res -> c
     }
     res
   }
@@ -1847,15 +1848,15 @@ trait Core extends Definitions { ocbsl =>
 
     if (ctxs.isBoundDef(c)) Occurrences.of(c)
     else if (!CodeRes.isTerminal(c)) {
-      val entries = pluggedOccMap.getOrElse((env, c), sys.error("Oh non :("))
-      entries.getOrElse(ctxs, {
+      val entries = pluggedOccMap.get((env, c)) //, sys.error("Oh non :("))
+      entries.flatMap(_.get(ctxs)).getOrElse {
 //        val (prefix, occ) = entries.head // N'importe quelle entry
 //        occ.withReplacedPrefix(prefix, ctxs.impureParts)
 //        sys.error("Oh non, y a rien :(")
         val teared = tearDown(c)
         val (occ, plugged) = teared.selfPlugged(ctxs)
         occ
-      })
+      }
     } else {
       code2sig(c) match {
         case Signature(Label.Lit(_), Seq()) => Occurrences.empty
