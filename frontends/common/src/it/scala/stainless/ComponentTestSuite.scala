@@ -18,7 +18,7 @@ trait ComponentTestSuite extends inox.TestSuite with inox.ResourceUtils with Inp
     Seq(
       verification.optTypeChecker(true),
       inox.optSelectedSolvers(Set("smt-z3:z3-4.8.12")),
-      inox.optTimeout(300.seconds),
+      inox.optTimeout(120.seconds),
       verification.optStrictArithmetic(false),
       termination.optInferMeasures(false),
       termination.optCheckMeasures(YesNoOnly.No),

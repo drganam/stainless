@@ -990,7 +990,6 @@ trait Core extends Definitions { ocbsl =>
             combineRec(init, acc)
           } else {
             val (pluggedOcc, accPlugged) = acc.selfPlugged(last.ctxs.withNegatedCond(last.terminal))
-            // val newAcc = simplifiedDisjunctionCodeRes(last, accPlugged, polarity = true)
 
             // TODO: Explication
             // TODO: Pas si vite! newDisjs peut très bien retourner un non terminal!
@@ -1022,108 +1021,50 @@ trait Core extends Definitions { ocbsl =>
     }
     val simpDisjs = simplifiedDisjunction(Seq(lhs.terminal, rhs), polarity)(using env, ctxs)
     tearDown(simpDisjs)(using env, ctxs)
-
-    //    val expected = tearDown(lhs.terminal)(using env, lhs.ctxs)
-//    assert(expected == lhs)
-    /*
-    val unOredLhs = unOrCode(lhs.terminal)
-    val unOrRhs = unOrCode(rhs)
-    val (ctxs, flattenedDisjs) = unOredLhs match {
-      case Seq() => sys.error("impossible")
-      case Seq(lhsDisj) =>
-        assert(lhsDisj == lhs.terminal)
-        (lhs.ctxs, lhs.terminal +: unOrRhs)
-      case fst +: rest =>
-        assert(code2sig(lhs.terminal).label == Label.Or)
-        val ctxs = lhs.ctxs.pop match {
-          case Some((prevCtxs, Ctx.BoundDef(last))) if last == lhs.terminal =>
-            val dontRemove = tryFoldLeft(rest, Occurrences.empty) {
-              case (occ, disj) =>
-                val newOcc = occ ++ occurrencesOf(disj)(using env, lhs.ctxs) // Ici, le ctxs n'importe pas, on souhaite surtout avoir le nombre total de lhs.terminal
-                if (newOcc(lhs.terminal).nonZero) Left(())
-                else Right(newOcc)
-            }
-            if (dontRemove.isLeft) lhs.ctxs else prevCtxs
-          case _ => lhs.ctxs
-        }
-
-        val fstTeared = tearDown(fst)(using env, ctxs)
-        (fstTeared.ctxs, (fstTeared.terminal +: rest) ++ unOrRhs)
-    }
-    */
-//    val ctxs = lhs.ctxsWithoutTerminalLastBound
-//    val simpDisjs = simplifiedDisjunction(Seq(lhs.terminal, rhs), polarity)(using env, lhs.ctxs)
-//    tearDown(simpDisjs)(using env, lhs.ctxs)
-
-    /*
-    val simpDisjs = simplifiedDisjunction(Seq(lhs.terminal, rhs), polarity)(using env, lhs.ctxs)
-    code2sig(simpDisjs) match {
-      case Signature(Label.Or, fst +: rest) if fst +: rest != Seq(lhs.terminal, rhs) =>
-        assert(rest.nonEmpty)
-        val prevCtxs = lhs.ctxs.pop match {
-          case Some((prevCtxs, Ctx.BoundDef(bnd))) if bnd == lhs.terminal && code2sig(lhs.terminal).label == Label.Or => // TODO: Quid si Not?
-            prevCtxs
-          case _ => lhs.ctxs
-        }
-        val fstTeared = tearDown(fst)(using env, prevCtxs)
-        val theRest = if (rest.size == 1) rest.head else codeOfSig(mkOr(rest), BoolTy)
-        val res = simplifiedDisjunctionCodeRes(fstTeared, theRest, polarity)
-        val noTailRecPls = Ctxs(lhs.ctxs.ctxs)
-        res
-//        fstTeared.derived(codeOfSig(mkOr(fstTeared.terminal +: rest), BoolTy))
-      case _ =>
-        if (CodeRes.isTerminal(simpDisjs)) {
-          lhs.derived(simpDisjs)
-        } else {
-          tearDown(simpDisjs)(using env, lhs.ctxs)
-        }
-    }
-    */
-    /*
-    val newCtxs = lhs.ctxs.pop match {
-      case Some((prevCtxs, Ctx.BoundDef(bnd))) if bnd == lhs.terminal && code2sig(lhs.terminal).label == Label.Or => // TODO: Quid si Not?
-        prevCtxs.addBoundDef(simpDisjs)
-      case _ => lhs.ctxs.addBoundDef(simpDisjs)
-    }
-    CodeRes(simpDisjs, newCtxs)
-    */
   }
 
-  final def negCodeResOf(c: Code)(using env: Env, ctxs: Ctxs): CodeRes = negCodeResOf(c)(_ => true)
+  private val negCodeCache = mutable.Map.empty[Code, Code]
+  private val mayAlwaysRmNeg: Code => Boolean = _ => true
 
-  final def negCodeResOf(c: Code)(mayRmNeg: Ctxs ?=> Code => Boolean)(using env: Env, ctxs: Ctxs): CodeRes = {
+  final def negCodeOf(c: Code): Code = negCodeOf(c)(mayAlwaysRmNeg)
+
+  final def negCodeOf(c: Code)(mayRmNeg: Code => Boolean): Code = {
     assert(codeTpe(c) == BoolTy, s"Got ${codeTpe(c)}")
-    if (CodeRes.isTerminal(c)) {
-      // assert(ctxs.isLitVarOrBoundDef(c)) // TODO: CovList n°16 fails ?
-      val neg = code2sig(c) match {
-        case Signature(Label.Not | Label.LessEquals |
-                       Label.LessThan | Label.GreaterEquals | Label.GreaterThan |
-                       Label.Lit(_), _) if mayRmNeg(c) =>
-          negCodeOf(c)
-        case _ =>
-          // TODO: Push la négation pour IfExpr et MatchExpr?
-          codeOfSig(mkNot(c), BoolTy)
+    if (mayRmNeg eq mayAlwaysRmNeg) {
+      negCodeCache.get(c) match {
+        case Some(n) => return n
+        case None => ()
       }
-      tearDown(neg)
-    } else {
-      val teared = tearDown(c)
-      negCodeResOf(teared.terminal)(mayRmNeg)(using env, teared.ctxs)
     }
-  }
 
-  final def negCodeOf(c: Code): Code = {
-    assert(codeTpe(c) == BoolTy, s"Got ${codeTpe(c)}")
-    code2sig(c) match {
-      case Signature(Label.Not, Seq(cc)) => cc
+    val res = code2sig(c) match {
+      case Signature(Label.Not, Seq(cc)) if mayRmNeg(c) => cc
       case BoolLitSig(b) => b2c(!b)
-      case LtSig(lhs, rhs) => codeOfSig(mkGreaterEquals(lhs, rhs), BoolTy)
-      case GeqSig(lhs, rhs) => codeOfSig(mkLessThan(lhs, rhs), BoolTy)
-      case GtSig(lhs, rhs) => codeOfSig(mkLessEquals(lhs, rhs), BoolTy)
-      case LeqSig(lhs, rhs) => codeOfSig(mkGreaterThan(lhs, rhs), BoolTy)
-      case _ =>
-        // TODO: Push la négation pour IfExpr et MatchExpr?
-        codeOfSig(mkNot(c), BoolTy)
+      case LtSig(lhs, rhs) if mayRmNeg(c) => codeOfSig(mkGreaterEquals(lhs, rhs), BoolTy)
+      case GeqSig(lhs, rhs) if mayRmNeg(c) => codeOfSig(mkLessThan(lhs, rhs), BoolTy)
+      case GtSig(lhs, rhs) if mayRmNeg(c) => codeOfSig(mkLessEquals(lhs, rhs), BoolTy)
+      case LeqSig(lhs, rhs) if mayRmNeg(c) => codeOfSig(mkGreaterThan(lhs, rhs), BoolTy)
+      case Signature(Label.IfExpr, Seq(cond, thenn, els)) =>
+        codeOfSig(mkIfExpr(cond, negCodeOf(thenn)(mayRmNeg), negCodeOf(els)(mayRmNeg)), BoolTy)
+      case Signature(Label.Let, Seq(e, body)) =>
+        codeOfSig(mkLet(e, negCodeOf(body)(mayRmNeg)), BoolTy)
+      case Signature(lab: Label.AssumeLike, Seq(pred, body)) =>
+        codeOfSig(mkAssumeLike(lab, pred, negCodeOf(body)(mayRmNeg)), BoolTy)
+      case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
+        assert(pats.size * 2 == guardRhs.size)
+        val cases = guardRhs.grouped(2).zip(pats).map {
+          case (Seq(guard, rhs), pat) => LabMatchCase(pat, guard, negCodeOf(rhs)(mayRmNeg))
+          case _ => sys.error("Oh non, on a été dupés :(")
+        }
+        codeOfSig(mkMatchExpr(scrut, cases.toSeq), BoolTy)
+
+      case _ => codeOfSig(mkNot(c), BoolTy)
     }
+
+    if (mayRmNeg eq mayAlwaysRmNeg) {
+      negCodeCache += c -> res
+    }
+    res
   }
 
   final def conjunct(conj: Seq[Code])(using Env, Ctxs): Code = simplifiedDisjunction(conj.map(negCodeOf), polarity = false)
@@ -1198,24 +1139,23 @@ trait Core extends Definitions { ocbsl =>
             simplifiedDisjunctionCodeRes(condCr, els, polarity = true)
 
           case (_, BoolLitSig(true)) =>
-            val negCond = negCodeResOf(cond)(using env, condCtxs)
-            simplifiedDisjunctionCodeRes(negCond, thenn, polarity = true)
+            val negCond = negCodeOf(cond)
+            simplifiedDisjunctionCodeRes(condCr.derived(negCond), thenn, polarity = true)
 
-          // TODO: Là où il y a des negCodeOf, on pourrait plutôt utiliser negCodeResOf pr hoist du ctx...
           case (BoolLitSig(false), _) =>
             // -> !cond && els === !(cond || !els)
             simplifiedDisjunctionCodeRes(condCr, negCodeOf(els), polarity = false)
 
           case (_, BoolLitSig(false)) =>
             // -> cond && then === !(!cond || !thenn)
-            val negCond = negCodeResOf(cond)(using env, condCtxs)
-            simplifiedDisjunctionCodeRes(negCond, negCodeOf(thenn), polarity = false)
+            val negCond = negCodeOf(cond)
+            simplifiedDisjunctionCodeRes(condCr.derived(negCond), negCodeOf(thenn), polarity = false)
 
           case (Signature(Label.IfExpr, Seq(cond2, thenn2, `els`)), _) =>
             // -> if (cond && cond2) thenn2 else els === if (!(!cond || !cond2)) thenn2 else els
-            val negCond = negCodeResOf(cond)(using env, condCtxs)
+            val negCond = negCodeOf(cond)
             val negCond2 = negCodeOf(cond2)
-            val combinedCond = simplifiedDisjunctionCodeRes(negCond, negCond2, polarity = false)
+            val combinedCond = simplifiedDisjunctionCodeRes(condCr.derived(negCond), negCond2, polarity = false)
             val newIfCode = codeOfSig(mkIfExpr(combinedCond.terminal, thenn2, els), tpe)
             combinedCond.derived(newIfCode)
 
