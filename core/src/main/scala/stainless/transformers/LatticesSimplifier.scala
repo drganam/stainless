@@ -24,7 +24,8 @@ trait LatticesSimplifier { self =>
 
   private val vcNum: AtomicInteger = new AtomicInteger(0)
 
-  val poi = 17
+  val poi = 4713
+//  val poi = 4753
 
   def simplify(e: Expr): Expr = {
 //    if (vcNum.get() < poi) {

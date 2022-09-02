@@ -157,7 +157,8 @@ trait VerificationChecker { self =>
         Some(vc -> res)
       }
     }
-
+//    val poi = 4713+3
+//    val results = Future.traverse(vcs.drop(poi - 1)) { vc =>
     val results = Future.traverse(vcs) { vc =>
       // Note that `successful(e)` is eager and gets immediately evaluated whereas Future(e) is a scheduled task.
       // If parallelism is not explicitly enabled, we fallback to eager evaluation

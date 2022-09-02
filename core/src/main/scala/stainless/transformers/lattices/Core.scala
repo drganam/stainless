@@ -268,6 +268,21 @@ trait Core extends Definitions { ocbsl =>
       else Some((Ctxs(ctxs.init), ctxs.last))
     }
 
+    def withRemovedBinding(c: Code): Ctxs = withRemovedBindings(Set(c))
+
+    def withRemovedBindings(cs: Set[Code]): Ctxs = {
+      Ctxs(ctxs.filterNot {
+        case Ctx.BoundDef(c) => cs(c)
+        case _ => false
+      })
+    }
+
+    def occurrences(inCtxs: Ctxs)(using Env): Occurrences = {
+      assert(inCtxs.isPrefixOf(this))
+      if (this.ctxs.isEmpty) Occurrences.empty
+      else CodeRes(unitCode, this).selfPlugged(inCtxs)._1
+    }
+
     // En gros: On plug jusqu'à ce que l'on atteigne inCtxs
     def plugged(inCtxs: Ctxs, u: Occurrences, c: Code)(using env: Env): (Occurrences, Code, Set[Code]) = {
       assert(inCtxs.isPrefixOf(this))
@@ -444,6 +459,11 @@ trait Core extends Definitions { ocbsl =>
 
     lazy val hc: Int = java.util.Objects.hash(terminal, ctxs)
     override def hashCode(): Int = hc
+
+    def ctxsWithoutTerminalLastBound: Ctxs = ctxs.pop match {
+      case Some((prevCtxs, Ctx.BoundDef(`terminal`))) => prevCtxs
+      case _ => ctxs
+    }
 
     def selfPlugged(inCtxs: Ctxs)(using env: Env): (Occurrences, Code) = {
       assert(inCtxs.isPrefixOf(ctxs))
@@ -669,7 +689,9 @@ trait Core extends Definitions { ocbsl =>
       case or @ Or(_) => transformDisjunction(unOr(or))(codeOfExpr)
       case Not(e) => negExprOf(e)
 
-      case Implies(e1, e2) => codeOfExpr(Or(Not(e1), e2))
+      case i@Implies(e1, e2) =>
+        transformDisjunction(unOr(i))(codeOfExpr)
+      // codeOfExpr(Or(Not(e1), e2))
       case Equals(e1, e2) => codeOfExprsBound(e1, e2, tpe)(mkEquals)
       case LessThan(e1, e2) => codeOfExprsBound(e1, e2, tpe)(mkLessThan)
       case GreaterThan(e1, e2) => codeOfExprsBound(e1, e2, tpe)(mkGreaterThan)
@@ -929,9 +951,31 @@ trait Core extends Definitions { ocbsl =>
         val neg = negCodeOf(re.terminal)
         val newCtxs = re.ctxs.withCond(neg)
         if (neg == falseCode) (rdisjsAcc :+ re, newCtxs) // On s'arrête ici, et on ajoute en effet false dans les conds, c'est voulu. Cela permet d'avoir le comportement inverse avec combineRec
-        else transformRec(disjs.tail, rdisjsAcc :+ re)(using newCtxs)
+        else {
+          val res = transformRec(disjs.tail, rdisjsAcc :+ re)(using newCtxs)
+          val noTailRecPls = Ctxs(re.ctxs.ctxs)
+          res
+        }
       }
     }
+
+    def rmBinding(ctxs: Ctxs, terminal: Code): Ctxs = {
+      assert(code2sig(terminal).label == Label.Or, "Que pour des Or!!!")
+      val prefix0 = ctxs.ctxs.takeWhile {
+        case Ctx.BoundDef(`terminal`) => false
+        case _ => true
+      }
+      if (ctxs.ctxs.size == prefix0.size) ctxs // `terminal` n'est en fait même pas bound, donc rien à retirer
+      else {
+        val prefix = Ctxs(prefix0).addBoundDef(terminal)
+        val occ = ctxs.occurrences(prefix)
+        if (occ(terminal).isZero) ctxs.withRemovedBinding(terminal)
+        else ctxs
+      }
+    }
+
+    // Un terminal - des terminaux, et pas des terminals!!!!
+    def rmBindings(ctxs: Ctxs, terminaux: Seq[Code]): Ctxs = terminaux.foldLeft(ctxs)(rmBinding)
 
     def combineRec(disjs: Seq[CodeRes], acc: CodeRes): CodeRes = {
       disjs match {
@@ -946,7 +990,17 @@ trait Core extends Definitions { ocbsl =>
             combineRec(init, acc)
           } else {
             val (pluggedOcc, accPlugged) = acc.selfPlugged(last.ctxs.withNegatedCond(last.terminal))
-            val newAcc = simplifiedDisjunctionCodeRes(last, accPlugged, polarity = true)
+            // val newAcc = simplifiedDisjunctionCodeRes(last, accPlugged, polarity = true)
+
+            // TODO: Explication
+            // TODO: Pas si vite! newDisjs peut très bien retourner un non terminal!
+            val newDisjs = simplifiedDisjunction(Seq(last.terminal, accPlugged), polarity = true)(using env, last.ctxs)
+            val prevCtxs = init.lastOption.map(_.ctxs).getOrElse(outerCtxs)
+            val candidateRm = Seq(last.terminal, accPlugged)
+              .filter(c => code2sig(c).label == Label.Or && !prevCtxs.isBoundDef(c))
+            val newCtxs = rmBindings(last.ctxs, candidateRm)
+            val newAcc = CodeRes(newDisjs, newCtxs.addBoundDef(newDisjs))
+
             val res = combineRec(init, newAcc)
             val noTailRecPls = Ctxs(last.ctxs.ctxs)
             res
@@ -962,14 +1016,77 @@ trait Core extends Definitions { ocbsl =>
 
   // TODO: Explication
   def simplifiedDisjunctionCodeRes(lhs: CodeRes, rhs: Code, polarity: Boolean)(using env: Env): CodeRes = {
-    // TODO: Pas si vite! newDisjs peut très bien retourner un non terminal!
+    val ctxs = lhs.ctxs.pop match {
+      case Some((prevCtxs, Ctx.BoundDef(last))) if last == lhs.terminal && code2sig(last).label == Label.Or => prevCtxs
+      case _ => lhs.ctxs
+    }
+    val simpDisjs = simplifiedDisjunction(Seq(lhs.terminal, rhs), polarity)(using env, ctxs)
+    tearDown(simpDisjs)(using env, ctxs)
+
+    //    val expected = tearDown(lhs.terminal)(using env, lhs.ctxs)
+//    assert(expected == lhs)
+    /*
+    val unOredLhs = unOrCode(lhs.terminal)
+    val unOrRhs = unOrCode(rhs)
+    val (ctxs, flattenedDisjs) = unOredLhs match {
+      case Seq() => sys.error("impossible")
+      case Seq(lhsDisj) =>
+        assert(lhsDisj == lhs.terminal)
+        (lhs.ctxs, lhs.terminal +: unOrRhs)
+      case fst +: rest =>
+        assert(code2sig(lhs.terminal).label == Label.Or)
+        val ctxs = lhs.ctxs.pop match {
+          case Some((prevCtxs, Ctx.BoundDef(last))) if last == lhs.terminal =>
+            val dontRemove = tryFoldLeft(rest, Occurrences.empty) {
+              case (occ, disj) =>
+                val newOcc = occ ++ occurrencesOf(disj)(using env, lhs.ctxs) // Ici, le ctxs n'importe pas, on souhaite surtout avoir le nombre total de lhs.terminal
+                if (newOcc(lhs.terminal).nonZero) Left(())
+                else Right(newOcc)
+            }
+            if (dontRemove.isLeft) lhs.ctxs else prevCtxs
+          case _ => lhs.ctxs
+        }
+
+        val fstTeared = tearDown(fst)(using env, ctxs)
+        (fstTeared.ctxs, (fstTeared.terminal +: rest) ++ unOrRhs)
+    }
+    */
+//    val ctxs = lhs.ctxsWithoutTerminalLastBound
+//    val simpDisjs = simplifiedDisjunction(Seq(lhs.terminal, rhs), polarity)(using env, lhs.ctxs)
+//    tearDown(simpDisjs)(using env, lhs.ctxs)
+
+    /*
     val simpDisjs = simplifiedDisjunction(Seq(lhs.terminal, rhs), polarity)(using env, lhs.ctxs)
+    code2sig(simpDisjs) match {
+      case Signature(Label.Or, fst +: rest) if fst +: rest != Seq(lhs.terminal, rhs) =>
+        assert(rest.nonEmpty)
+        val prevCtxs = lhs.ctxs.pop match {
+          case Some((prevCtxs, Ctx.BoundDef(bnd))) if bnd == lhs.terminal && code2sig(lhs.terminal).label == Label.Or => // TODO: Quid si Not?
+            prevCtxs
+          case _ => lhs.ctxs
+        }
+        val fstTeared = tearDown(fst)(using env, prevCtxs)
+        val theRest = if (rest.size == 1) rest.head else codeOfSig(mkOr(rest), BoolTy)
+        val res = simplifiedDisjunctionCodeRes(fstTeared, theRest, polarity)
+        val noTailRecPls = Ctxs(lhs.ctxs.ctxs)
+        res
+//        fstTeared.derived(codeOfSig(mkOr(fstTeared.terminal +: rest), BoolTy))
+      case _ =>
+        if (CodeRes.isTerminal(simpDisjs)) {
+          lhs.derived(simpDisjs)
+        } else {
+          tearDown(simpDisjs)(using env, lhs.ctxs)
+        }
+    }
+    */
+    /*
     val newCtxs = lhs.ctxs.pop match {
       case Some((prevCtxs, Ctx.BoundDef(bnd))) if bnd == lhs.terminal && code2sig(lhs.terminal).label == Label.Or => // TODO: Quid si Not?
         prevCtxs.addBoundDef(simpDisjs)
       case _ => lhs.ctxs.addBoundDef(simpDisjs)
     }
     CodeRes(simpDisjs, newCtxs)
+    */
   }
 
   final def negCodeResOf(c: Code)(using env: Env, ctxs: Ctxs): CodeRes = negCodeResOf(c)(_ => true)
@@ -987,7 +1104,7 @@ trait Core extends Definitions { ocbsl =>
           // TODO: Push la négation pour IfExpr et MatchExpr?
           codeOfSig(mkNot(c), BoolTy)
       }
-      CodeRes(neg, ctxs.addBoundDef(neg))
+      tearDown(neg)
     } else {
       val teared = tearDown(c)
       negCodeResOf(teared.terminal)(mayRmNeg)(using env, teared.ctxs)
@@ -2146,7 +2263,7 @@ trait Core extends Definitions { ocbsl =>
   final def uncodeOfNot(c: Code)(using renv: RevEnv, ctxs: Ctxs): RevRes = {
     import renv.given
 
-    def mayRmNeg(op: Code)(using Ctxs): Boolean = {
+    def mayRmNeg(op: Code): Boolean = {
       def isSimple(c: Code): Boolean = isLitOrVar(c) || renv.revLetDefs.contains(c)
       // TODO: Dire pk ! pour le op: car s'il est bind, une inversion risque de dupliquer les operandes
       def mayRm(operands: Seq[Code]): Boolean = operands.forall(isSimple) || !renv.revLetDefs.contains(op)
@@ -2164,12 +2281,27 @@ trait Core extends Definitions { ocbsl =>
         val negDisjs = disjs.foldLeft((Seq.empty[RevRes], ctxs)) {
           case ((acc, ctxs), disj) =>
             given Ctxs = ctxs
+            /*
             val negCr = negCodeResOf(disj)(mayRmNeg)
             val (_, negPlugged) = negCr.selfPlugged(ctxs)
             val negExpr = uncodeOf(negPlugged)
             // Comme on est en négation, pour le next ctxs, on souhaite avoir ctxs avec comme bounddef la négation
             // du terminal de disj et comme condition le terminal de disj
             (acc :+ negExpr, negCr.ctxs.withNegatedCond(negCr.terminal))
+            */
+            // Pas de tearDown, car là tout a été plug. Si on fait un tearDown, on risque de créer des dupliqués car l'info précises des BoundDef est perdues
+            val negated = negCodeOf(disj)
+            val negRes = uncodeOf(negated)
+            val newCtxs = {
+              // Comme on est en négation, pour le next ctxs, on souhaite avoir ctxs avec comme bounddef la négation
+              // du terminal de disj et comme condition le terminal de disj
+              val tearedDisj = tearDown(disj)
+              assert(tearedDisj.ctxs.isLitVarOrBoundDef(tearedDisj.terminal))
+              val negatedDisjTerminal = negCodeOf(tearedDisj.terminal)
+              tearedDisj.ctxs.addBoundDef(negatedDisjTerminal)
+                .withCond(tearedDisj.terminal)
+            }
+            (acc :+ negRes, newCtxs)
         }._1
         RevRes(And(negDisjs.map(_.expr)), negDisjs.flatMap(_.used).toSet)
 
@@ -2461,22 +2593,27 @@ trait Core extends Definitions { ocbsl =>
         case Signature(Label.Or, first +: _) =>
           val firstTeared = transform(first, repl, ())
           CodeRes(c, firstTeared.ctxs.addBoundDef(c))
+
+        case Signature(Label.Not, Seq(cc)) =>
+          val teared = transform(cc, repl, ())
+          teared.derived(codeOfSig(mkNot(teared.terminal), BoolTy))
+
         case Signature(Label.IfExpr, Seq(cond, _, _)) =>
           val condTeared = transform(cond, repl, ())
           CodeRes(c, condTeared.ctxs.addBoundDef(c))
+
         case Signature(_: (Label.Ensuring.type | Label.LambdaLike), _) => CodeRes(c, ctxs.addBoundDef(c))
+
         case Signature(Label.MatchExpr(_), scrut +: _) =>
           val scrutTeared = transform(scrut, repl, ())
           CodeRes(c, scrutTeared.ctxs.addBoundDef(c))
+
         case _ => super.transformImpl(c, repl, ())
       }
     }
 
-    if (CodeRes.isTerminal(c)) CodeRes(c, ctxs.addBoundDef(c))
-    else {
-      unplugged(c).map(_._1)
-        .getOrElse(tear.transform(c, Map.empty, ()))
-    }
+    unplugged(c).map(_._1)
+      .getOrElse(tear.transform(c, Map.empty, ()))
   }
 
   //endregion
@@ -2779,6 +2916,8 @@ trait Core extends Definitions { ocbsl =>
 
   final def unOr(e: Expr): Seq[Expr] = e match {
     case Or(es) => es.flatMap(unOr)
+    case Not(Not(e)) => unOr(e)
+    case Implies(e1, e2) => unOr(Not(e1)) ++ unOr(e2)
     case e => Seq(e)
   }
 
