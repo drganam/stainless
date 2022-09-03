@@ -778,6 +778,28 @@ trait Core extends Definitions { ocbsl =>
         val rchild = codeOfExpr(child)
         val negChild = negCodeOf(rchild.terminal)
         rchild.derived(negChild)
+        /*
+        val negated =
+          code2sig(rchild.terminal) match {
+            // Pour If et Match, comme on va "push" dans les branches la négation, cela risque de
+            case Signature(Label.IfExpr | Label.MatchExpr(_), _) => codeOfSig(mkNot(rchild.terminal), BoolTy)
+            case _ => negCodeOf(rchild.terminal)
+          }
+        rchild.derived(negated)
+        */
+        /*
+        val ctxs = rchild.ctxs.pop match {
+          case Some((prevCtxs, Ctx.BoundDef(bnd))) if bnd == rchild.terminal =>
+            code2sig(rchild.terminal) match {
+              // Pour If et Match, comme on va "push" dans les branches la négation, on a meilleur temps de remplacer le binding de la non-négation avec celui de la négation pour eviter des potentiel dupliqués (voir LeftPad)
+              case Signature(Label.IfExpr | Label.MatchExpr(_), _) => prevCtxs
+              case _ => rchild.ctxs
+            }
+          case _ => rchild.ctxs
+        }
+        val negChild = negCodeOf(rchild.terminal)
+        CodeRes(negChild, ctxs.addBoundDef(negChild))
+        */
     }
   }
 
@@ -1044,13 +1066,17 @@ trait Core extends Definitions { ocbsl =>
       case GeqSig(lhs, rhs) if mayRmNeg(c) => codeOfSig(mkLessThan(lhs, rhs), BoolTy)
       case GtSig(lhs, rhs) if mayRmNeg(c) => codeOfSig(mkLessEquals(lhs, rhs), BoolTy)
       case LeqSig(lhs, rhs) if mayRmNeg(c) => codeOfSig(mkGreaterThan(lhs, rhs), BoolTy)
-      case Signature(Label.IfExpr, Seq(cond, thenn, els)) =>
+
+      case Signature(Label.IfExpr, Seq(cond, thenn, els)) if mayRmNeg(c) =>
         codeOfSig(mkIfExpr(cond, negCodeOf(thenn)(mayRmNeg), negCodeOf(els)(mayRmNeg)), BoolTy)
-      case Signature(Label.Let, Seq(e, body)) =>
+
+      case Signature(Label.Let, Seq(e, body)) if mayRmNeg(c) =>
         codeOfSig(mkLet(e, negCodeOf(body)(mayRmNeg)), BoolTy)
-      case Signature(lab: Label.AssumeLike, Seq(pred, body)) =>
+
+      case Signature(lab: Label.AssumeLike, Seq(pred, body)) if mayRmNeg(c) =>
         codeOfSig(mkAssumeLike(lab, pred, negCodeOf(body)(mayRmNeg)), BoolTy)
-      case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
+
+      case Signature(Label.MatchExpr(pats), scrut +: guardRhs) if mayRmNeg(c) =>
         assert(pats.size * 2 == guardRhs.size)
         val cases = guardRhs.grouped(2).zip(pats).map {
           case (Seq(guard, rhs), pat) => LabMatchCase(pat, guard, negCodeOf(rhs)(mayRmNeg))
@@ -1773,6 +1799,7 @@ trait Core extends Definitions { ocbsl =>
         if (env.forceBinding) BindingCase.MustBind
         else {
           val definitionOccurrence = bodyOccurrences(terminal)
+          lazy val negatedDefOccurrence = negCodeCache.get(terminal).map(bodyOccurrences.apply).getOrElse(Occurrence.Zero)
           val terminalIsPure = codePurity(terminal)
           definitionOccurrence match {
             case Occurrence.Many =>
@@ -1783,7 +1810,7 @@ trait Core extends Definitions { ocbsl =>
               }
             case Occurrence.Zero =>
               // Si une expr impure n'apparait pas dans le body, on ne peut pas l'éliminer, il faut donc le bind
-              if (!terminalIsPure.isPure)
+              if (!terminalIsPure.isPure && negatedDefOccurrence.isZero)
                 BindingCase.MustBind
               else BindingCase.Elidable
             case Occurrence.Once(inCtxs, occurrenceNesting, _) if terminalIsPure.isPure =>
@@ -2213,6 +2240,8 @@ trait Core extends Definitions { ocbsl =>
         case Signature(Label.Not, Seq(cc)) => mayRm(Seq(cc))
         case Signature(Label.GreaterThan | Label.GreaterEquals |
                        Label.LessThan | Label.LessEquals, Seq(lhs, rhs)) => mayRm(Seq(lhs, rhs))
+        case Signature(_: (Label.IfExpr.type | Label.MatchExpr.type), _) =>
+          false
         case _ => true
       }
     }
@@ -2222,16 +2251,8 @@ trait Core extends Definitions { ocbsl =>
         val negDisjs = disjs.foldLeft((Seq.empty[RevRes], ctxs)) {
           case ((acc, ctxs), disj) =>
             given Ctxs = ctxs
-            /*
-            val negCr = negCodeResOf(disj)(mayRmNeg)
-            val (_, negPlugged) = negCr.selfPlugged(ctxs)
-            val negExpr = uncodeOf(negPlugged)
-            // Comme on est en négation, pour le next ctxs, on souhaite avoir ctxs avec comme bounddef la négation
-            // du terminal de disj et comme condition le terminal de disj
-            (acc :+ negExpr, negCr.ctxs.withNegatedCond(negCr.terminal))
-            */
             // Pas de tearDown, car là tout a été plug. Si on fait un tearDown, on risque de créer des dupliqués car l'info précises des BoundDef est perdues
-            val negated = negCodeOf(disj)
+            val negated = negCodeOf(disj)(mayRmNeg)
             val negRes = uncodeOf(negated)
             val newCtxs = {
               // Comme on est en négation, pour le next ctxs, on souhaite avoir ctxs avec comme bounddef la négation
