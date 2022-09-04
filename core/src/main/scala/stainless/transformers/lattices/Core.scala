@@ -1786,6 +1786,7 @@ trait Core extends Definitions { ocbsl =>
   final def isVarOrSelector(c: Code): Boolean = code2sig(c) match {
     case Signature(Label.Var(_), Seq()) => true
     case Signature(Label.ADTSelector(_, _, _), Seq(e)) => isVarOrSelector(e)
+    case Signature(Label.TupleSelect(_), Seq(e)) => isVarOrSelector(e)
     case _ => false
   }
 
@@ -1803,11 +1804,8 @@ trait Core extends Definitions { ocbsl =>
           val terminalIsPure = codePurity(terminal)
           definitionOccurrence match {
             case Occurrence.Many =>
-              codeTpe(terminal) match {
-                case FunctionType(_, _) if !isLambda(terminal) && isVarOrSelector(terminal) => BindingCase.Inlinable
-                case _ =>
-                  BindingCase.MustBind
-              }
+              if (!isLambda(terminal) && isVarOrSelector(terminal)) BindingCase.Inlinable
+              else BindingCase.MustBind
             case Occurrence.Zero =>
               // Si une expr impure n'apparait pas dans le body, on ne peut pas l'éliminer, il faut donc le bind
               if (!terminalIsPure.isPure && negatedDefOccurrence.isZero)
