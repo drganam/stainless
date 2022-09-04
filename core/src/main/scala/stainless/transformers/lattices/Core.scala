@@ -899,14 +899,14 @@ trait Core extends Definitions { ocbsl =>
 
   def implied(rhs: Code)(using env: Env, ctxs: Ctxs): Boolean
 
-  def doSimplifyDisjunction(disj0: Seq[Code])(using Env, Ctxs): Seq[Code]
+  def doSimplifyDisjunction(disj0: Seq[Code], polarity: Boolean)(using Env, Ctxs): Seq[Code]
 
   def checkForContradiction(disjs: Seq[Code], polarity: Boolean)(using Env, Ctxs): Option[Int]
 
   final def simplifiedDisjunction(disj0: Seq[Code], polarity: Boolean)(using Env, Ctxs): Code = {
     assert(disj0.forall(c => codeTpe(c) == BoolTy))
     val disjs1 = unOrCodes(disj0).filter(_ != falseCode).distinct
-    val disjs2 = doSimplifyDisjunction(disjs1)
+    val disjs2 = doSimplifyDisjunction(disjs1, polarity)
     val simp = {
       if (disjs2.isEmpty) falseCode
       else if (disjs2.size == 1) disjs2.head

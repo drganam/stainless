@@ -21,7 +21,7 @@ trait OCBSL extends Core {
     }
   }
 
-  override final def doSimplifyDisjunction(disj0: Seq[Code])(using Env, Ctxs): Seq[Code] = disj0
+  override final def doSimplifyDisjunction(disj0: Seq[Code], polarity: Boolean)(using Env, Ctxs): Seq[Code] = disj0
 
   override final def checkForContradiction(disjs0: Seq[Code], polarityUnused: Boolean)(using Env, Ctxs): Option[Int] = {
     // Convert a >= b and a > b to !(a < b) and !(a <= b) respectively.

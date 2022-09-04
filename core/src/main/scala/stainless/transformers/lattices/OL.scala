@@ -28,6 +28,9 @@ trait OL extends Core {
       case (BoolLitSig(b), _) => !b
       case (_, BoolLitSig(b)) => b
 
+      case (OrSig(disjs1, false), OrSig(disjs2, true)) =>
+        disjs1.exists(c => latticesLeq(negCodeOf(c), rhs)) || disjs2.exists(latticesLeq(lhs, _))
+
       case (_, OrSig(disjs, false)) =>
         disjs.forall(d => latticesLeq(lhs, negCodeOf(d)))
 
@@ -44,22 +47,53 @@ trait OL extends Core {
       case (EqSig(lhs1, rhs1), GeqSig(lhs2, rhs2)) => lhs1 == lhs2 && rhs1 == rhs2
       case (LtSig(lhs1, rhs1), LeqSig(lhs2, rhs2)) => lhs1 == lhs2 && rhs1 == rhs2
       case (GtSig(lhs1, rhs1), GeqSig(lhs2, rhs2)) => lhs1 == lhs2 && rhs1 == rhs2
+
       case _ => false
     })
   }
 
-  override final def doSimplifyDisjunction(disjs: Seq[Code])(using Env, Ctxs): Seq[Code] = {
+  override final def doSimplifyDisjunction(disjs: Seq[Code], polarity: Boolean)(using Env, Ctxs): Seq[Code] = {
+    if (disjs.size <= 1) return disjs
+
+    val nonSimp = {
+      val or = codeOfDisjs(disjs)
+      if (polarity) or
+      else codeOfSig(mkNot(or), BoolTy)
+    }
+
+    def treatChild(phiKs: Code): Seq[Code] = code2sig(phiKs) match {
+      case OrSig(psiJs, true) => psiJs
+      case OrSig(psiJs, false) =>
+        if (polarity) {
+          findMap(psiJs) { psiJ =>
+            val neg = negCodeOf(psiJ)
+            if (latticesLeq(neg, nonSimp)) Some(treatChild(neg))
+            else None
+          }.getOrElse(Seq(phiKs))
+        } else {
+          findMap(psiJs) { psiJ =>
+            if (latticesLeq(nonSimp, psiJ)) Some(treatChild(negCodeOf(psiJ)))
+            else None
+          }.getOrElse(Seq(phiKs))
+        }
+      case _ => Seq(phiKs)
+    }
+
     def rec(remaining: Seq[Code], accepted: Seq[Code]): Seq[Code] = remaining match {
       case Seq() => accepted
       case current +: remaining =>
-        val accept = (!remaining.exists(e => latticesLeq(current, e)) &&
-          !accepted.exists(e => latticesLeq(current, e))) ||
-          // TODO: Pureté imprécise! Il faudrait accumuler les disjs
-          !codePurity(current).isPure
-        rec(remaining, if (accept) accepted :+ current else accepted)
+        if (remaining.size + accepted.size == 0) Seq(current)
+        else {
+          val all = codeOfDisjs(remaining ++ accepted)
+          val accept = !latticesLeq(current, all) ||
+            // TODO: Pureté imprécise! Il faudrait accumuler les disjs
+            !codePurity(current).isPure
+          rec(remaining, if (accept) accepted :+ current else accepted)
+        }
     }
 
-    rec(disjs, Seq.empty)
+    val disjs2 = disjs.flatMap(treatChild)
+    rec(disjs2, Seq.empty)
   }
 
   override def checkForContradiction(disjs: Seq[Code], polarity: Boolean)(using Env, Ctxs): Option[Int] = {
@@ -75,6 +109,11 @@ trait OL extends Core {
       }
     }
     if (ix < 0) None else Some(ix)
+  }
+
+  private def codeOfDisjs(d: Seq[Code]): Code = {
+    assert(d.nonEmpty)
+    if (d.size == 1) d.head else codeOfSig(mkOr(d), BoolTy)
   }
 
   object NegSig {
