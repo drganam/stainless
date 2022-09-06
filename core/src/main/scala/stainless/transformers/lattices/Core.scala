@@ -144,6 +144,26 @@ trait Core extends Definitions { ocbsl =>
       case Occurrence.Once(inCtxs, _, _) => ctxs.isPrefixOf(inCtxs)
       case _ => true
     }
+
+    def withInlinedOccurrences(newInCtxs: Ctxs, nesting: LambdaNesting)(using env: Env): Occurrences = {
+      assert(env.nesting.level <= nesting.level)
+      Occurrences(c2u.map {
+        case (c, Occurrence.Once(prevInCtxs, nesting2, kind)) =>
+          assert(env.nesting.level <= nesting2.level)
+          val nbNestedLambdas = nesting2.level - env.nesting.level
+          val ctxs = prevInCtxs.movedAfter(newInCtxs)
+          c -> Occurrence.Once(ctxs, LambdaNesting(nesting.level + nbNestedLambdas), kind)
+        case (c, occ) => c -> occ
+      })
+    }
+
+    def withRemovedBinding(bound: Code): Occurrences = withRemovedBindings(Set(bound))
+
+    def withRemovedBindings(bound: Set[Code]): Occurrences = Occurrences(c2u.map {
+      case (c, Occurrence.Once(inCtxs, nesting, kind)) =>
+        c -> Occurrence.Once(inCtxs.withRemovedBindings(bound), nesting, kind)
+      case (c, occ) => c -> occ
+    })
   }
 
   object Occurrences {
@@ -283,6 +303,14 @@ trait Core extends Definitions { ocbsl =>
       else CodeRes(unitCode, this).selfPlugged(inCtxs)._1
     }
 
+    def movedAfter(after: Ctxs): Ctxs = {
+      val common = this.ctxs.zip(after.ctxs).takeWhile { case (slf, after) => slf == after }.map(_._1)
+      val suffixThis = this.ctxs.drop(common.size)
+      val suffixAfter = after.ctxs.drop(common.size)
+      val merged = common ++ suffixAfter ++ suffixThis
+      Ctxs(merged)
+    }
+
     // En gros: On plug jusqu'à ce que l'on atteigne inCtxs
     def plugged(inCtxs: Ctxs, u: Occurrences, c: Code)(using env: Env): (Occurrences, Code, Set[Code]) = {
       assert(inCtxs.isPrefixOf(this))
@@ -419,13 +447,17 @@ trait Core extends Definitions { ocbsl =>
             case _ =>
               val u2 = definitionOccurrence match {
                 case Occurrence.Zero => u
-                case Occurrence.Once(_, _, _) =>
-                  u ++ compWoTerm
+//                case Occurrence.Once(_, _, _) =>
+//                  u ++ compWoTerm
+                case Occurrence.Once(inCtxs, nesting, _) =>
+                  // En gros: on se sert de la definitionOccurrence pour mettre a jour les occurrences des composant du terminal
+                  u ++ compWoTerm.withInlinedOccurrences(inCtxs.withRemovedBinding(terminal), nesting)
                 case Occurrence.Many =>
                   // Ce cas se passe pour les x.f1.fnField où l'on les inline au lieu de les bind
                   u ++ compWoTerm.manyied
               }
-              (u2, c, inlinedLet + terminal)
+              val u3 = u2.withRemovedBinding(terminal)
+              (u3, c, inlinedLet + terminal)
           }
 
         case Ctx.AssumeLike(lab, predTerminal) =>
@@ -674,7 +706,8 @@ trait Core extends Definitions { ocbsl =>
       // TODO: On pourrait p-e ignorer Annotated? De toute façon, si c'est pour avoir des DropVCs, cela ne change rien dans notre cas de figure?
       //  -> sauf p-e si on fait un "uncodeOf" et qu'on a besoin de restaurer certaines annotation, mais là on pourrait p-e envisager
       //  une map ad-hoc qui contient ces infos...?
-      case Annotated(e, _) => codeOfExpr(e)
+      case Annotated(e, flags) => // codeOfExpr(e)
+        codeOfExprsBound(e, tpe)(mkAnnot(_, flags))
         /*
         // TODO: Gros gag: pourrait-on envisager d'assigner le même code pour la sig. de Annotated que pour la sig. de e ????
         //    Il faudra faire cette update un peu hacky à la fin. On aura besoin de manip les 2 maps par nous meme
@@ -1787,6 +1820,9 @@ trait Core extends Definitions { ocbsl =>
     case Signature(Label.Var(_), Seq()) => true
     case Signature(Label.ADTSelector(_, _, _), Seq(e)) => isVarOrSelector(e)
     case Signature(Label.TupleSelect(_), Seq(e)) => isVarOrSelector(e)
+//    case Signature(Label.ArrayLength, Seq(e)) => isVarOrSelector(e)
+//    case Signature(Label.Plus, Seq(a, b)) => isLit(a) || isLit(b)
+//    case Signature(Label.Minus, Seq(a, b)) => isLit(a) || isLit(b)
     case _ => false
   }
 
@@ -1827,15 +1863,15 @@ trait Core extends Definitions { ocbsl =>
               assert(prefix.impureParts.ctxs.size + 1 <= inCtxs.ctxs.size)
               assert(inCtxs.ctxs(prefix.impureParts.ctxs.size) == Ctx.BoundDef(terminal))
 
-              lazy val sequencingPreserved: Boolean = {
-                val extras = inCtxs.ctxs.drop(prefix.ctxs.size + 1) // +1 car c'est après ce binding
-                extras.forall {
-                  case Ctx.Assumed(_) | Ctx.AssumeLike(_, _) => false // Condition supplémentaire; donc impure
-                  case Ctx.BoundDef(extra) => inlinedLets(extra)
-                }
-              }
-
-              if (env.nesting == occurrenceNesting && sequencingPreserved) BindingCase.Inlinable
+//              lazy val sequencingPreserved: Boolean = {
+//                val extras = inCtxs.ctxs.drop(prefix.ctxs.size + 1) // +1 car c'est après ce binding
+//                extras.forall {
+//                  case Ctx.Assumed(_) | Ctx.AssumeLike(_, _) => false // Condition supplémentaire; donc impure
+//                  case Ctx.BoundDef(extra) => inlinedLets(extra)
+//                }
+//              }
+//              if (env.nesting == occurrenceNesting && sequencingPreserved) BindingCase.Inlinable
+              if (env.nesting == occurrenceNesting && inCtxs.ctxs.size == prefix.impureParts.ctxs.size + 1) BindingCase.Inlinable
               else {
                 BindingCase.MustBind
               }

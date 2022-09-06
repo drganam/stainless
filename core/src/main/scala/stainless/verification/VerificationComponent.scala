@@ -3,13 +3,14 @@
 package stainless
 package verification
 
+import inox.solvers.PurityOptions
 import io.circe._
 
 import scala.concurrent.Future
-
 import stainless.extraction._
 import stainless.extraction.utils.DebugSymbols
 import stainless.termination.MeasureInference
+import stainless.transformers.LatticesSimplifier
 
 /**
  * Strict Arithmetic Mode:
@@ -81,6 +82,29 @@ class VerificationRun private(override val component: VerificationComponent.type
     import context._
 
     val functions = functions0.filterNot(fid => symbols.getFunction(fid).flags.contains(trees.DropVCs))
+
+//    val useOCBSL = context.options.findOptionOrDefault(optOCBSLSimp)
+//    val useOL = context.options.findOptionOrDefault(optOLSimp)
+//    val algo = {
+//      if (useOL) LatticesSimplifier.UnderlyingAlgo.OL
+//      else LatticesSimplifier.UnderlyingAlgo.OCBSL
+//    }
+//    val latticeSimp = LatticesSimplifier(trees, symbols, PurityOptions.unchecked, algo)
+//    if (useOCBSL && useOL) {
+//      reporter.warning("Both OCBSL and OL are selected, defaulting to OL")
+//    }
+//
+//    def simplifyFn(f: trees.FunDef): trees.FunDef = {
+//      if (true || useOCBSL || useOL) {
+//        val newBody = latticeSimp.simplify(symbols.simplifyLets(f.fullBody))
+//        f.copy(fullBody = newBody)
+//      } else {
+//        val newBody = symbols.simplifyExpr(symbols.simplifyLets(f.fullBody))(using PurityOptions.unchecked)
+//        f.copy(fullBody = newBody)
+//      }
+//    }
+//    val p = inox.Program(trees)(symbols.withFunctions(symbols.functions.values.map(simplifyFn).toSeq))
+
     val p = inox.Program(trees)(symbols)
 
     if (context.options.findOptionOrDefault(optCoq)) {
