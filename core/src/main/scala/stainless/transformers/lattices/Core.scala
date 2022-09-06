@@ -267,6 +267,15 @@ trait Core extends Definitions { ocbsl =>
       suffix.foldLeft(newPrefix)(_.addCtx(_))
     }
 
+    def addExtraWithoutAssumed(suffix: Ctxs): Ctxs = {
+      assert(this.isPrefixOf(suffix))
+      val (common, extra) = suffix.ctxs.splitAt(this.size)
+      Ctxs(extra.foldLeft(common) {
+        case (acc, ctx@(Ctx.BoundDef(_) | Ctx.AssumeLike(_, _))) => acc :+ ctx
+        case (acc, Ctx.Assumed(_)) => acc
+      })
+    }
+
     def addCtx(ctx: Ctx): Ctxs = ctx match {
       case bd@Ctx.BoundDef(t) =>
         if (isLitVarOrBoundDef(t)) this
@@ -1495,8 +1504,8 @@ trait Core extends Definitions { ocbsl =>
 
   enum SimplifiedCase {
     case Unreachable
-    case Covered(rhsCtxs: Ctxs, comp: Occurrences)
-    case Unchanged(rhsCtxs: Ctxs, caseConds: Seq[Code], comp: Occurrences)
+    case Covered(caseCtxs: Ctxs, rhsCtxs: Ctxs, comp: Occurrences)
+    case Unchanged(caseCtxs: Ctxs, rhsCtxs: Ctxs, caseConds: Seq[Code], comp: Occurrences)
   }
 
   enum SimplifiedCases {
@@ -1508,21 +1517,19 @@ trait Core extends Definitions { ocbsl =>
   final def simplifyCase(scrut: Code, matchCase: LabMatchCase)(using env: Env, ctxs0: Ctxs): SimplifiedCase = {
     assert(ctxs0.isLitVarOrBoundDef(scrut))
     val PatBdgsAndConds(ctxs1, _, patConds) = addPatternBindingsAndConds(ctxs0, scrut, matchCase.pattern)
-    given Ctxs = ctxs1
     val rhsCtxs = ctxs1.withCond(matchCase.guard)
     val caseConds = patConds :+ matchCase.guard
 
     lazy val guardComp = occurrencesOf(matchCase.guard)(using env, ctxs1)
     lazy val bodyComp = occurrencesOf(matchCase.rhs)(using env, rhsCtxs)
-    lazy val unchanged = SimplifiedCase.Unchanged(rhsCtxs, caseConds, guardComp ++ bodyComp)
+    lazy val unchanged = SimplifiedCase.Unchanged(ctxs0, rhsCtxs, caseConds, guardComp ++ bodyComp)
 
     // TODO: Ok? Après tout, ctxs1 contient les binding et les conds!!!
     // TODO: ou alors: pure sauf s'il y a des unapply, dans ce cas on check fnpurity des unapply
     if (caseConds.forall(c => codePurity(c).isPure)) {
-      given Ctxs = ctxs1
       val caseCondsConj = conjunct(caseConds)
       lazy val negCondsConj = negatedConjunction(caseConds)
-      if (implied(caseCondsConj)) SimplifiedCase.Covered(rhsCtxs, guardComp ++ bodyComp)
+      if (implied(caseCondsConj)) SimplifiedCase.Covered(ctxs0, rhsCtxs, guardComp ++ bodyComp)
       else if (implied(negCondsConj)) SimplifiedCase.Unreachable
       else unchanged
     } else unchanged
@@ -1531,40 +1538,42 @@ trait Core extends Definitions { ocbsl =>
   final def simplifyCases(scrut: Code, cases: Seq[LabMatchCase])(using env: Env, ctxs: Ctxs): SimplifiedCases = {
     assert(ctxs.isLitVarOrBoundDef(scrut))
 
-    def mkElidable(caseRhs: Code, rhsCtxs: Ctxs): SimplifiedCases.ElidableMatchExpr = {
-      assert(ctxs.isPrefixOf(rhsCtxs))
+    def mkElidable(caseRhs: Code, caseCtxs: Ctxs, rhsCtxs: Ctxs): SimplifiedCases.ElidableMatchExpr = {
+      assert(ctxs.isPrefixOf(caseCtxs))
+      assert(caseCtxs.isPrefixOf(rhsCtxs))
       val Some((rhsUnpl, _)) = unplugged(caseRhs)(using env, rhsCtxs)
       assert(rhsCtxs.isPrefixOf(rhsUnpl.ctxs))
-      SimplifiedCases.ElidableMatchExpr(rhsUnpl)
+      val rhsUnplCtxs = caseCtxs.addExtraWithoutAssumed(rhsUnpl.ctxs)
+      SimplifiedCases.ElidableMatchExpr(CodeRes(rhsUnpl.terminal, rhsUnplCtxs))
     }
 
-    def acc2cases(acc: Seq[(LabMatchCase, Ctxs, Occurrences)]): Seq[CodeResMatchCase] =
-      acc.map { case (lmc, _, occ) => CodeResMatchCase(lmc, occ) }
+    def acc2cases(acc: Seq[(LabMatchCase, Ctxs, Ctxs, Occurrences)]): Seq[CodeResMatchCase] =
+      acc.map { case (lmc, _, _, occ) => CodeResMatchCase(lmc, occ) }
 
-    def rec(cases: Seq[LabMatchCase], acc: Seq[(LabMatchCase, Ctxs, Occurrences)])(using ctxs: Ctxs): SimplifiedCases = cases match {
+    def rec(cases: Seq[LabMatchCase], acc: Seq[(LabMatchCase, Ctxs, Ctxs, Occurrences)])(using ctxs: Ctxs): SimplifiedCases = cases match {
       case Seq() =>
         acc match {
           case Seq() => SimplifiedCases.Empty
-          case Seq((soleCase, rhsCtxs, _)) => mkElidable(soleCase.rhs, rhsCtxs)
-          case (fst, fstCtxs, _) +: rest =>
+          case Seq((soleCase, caseCtxs, rhsCtxs, _)) => mkElidable(soleCase.rhs, caseCtxs, rhsCtxs)
+          case (fst, caseCtxs, fstCtxs, _) +: rest =>
             // TODO: Ok? Quid pureté des caseConds?
             val allSameBodies = rest.forall(_._1.rhs == fst.rhs)
-            if (allSameBodies) mkElidable(fst.rhs, fstCtxs)
+            if (allSameBodies) mkElidable(fst.rhs, caseCtxs, fstCtxs)
             else SimplifiedCases.Cases(acc2cases(acc))
         }
       case currCase +: rest =>
         simplifyCase(scrut, currCase) match {
           case SimplifiedCase.Unreachable => rec(rest, acc)
-          case SimplifiedCase.Covered(rhsCtxs, comp) =>
+          case SimplifiedCase.Covered(caseCtxs, rhsCtxs, comp) =>
             if (acc.isEmpty) {
-              mkElidable(currCase.rhs, rhsCtxs)
+              mkElidable(currCase.rhs, caseCtxs, rhsCtxs)
             } else {
               val wildcard = LabMatchCase(LabelledPattern.Wildcard, currCase.guard, currCase.rhs)
               SimplifiedCases.Cases(acc2cases(acc) :+ CodeResMatchCase(wildcard, comp))
             }
-          case SimplifiedCase.Unchanged(rhsCtxs, caseConds, comp) =>
+          case SimplifiedCase.Unchanged(caseCtxs, rhsCtxs, caseConds, comp) =>
             val negCaseConds = negatedConjunction(caseConds)
-            val res = rec(rest, acc :+ (currCase, rhsCtxs, comp))(using ctxs.withCond(negCaseConds))
+            val res = rec(rest, acc :+ (currCase, caseCtxs, rhsCtxs, comp))(using ctxs.withCond(negCaseConds))
             val noTailRecPls = Ctxs(ctxs.ctxs)
             res
         }
@@ -1590,6 +1599,7 @@ trait Core extends Definitions { ocbsl =>
     private val fnBlockedBy = mutable.Map.empty[Identifier, Set[Identifier]] // K = fn qui est bloqué par les fn dans V
     private val codeBlockedBy = mutable.Map.empty[Code, Set[Identifier]] // K = code qui est bloqué par les fn dans V
     private val blocking = mutable.Map.empty[Identifier, (Set[Identifier], Set[Code])] // K = fn qui bloque les fn et les codes dans V
+    private val alreadyVisiting = mutable.Set.empty[Code]
 
     def codePurity(c: Code)(using Env, Ctxs): Purity = tryFold(c, Pure, ()).getOrElse(Impure)
 
@@ -1615,6 +1625,10 @@ trait Core extends Definitions { ocbsl =>
       if (acc == Impure) Left(())
       else if (ctxs.isBoundDef(c)) Right(acc)
       else {
+        if (alreadyVisiting(c)) {
+          return Left(()) // May happen due to the isConstructor call below, which calls implies, etc.
+        }
+        alreadyVisiting += c
         val purityC = code2sig(c) match {
           case Signature(Label.Var(_) | Label.Lit(_), Seq()) => Pure
           case Signature(Label.Assume, Seq(pred, body)) =>
@@ -1687,6 +1701,8 @@ trait Core extends Definitions { ocbsl =>
 
           case _ => super.tryFoldImpl(c, Pure, ()).getOrElse(Impure)
         }
+
+        alreadyVisiting -= c
 
         val purity = acc ++ purityC
         // TODO: Temporaire
@@ -2688,12 +2704,15 @@ trait Core extends Definitions { ocbsl =>
 
     assert(ctxs.isLitVarOrBoundDef(scrut))
     pat match {
-      case LabelledPattern.Wildcard | LabelledPattern.Lit(_) => PatBdgsAndConds(ctxs, Seq.empty, Seq.empty)
+      case LabelledPattern.Wildcard => PatBdgsAndConds(ctxs, Seq.empty, Seq.empty)
+      case LabelledPattern.Lit(lit) =>
+        val cond = codeOfSig(mkEquals(scrut, codeOfLit(lit)), BoolTy)
+        PatBdgsAndConds(ctxs.withCond(cond), Seq.empty, Seq(cond))
 
       case LabelledPattern.ADT(id, tps, subps) =>
         val subscruts = adtSubScrutinees(scrut, ADTType(id, tps))
         val adtPatCond = adtMatchCond(scrut, ADTType(id, tps))(using env, ctxs)
-        val PatBdgsAndConds(newCtxs, recBdgs, recPatConds) = recHelper(ctxs, subscruts, subps)
+        val PatBdgsAndConds(newCtxs, recBdgs, recPatConds) = recHelper(ctxs.withCond(adtPatCond), subscruts, subps)
         assert(ctxs.isPrefixOf(newCtxs))
         PatBdgsAndConds(newCtxs, subscruts ++ recBdgs, adtPatCond +: recPatConds)
 
