@@ -1941,17 +1941,18 @@ trait Core extends Definitions { ocbsl =>
 
         case Signature(Label.Application, callee +: args) =>
           assert(CodeRes.isTerminal(callee))
+          val tearedCallee = tearDown(callee)
           val occCallee0 = occurrencesOf(callee)
           assert(occCallee0(callee) == Occurrence.Once(ctxs.impureParts, env.nesting, OccurrenceKind.Expanded))
           val occCallee = occCallee0.setTo(callee, Occurrence.Once(ctxs.impureParts, env.nesting, OccurrenceKind.Applied))
           val (ctxs2, occArgs) = foldOcc(args)(using ctxs.addBoundDef(callee))
-          Occurrences.of(c)(using env, ctxs2.addBoundDef(c)) ++ occCallee ++ occArgs
+          Occurrences.of(c)(using env, ctxs2) ++ occCallee ++ occArgs
 
         case Signature(lab: Label.LambdaLike, Seq(body)) =>
-          Occurrences.of(c)(using env, ctxs.addBoundDef(c)) ++ occurrencesOf(body)(using env.incIf(lab), ctxs)
+          Occurrences.of(c) ++ occurrencesOf(body)(using env.incIf(lab), ctxs)
 
         case Signature(Label.Ensuring, Seq(body, pred)) =>
-          Occurrences.of(c)(using env, ctxs.addBoundDef(c)) ++ occurrencesOf(body) ++ occurrencesOf(pred)
+          Occurrences.of(c) ++ occurrencesOf(body) ++ occurrencesOf(pred)
 
         case Signature(Label.IfExpr, Seq(cond, thn, els)) =>
           assert(CodeRes.isTerminal(cond))
@@ -1959,10 +1960,16 @@ trait Core extends Definitions { ocbsl =>
           val ctxs1 = ctxs.addBoundDef(cond)
           val occThn = occurrencesOf(thn)(using env, ctxs1.withCond(cond))
           val occEls = occurrencesOf(els)(using env, ctxs1.withNegatedCond(cond))
-          Occurrences.of(c)(using env, ctxs1.addBoundDef(c)) ++ occCond ++ occThn ++ occEls
+          Occurrences.of(c)(using env, ctxs1) ++ occCond ++ occThn ++ occEls
 
-        case Signature(Label.Or, disjs) =>
-          disjs.foldLeft((ctxs, Occurrences.of(c)(using env, ctxs.addBoundDef(c)))) {
+        case Signature(Label.Or, fst +: rest) =>
+          val occFst = occurrencesOf(fst)
+          val tearedFst = tearDown(fst)
+          assert(tearedFst.ctxs.isLitVarOrBoundDef(tearedFst.terminal))
+          val initCtxs = tearedFst.ctxs.withNegatedCond(tearedFst.terminal)
+          val initOcc = Occurrences.of(c)(using env, tearedFst.ctxs) ++ occFst
+
+          rest.foldLeft((initCtxs, initOcc)) {
             case ((ctxs, acc), disj) =>
               given Ctxs = ctxs
               val occDisj = occurrencesOf(disj)
@@ -1986,12 +1993,12 @@ trait Core extends Definitions { ocbsl =>
           }
           val occScrut = occurrencesOf(scrut)
           val ctxs1 = ctxs.addBoundDef(scrut)
-          occOfCases(scrut, cases, Occurrences.of(c)(using env, ctxs1.addBoundDef(c)) ++ occScrut)(using env, ctxs1)
+          occOfCases(scrut, cases, Occurrences.of(c)(using env, ctxs1) ++ occScrut)(using env, ctxs1)
 
         case Signature(_, children) =>
           assert(children.forall(CodeRes.isTerminal))
           val (ctxs1, occChildren) = foldOcc(children)
-          Occurrences.of(c)(using env, ctxs1.addBoundDef(c)) ++ occChildren
+          Occurrences.of(c)(using env, ctxs1) ++ occChildren
       }
     }
   }
