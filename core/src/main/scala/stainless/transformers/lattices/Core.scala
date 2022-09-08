@@ -132,6 +132,13 @@ trait Core extends Definitions { ocbsl =>
 
     def setTo(c: Code, o: Occurrence): Occurrences = Occurrences(c2u + (c -> o))
 
+    def setAsApplied(c: Code): Occurrences = {
+      this(c) match {
+        case Occurrence.Once(inCtxs, nesting, _) => Occurrences(c2u + (c -> Occurrence.Once(inCtxs, nesting, OccurrenceKind.Applied)))
+        case _ => this
+      }
+    }
+
     def -(c: Code): Occurrences = Occurrences(c2u - c)
 
     // TODO: What is this name!!!!
@@ -170,6 +177,7 @@ trait Core extends Definitions { ocbsl =>
     def empty: Occurrences = Occurrences(Map.empty)
 
     def of(c: Code)(using env: Env, ctxs: Ctxs): Occurrences = {
+      assert(CodeRes.isTerminal(c))
       if (isLit(c)) Occurrences.empty
       else {
         val impures = ctxs.impureParts
@@ -503,10 +511,11 @@ trait Core extends Definitions { ocbsl =>
     }
   }
 
-  private val pluggedOccMap = mutable.Map.empty[(Env, Code), mutable.Map[Ctxs, Occurrences]]
+  private val pluggedOccMap = mutable.Map.empty[(Env, Code), mutable.Map[Ctxs, (Occurrences, CodeRes)]]
 
   case class CodeRes(terminal: Code, ctxs: Ctxs) {
     assert(CodeRes.isTerminal(terminal), s"Gag: $terminal n'est pas un terminal (est un ${code2sig(terminal)})")
+    assert(ctxs.isLitVarOrBoundDef(terminal))
 
     lazy val hc: Int = java.util.Objects.hash(terminal, ctxs)
     override def hashCode(): Int = hc
@@ -532,16 +541,36 @@ trait Core extends Definitions { ocbsl =>
         }
         */
         assert(codeTpe(terminal) == codeTpe(c), s"${codeTpe(terminal)} != ${codeTpe(c)}")
+        // TODO: Idealement, ce truc devrait être retournée par plug? Comme ça, on règle le cas des inline lambdas
+        val minimizedCtxs = {
+          val bdgsToKeep1 = ctxs.impureParts.ctxs.collect {
+            case Ctx.BoundDef(bnd) => bnd
+          }.toSet
+          val bdgsToKeep2 = ctxs.ctxs.collect {
+            case Ctx.BoundDef(bnd) if u2(bnd).nonZero => bnd
+            case Ctx.AssumeLike(_, predTerminal) => predTerminal
+          }.toSet
+          val bdgsToKeep = bdgsToKeep1 ++ bdgsToKeep2
+          val suffix = ctxs.ctxs.drop(inCtxs.size)
+          Ctxs(inCtxs.ctxs ++ suffix.filter {
+            case Ctx.BoundDef(bnd) => bdgsToKeep(bnd)
+            case _ => true
+          })
+        }
+        val minimizedThis = CodeRes(terminal, minimizedCtxs.addBoundDef(terminal))
+
         locally {
           val currEntry = unplugMap.getOrElse((c, env), Map.empty)
           // TODO: Voir si oui ou non c'est ok
           // assert(!currEntry.contains(inCtxs))
-          val newEntry = currEntry + (inCtxs -> (this, u2))
+          val newEntry = currEntry + (inCtxs -> (minimizedThis, u2))
           unplugMap += (c, env) -> newEntry
         }
+
         locally {
           val currEntry = pluggedOccMap.getOrElseUpdate((env, c), mutable.Map.empty)
-          val got = currEntry.get(inCtxs).map { expected =>
+          assert(currEntry.get(inCtxs).forall(_._2 == minimizedThis))
+          val got = currEntry.get(inCtxs).map { case (expected, _) =>
             val eq = u2.c2u.toSet.intersect(expected.c2u.toSet)
             val diff = (u2.c2u.toSet ++ expected.c2u.toSet) -- eq
             (expected, eq, diff)
@@ -559,7 +588,7 @@ trait Core extends Definitions { ocbsl =>
 //            (got, eq, diff)
 //          }
 //          assert(got.forall(_._1 == u2))
-          currEntry += inCtxs -> u2
+          currEntry += inCtxs -> (u2, minimizedThis)
         }
         (u2, c)
       })
@@ -1904,109 +1933,57 @@ trait Core extends Definitions { ocbsl =>
     }
   }
 
-  final def occurrencesOf(c: Code)(using env: Env, ctxs: Ctxs): Occurrences = {
-    def occOfCase(scrut: Code, matchCase: LabMatchCase)(using env: Env, ctxs0: Ctxs): (Occurrences, Seq[Code]) = {
-      val PatBdgsAndConds(ctxs1, _, patConds) = addPatternBindingsAndConds(ctxs0, scrut, matchCase.pattern)
-      // Les pattern conditions ne sont pas comptées comme "occurrences"
-      val occGuard = occurrencesOf(matchCase.guard)(using env, ctxs1)
-      val ctxsRhs = ctxs1.withCond(matchCase.guard)
-      val occRhs = occurrencesOf(matchCase.rhs)(using env, ctxsRhs)
-      (occGuard ++ occRhs, patConds :+ matchCase.guard)
-    }
-    def occOfCases(scrut: Code, cases: Seq[LabMatchCase], acc: Occurrences)(using env: Env, ctxs: Ctxs): Occurrences = {
-      if (cases.isEmpty) acc
-      else {
-        val (occCase, caseConds) = occOfCase(scrut, cases.head)
-        val negCaseConds = negatedConjunction(caseConds)
-        occOfCases(scrut, cases.tail, acc ++ occCase)(using env, ctxs.withCond(negCaseConds))
-      }
-    }
-    def foldOcc(cs: Seq[Code])(using ctxs: Ctxs): (Ctxs, Occurrences) = {
-      assert(cs.forall(CodeRes.isTerminal))
-      cs.foldLeft((ctxs, Occurrences.empty)) {
-        case ((ctxs, acc), c) =>
-          given Ctxs = ctxs
-          val occC = occurrencesOf(c)
-          (ctxs.addBoundDef(c), acc ++ occC)
-      }
-    }
+  final def occurrencesOf(c: Code)(using env: Env, ctxs: Ctxs): Occurrences =
+    occOf.tryFold(c, Occurrences.empty, ()).merge._1
 
-    if (ctxs.isBoundDef(c)) Occurrences.of(c)
-    else if (!CodeRes.isTerminal(c)) {
-      val entries = pluggedOccMap.get((env, c)) //, sys.error("Oh non :("))
-      entries.flatMap(_.get(ctxs)).getOrElse {
-//        val (prefix, occ) = entries.head // N'importe quelle entry
-//        occ.withReplacedPrefix(prefix, ctxs.impureParts)
-//        sys.error("Oh non, y a rien :(")
-        val teared = tearDown(c)
-        val (occ, plugged) = teared.selfPlugged(ctxs)
-        occ
-      }
-    } else {
-      code2sig(c) match {
-        case Signature(Label.Lit(_), Seq()) => Occurrences.empty
-        case Signature(Label.Var(_), Seq()) => Occurrences.of(c)
+  object occOf extends CodeTryFolder[Nothing, Occurrences] {
+    override type Extra = Unit
 
-        case Signature(Label.Application, callee +: args) =>
-          assert(CodeRes.isTerminal(callee))
-          val tearedCallee = tearDown(callee)
-          val occCallee0 = occurrencesOf(callee)
-          assert(occCallee0(callee) == Occurrence.Once(ctxs.impureParts, env.nesting, OccurrenceKind.Expanded))
-          val occCallee = occCallee0.setTo(callee, Occurrence.Once(ctxs.impureParts, env.nesting, OccurrenceKind.Applied))
-          val (ctxs2, occArgs) = foldOcc(args)(using ctxs.addBoundDef(callee))
-          Occurrences.of(c)(using env, ctxs2) ++ occCallee ++ occArgs
+    override def tryFoldPatternConditions(patConds: Seq[Code], acc: Occurrences, extra: Unit)
+                                         (using Env, Ctxs): Either[Nothing, Occurrences] = Right(acc)
 
-        case Signature(lab: Label.LambdaLike, Seq(body)) =>
-          Occurrences.of(c) ++ occurrencesOf(body)(using env.incIf(lab), ctxs)
+    override def tryFoldImpl(c: Code, acc: Occurrences, extra: Unit)
+                            (using env: Env, ctxs: Ctxs): Either[Nothing, (Occurrences, CodeRes)] = {
+      if (ctxs.isBoundDef(c)) Right((acc ++ Occurrences.of(c), CodeRes(c, ctxs)))
+      else if (!CodeRes.isTerminal(c)) {
+        /*
+        val entries = pluggedOccMap.get((env, c)) //, sys.error("Oh non :("))
+        entries.flatMap(_.get(ctxs)).getOrElse {
+          // val (prefix, occ) = entries.head // N'importe quelle entry
+          // occ.withReplacedPrefix(prefix, ctxs.impureParts)
+          // sys.error("Oh non, y a rien :(")
+          val teared = tearDown(c)
+          val (occ, plugged) = teared.selfPlugged(ctxs)
+          occ
+        }
+        */
+        // TODO: !!! Ce ne sera pas tout à fait les mêmes car on inline les impures et les yeet de inCtxs!!!
+        val entries = pluggedOccMap.getOrElseUpdate((env, c), mutable.Map.empty)
+        // Remarque: pas de Occurrences.of(c) parce que `c` n'est pas un terminal (c'est un Let ou un AssumeLike)
+        val (occs, cr) = entries.getOrElseUpdate(ctxs, super.tryFoldImpl(c, Occurrences.empty, extra).merge)
+        Right((acc ++ occs, cr))
+      } else {
+        // CodeRes + occurrences, mais sans acc
+        // (on pourrait inclure acc dans les appels récursifs, etc., mais c'est facile de l'oublier
+        // alors on le rajoute tout à la fin)
+        val (occs, cr) = code2sig(c) match {
+          case Signature(Label.Lit(_), Seq()) => (Occurrences.empty, CodeRes(c, ctxs))
+          case Signature(Label.Var(_), Seq()) => (Occurrences.of(c), CodeRes(c, ctxs))
 
-        case Signature(Label.Ensuring, Seq(body, pred)) =>
-          Occurrences.of(c) ++ occurrencesOf(body) ++ occurrencesOf(pred)
+          case Signature(Label.Application, callee +: args) =>
+            assert(CodeRes.isTerminal(callee))
+            assert(args.forall(CodeRes.isTerminal))
+            val (occCallee0, calleeCr) = tryFold(callee, Occurrences.empty, ()).merge
+            assert(occCallee0(callee) == Occurrence.Once(calleeCr.ctxs.impureParts, env.nesting, OccurrenceKind.Expanded))
+            val occCallee = occCallee0.setAsApplied(callee)
+            val (occArgs, resCr) = tryFoldArgs(args, codeTpe(c), occCallee, ())(mkApp(calleeCr.terminal, _))(using env, calleeCr.ctxs).merge
+            (occArgs ++ Occurrences.of(resCr.terminal)(using env, resCr.ctxs), resCr)
 
-        case Signature(Label.IfExpr, Seq(cond, thn, els)) =>
-          assert(CodeRes.isTerminal(cond))
-          val occCond = occurrencesOf(cond)
-          val ctxs1 = ctxs.addBoundDef(cond)
-          val occThn = occurrencesOf(thn)(using env, ctxs1.withCond(cond))
-          val occEls = occurrencesOf(els)(using env, ctxs1.withNegatedCond(cond))
-          Occurrences.of(c)(using env, ctxs1) ++ occCond ++ occThn ++ occEls
-
-        case Signature(Label.Or, fst +: rest) =>
-          val occFst = occurrencesOf(fst)
-          val tearedFst = tearDown(fst)
-          assert(tearedFst.ctxs.isLitVarOrBoundDef(tearedFst.terminal))
-          val initCtxs = tearedFst.ctxs.withNegatedCond(tearedFst.terminal)
-          val initOcc = Occurrences.of(c)(using env, tearedFst.ctxs) ++ occFst
-
-          rest.foldLeft((initCtxs, initOcc)) {
-            case ((ctxs, acc), disj) =>
-              given Ctxs = ctxs
-              val occDisj = occurrencesOf(disj)
-              val tearedDisj = tearDown(disj)
-              assert(tearedDisj.ctxs.isLitVarOrBoundDef(tearedDisj.terminal))
-              val newCtxs = tearedDisj.ctxs.withNegatedCond(tearedDisj.terminal)
-              (newCtxs, acc ++ occDisj)
-          }._2
-
-        case Signature(Label.Not, Seq(n)) =>
-          val occN = occurrencesOf(n)
-          val teared = tearDown(n)
-          Occurrences.of(c)(using env, teared.ctxs) ++ occN
-
-        case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
-          assert(2 * pats.size == guardRhs.size)
-          assert(CodeRes.isTerminal(scrut))
-          val cases = pats.zip(guardRhs.grouped(2)).map {
-            case (pat, Seq(guard, rhs)) => LabMatchCase(pat, guard, rhs)
-            case _ => sys.error("no")
-          }
-          val occScrut = occurrencesOf(scrut)
-          val ctxs1 = ctxs.addBoundDef(scrut)
-          occOfCases(scrut, cases, Occurrences.of(c)(using env, ctxs1) ++ occScrut)(using env, ctxs1)
-
-        case Signature(_, children) =>
-          assert(children.forall(CodeRes.isTerminal))
-          val (ctxs1, occChildren) = foldOcc(children)
-          Occurrences.of(c)(using env, ctxs1) ++ occChildren
+          case _ =>
+            val (occs, cr) = super.tryFoldImpl(c, Occurrences.empty, ()).merge
+            (occs ++ Occurrences.of(cr.terminal)(using env, cr.ctxs), cr)
+        }
+        Right((acc ++ occs, cr))
       }
     }
   }
@@ -2379,7 +2356,6 @@ trait Core extends Definitions { ocbsl =>
           transformImpl(c, repl, extra)
       }
       assert(ctxs.isPrefixOf(res.ctxs))
-      assert(isLambda(c) == isLambda(res.terminal))
       res
     }
 
@@ -2514,9 +2490,15 @@ trait Core extends Definitions { ocbsl =>
         case Right((newAcc, cr)) =>
           assert(ctxs.isPrefixOf(cr.ctxs))
           assert(cr.ctxs.isLitVarOrBoundDef(cr.terminal))
-          // TODO: To be stripped
+          // TODO: A remettre, mais avec des ctxs "minimisés"
+          /*
           val teared = tearDown(c)
-          assert(teared == cr)
+          assert(teared.terminal == cr.terminal)
+          assert(teared.ctxs.impureParts == cr.ctxs.impureParts)
+          // Les bndgs (purs) ne sont pas forcément tous dans le même ordre
+          val diff = teared.ctxs.bound.toSet.diff(cr.ctxs.bound.toSet) ++ cr.ctxs.bound.toSet.diff(teared.ctxs.bound.toSet)
+          assert(diff.isEmpty)
+          */
           Right((newAcc, cr))
       }
     }
@@ -2563,7 +2545,9 @@ trait Core extends Definitions { ocbsl =>
               case ((acc, ctxs), disj) =>
                 given Ctxs = ctxs
                 tryFold(disj, acc, extra).map {
-                  case (newAcc, disjCr) => (newAcc, disjCr.ctxs.withNegatedCond(disjCr.terminal))
+                  case (newAcc, disjCr) =>
+                    assert(disjCr.ctxs.isLitVarOrBoundDef(disjCr.terminal))
+                    (newAcc, disjCr.ctxs.withNegatedCond(disjCr.terminal))
                 }
             }
             resTerminal = codeOfSig(mkOr(resFst._2.terminal +: rest), BoolTy)
@@ -2581,7 +2565,7 @@ trait Core extends Definitions { ocbsl =>
           for {
             resBody <- tryFold(body, acc, extra)
             resPred <- tryFold(pred, resBody._1, extra)
-          } yield resPred
+          } yield (resPred._1, CodeRes(c, ctxs.addBoundDef(c)))
 
         case Signature(lab: Label.LambdaLike, Seq(body)) =>
           tryFold(body, acc, extra)(using env.incIf(lab), ctxs)
@@ -2603,11 +2587,12 @@ trait Core extends Definitions { ocbsl =>
 
         case Signature(lab, args) =>
           assert(args.forall(CodeRes.isTerminal))
-          tryFoldArgs(lab, tpe, args, acc, extra)
+          tryFoldArgs(args, lab, tpe, acc, extra)
       }
     }
 
-    final def tryFoldArgs(lab: Label, tpe: Type, args: Seq[Code], acc: T, extra: Extra)(using env: Env, ctxs: Ctxs): Either[E, (T, CodeRes)] = {
+    final def tryFoldArgs(args: Seq[Code], tpe: Type, acc: T, extra: Extra)(cons: Seq[Code] => Signature)
+                         (using env: Env, ctxs: Ctxs): Either[E, (T, CodeRes)] = {
       val folded = ocbsl.tryFoldLeft(args, (acc, ctxs, Seq.empty[CodeRes])) {
         case ((acc, ctxs, crs), arg) =>
           given Ctxs = ctxs
@@ -2619,10 +2604,13 @@ trait Core extends Definitions { ocbsl =>
       folded.map {
         case (acc, ctxs, crs) =>
           given Ctxs = ctxs
-          val combined = combineCodeRes(crs, tpe)(Signature(lab, _))
+          val combined = combineCodeRes(crs, tpe)(cons)
           (acc, combined)
       }
     }
+
+    final def tryFoldArgs(args: Seq[Code], lab: Label, tpe: Type, acc: T, extra: Extra)(using env: Env, ctxs: Ctxs): Either[E, (T, CodeRes)] =
+      tryFoldArgs(args, tpe, acc, extra)(Signature(lab, _))
 
     final def tryFoldCase(scrut: Code, matchCase: LabMatchCase, acc: T, extra: Extra)
                          (using env: Env, ctxs0: Ctxs): Either[E, (T, Seq[Code])] = {
@@ -2689,8 +2677,12 @@ trait Core extends Definitions { ocbsl =>
       }
     }
 
+    tear.transform(c, Map.empty, ())
+    // TODO: Pas de unplugged, car il peut nous jouer des tours avec les inlined lambdas
+    /*
     unplugged(c).map(_._1)
       .getOrElse(tear.transform(c, Map.empty, ()))
+    */
   }
 
   //endregion
