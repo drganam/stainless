@@ -354,10 +354,20 @@ trait Core extends Definitions { ocbsl =>
 
     def isPrefixOf(that: Ctxs): Boolean = ocbsl.isPrefixOf(this.ctxs, that.ctxs)
 
-    // TODO: Hmm, en fait, c'est p-e mieux si on fait la computation dans plugCtx
-    // TODO: Yeet composition et isPure de Ctx.BoundDef
     def addBoundDef(df: Code)(using env: Env): Ctxs = {
       assert(CodeRes.isTerminal(df))
+      // TODO: Assertion too strong for uncodeOf, which needs to be adapted
+      /*
+      assert(code2sig(df) match {
+        case Signature(Label.IfExpr, Seq(cond, _, _)) => isLitVarOrBoundDef(cond)
+        case Signature(Label.MatchExpr(_), scrut +: _) => isLitVarOrBoundDef(scrut)
+        case Signature(Label.Or, fst +: _) => isLitVarOrBoundDef(fst)
+        case Signature(Label.Not, Seq(e)) => isLitVarOrBoundDef(e)
+        case Signature(_: (Label.Ensuring.type | Label.LambdaLike), _) => true
+        case Signature(_, args) => args.forall(isLitVarOrBoundDef)
+      })
+      */
+
       if (isLitOrVar(df) || isBoundDef(df)) this
       else {
         Ctxs(ctxs :+ Ctx.BoundDef(df))
@@ -1601,59 +1611,57 @@ trait Core extends Definitions { ocbsl =>
     private val blocking = mutable.Map.empty[Identifier, (Set[Identifier], Set[Code])] // K = fn qui bloque les fn et les codes dans V
     private val alreadyVisiting = mutable.Set.empty[Code]
 
-    def codePurity(c: Code)(using Env, Ctxs): Purity = tryFold(c, Pure, ()).getOrElse(Impure)
+    def codePurity(c: Code)(using Env, Ctxs): Purity = tryFold(c, Pure, ()).map(_._1).getOrElse(Impure)
 
     // TODO: Ok? Après tout, ctxs1 contient les binding et les conds!!!
     // TODO: ou alors: pure sauf s'il y a des unapply, dans ce cas on check fnpurity des unapply
-    def tryFoldPatternConditions(patConds: Seq[Code], acc: Purity, extra: Unit)(using Env, Ctxs): Either[Unit, Purity] =
-      acc ++ foldPurity(patConds) match {
+    override def tryFoldPatternConditions(patConds: Seq[Code], acc: Purity, extra: Unit)(using Env, Ctxs): Either[Unit, Purity] = {
+      val patCondsPurity = patConds.foldLeft(acc)(_ ++ codePurity(_))
+      patCondsPurity match {
         case Impure => Left(())
         case p => Right(p)
       }
-
-    def foldPurity(cs: Seq[Code])(using env: Env, ctxs: Ctxs): Purity = {
-      assert(cs.forall(CodeRes.isTerminal))
-      cs.foldLeft((ctxs, Pure)) {
-        case ((ctxs, acc), c) =>
-          given Ctxs = ctxs
-          lazy val purity = codePurity(c)
-          (ctxs.addBoundDef(c), acc ++ purity)
-      }._2
     }
 
-    override def tryFoldImpl(c: Code, acc: Purity, extra: Unit)(using env: Env, ctxs: Ctxs): Either[Unit, Purity] = {
+    override def tryFoldImpl(c: Code, acc: Purity, extra: Unit)(using env: Env, ctxs: Ctxs): Either[Unit, (Purity, CodeRes)] = {
       if (acc == Impure) Left(())
-      else if (ctxs.isBoundDef(c)) Right(acc)
+      else if (ctxs.isBoundDef(c)) Right((acc, CodeRes(c, ctxs)))
       else {
         if (alreadyVisiting(c)) {
+          alreadyVisiting -= c
           return Left(()) // May happen due to the isConstructor call below, which calls implies, etc.
         }
         alreadyVisiting += c
-        val purityC = code2sig(c) match {
-          case Signature(Label.Var(_) | Label.Lit(_), Seq()) => Pure
-          case Signature(Label.Assume, Seq(pred, body)) =>
-            assert(CodeRes.isTerminal(pred))
-            if (pred == trueCode) codePurity(body) // pas besoin de ctxs.withCond car de toute façon c'est true
-            else Impure
 
-          case Signature(Label.Assert | Label.Require, Seq(pred, body)) =>
+        // CodeRes + pureté, mais sans acc
+        // (on pourrait inclure acc dans les appels récursifs, etc., mais c'est facile de l'oublier
+        // alors on le rajoute tout à la fin)
+        val res = code2sig(c) match {
+          case Signature(Label.Var(_) | Label.Lit(_), Seq()) => Right((Pure, CodeRes(c, ctxs)))
+          case Signature(Label.Assume, Seq(pred, _)) =>
             assert(CodeRes.isTerminal(pred))
-            val pBody = codePurity(body)(using env, ctxs.withCond(pred))
-            if (pred == trueCode) pBody
-            else assmChkPurity ++ pBody // Pureté comme Stainless
+            if (pred == trueCode) super.tryFoldImpl(c, Pure, ())
+            else Left(())
+
+          case Signature(Label.Assert | Label.Require, Seq(pred, _)) =>
+            assert(CodeRes.isTerminal(pred))
+            // Pureté comme Stainless
+            val p = if (pred == trueCode) Pure else assmChkPurity
+            super.tryFoldImpl(c, p, ())
 
           // TODO: If cond true/false, only consider one of the branch
+          // TODO: Faire de même pour match expr
 
-          case Signature(Label.Ensuring, Seq(body, pred)) =>
+          case Signature(Label.Ensuring, Seq(_, pred)) =>
             code2sig(pred) match {
-              case Signature(Label.Lambda(Seq(_)), Seq(`trueCode`)) => codePurity(body)
-              case _ => Impure
+              case Signature(Label.Lambda(Seq(_)), Seq(`trueCode`)) => super.tryFoldImpl(c, Pure, ())
+              case _ => Left(())
             }
 
           case Signature(Label.ADTSelector(adt, ctor, _), Seq(e)) =>
             assert(CodeRes.isTerminal(e))
-            if (opts.assumeChecked || isConstructor(e, adt, ctor.id) == Some(true)) codePurity(e)
-            else Impure
+            if (opts.assumeChecked || isConstructor(e, adt, ctor.id).contains(true)) super.tryFoldImpl(c, Pure, ())
+            else Left(())
 
           case Signature(Label.ADT(id, tps), args) =>
             assert(args.forall(CodeRes.isTerminal))
@@ -1663,12 +1671,12 @@ trait Core extends Definitions { ocbsl =>
               if (opts.assumeChecked || !ctor.sort.definition.hasInvariant) Pure
               else Impure
             }
-            consingPurity ++ foldPurity(args)
+            super.tryFoldImpl(c, consingPurity, ())
 
-          case Signature(Label.Lambda(_), Seq(_)) => Pure
+          case Signature(Label.Lambda(_), Seq(_)) => Right((Pure, CodeRes(c, ctxs.addBoundDef(c))))
 
-          case Signature(Label.FunctionInvocation(id, _), args) =>
-            foldPurity(args) ++ fnPurity(id)
+          case Signature(Label.FunctionInvocation(id, _), _) =>
+            super.tryFoldImpl(c, fnPurity(id), ())
 
           case Signature(Label.Application, callee +: args) =>
             assert(CodeRes.isTerminal(callee))
@@ -1686,28 +1694,27 @@ trait Core extends Definitions { ocbsl =>
               case Signature(Label.Var(_), Seq()) => Pure // TODO: Comme c'est une free var et qu'on en sait rien à son sujet...
               case _ => Impure
             }
-            assmChkPurity ++ calleePurity ++ foldPurity(args)(using env, ctxs.addBoundDef(callee))
+            super.tryFoldImpl(c, assmChkPurity ++ calleePurity, ())
 
           case Signature(Label.Choose(v), Seq(pred)) =>
-            if (pred == trueCode && hasInstance(varTpe(v)) == Some(true)) Pure
-            else Impure
+            if (pred == trueCode && hasInstance(varTpe(v)).contains(true)) Right((Pure, CodeRes(c, ctxs.addBoundDef(c))))
+            else Left(())
 
           // TODO: Pureté ok pour NoTree/Error? Car dans SWP et isImpure, aucune mention de NoTree/Error...
           case Signature(Label.Division | Label.Remainder | Label.Modulo | Label.NoTree(_) | Label.Error(_, _), _) =>
-            assmChkPurity // TODO: Ok?
+            super.tryFoldImpl(c, assmChkPurity, ())
 
           // TODO: Pureté de Decreases?
           // TODO: Array select, map select, etc.???
 
-          case _ => super.tryFoldImpl(c, Pure, ()).getOrElse(Impure)
+          case _ => super.tryFoldImpl(c, Pure, ())
         }
 
         alreadyVisiting -= c
 
-        val purity = acc ++ purityC
-        // TODO: Temporaire
-        // TODO: Est-ce ok???
-        purity match {
+        // La pureté, avec acc
+        val finalPurity = acc ++ res.map(_._1).getOrElse(Impure)
+        finalPurity match {
           case Pure | Impure => ()
           case Delayed(blockers) =>
             codeBlockedBy += c -> blockers
@@ -1717,7 +1724,8 @@ trait Core extends Definitions { ocbsl =>
               blocking += blocker -> (blockedFns, blockedCodes + c)
             }
         }
-        if (purity == Impure) Left(()) else Right(purity)
+        // N'oublions pas de rajouter acc dans le résultat retourné!
+        res.map { case (_, cr) => (finalPurity, cr) }
       }
     }
 
@@ -2500,97 +2508,137 @@ trait Core extends Definitions { ocbsl =>
   trait CodeTryFolder[E, T] {
     type Extra
 
-    final def tryFold(c: Code, acc: T, extra: Extra)(using env: Env, ctxs: Ctxs): Either[E, T] =
-      tryFoldImpl(c, acc, extra)
-
-    def tryFoldImpl(c: Code, acc: T, extra: Extra)(using env: Env, ctxs: Ctxs): Either[E, T] = code2sig(c) match {
-      case Signature(Label.Lit(_) | Label.Var(_), Seq()) => Right(acc)
-
-      case Signature(Label.Let, Seq(e, b)) if ctxs.isBoundDef(e) =>
-        tryFold(b, acc, extra)
-
-      case Signature(Label.Let, Seq(e, b)) =>
-        assert(CodeRes.isTerminal(e))
-        assert(!isLitOrVar(e))
-        for {
-          re <- tryFold(e, acc, extra)
-          rb <- tryFold(b, re, extra)(using env, ctxs.addBoundDef(e))
-        } yield rb
-
-      case Signature(lab: Label.AssumeLike, Seq(pred, body)) =>
-        assert(CodeRes.isTerminal(pred))
-        for {
-          rpred <- tryFold(pred, acc, extra)
-          rbody <- tryFold(body, rpred, extra)(using env, ctxs.addBoundDef(pred).withAssumeLike(lab, pred))
-        } yield rbody
-
-      case Signature(Label.IfExpr, Seq(cond, thn, els)) =>
-        assert(CodeRes.isTerminal(cond))
-        for {
-          rcond <- tryFold(cond, acc, extra)
-          ctxs1 = ctxs.addBoundDef(cond)
-          rthn <- tryFold(thn, rcond, extra)(using env, ctxs1.withCond(cond))
-          rels <- tryFold(els, rthn, extra)(using env, ctxs1.withNegatedCond(cond))
-        } yield rels
-
-      case Signature(Label.Or, disjs) =>
-        ocbsl.tryFoldLeftDisjunction(disjs, acc)((acc, disj) => tryFold(disj, acc, extra))
-
-      case Signature(Label.Not, Seq(n)) =>
-        tryFold(n, acc, extra)
-
-      case Signature(Label.Ensuring, Seq(body, pred)) =>
-        for {
-          rbody <- tryFold(body, acc, extra)
-          rpred <- tryFold(pred, rbody, extra)
-        } yield rpred
-
-      case Signature(lab: Label.LambdaLike, Seq(body)) =>
-        tryFold(body, acc, extra)(using env.incIf(lab), ctxs)
-
-      case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
-        assert(2 * pats.size == guardRhs.size)
-        assert(CodeRes.isTerminal(scrut))
-        val cases = pats.zip(guardRhs.grouped(2)).map {
-          case (pat, Seq(guard, rhs)) => LabMatchCase(pat, guard, rhs)
-          case _ => sys.error("oh non, je ne sais pas compter :(")
-        }
-        for {
-          rscrut <- tryFold(scrut, acc, extra)
-          rcases <- tryFoldCases(scrut, cases, rscrut, extra)(using env, ctxs.addBoundDef(scrut))
-        } yield rcases
-
-      // TODO: Suppose que lab pas besoin d'avoir des sous parties transformées. P.ex. pour MatchExpr, cela ne jouera pas (en raison des recs?)
-      case Signature(_, args) =>
-        assert(args.forall(CodeRes.isTerminal))
-        tryFoldArgs(args, acc, extra)
+    final def tryFold(c: Code, acc: T, extra: Extra)(using env: Env, ctxs: Ctxs): Either[E, (T, CodeRes)] = {
+      tryFoldImpl(c, acc, extra) match {
+        case Left(e) => Left(e)
+        case Right((newAcc, cr)) =>
+          assert(ctxs.isPrefixOf(cr.ctxs))
+          assert(cr.ctxs.isLitVarOrBoundDef(cr.terminal))
+          // TODO: To be stripped
+          val teared = tearDown(c)
+          assert(teared == cr)
+          Right((newAcc, cr))
+      }
     }
 
-    final def tryFoldArgs(args: Seq[Code], acc: T, extra: Extra)(using env: Env, ctxs: Ctxs): Either[E, T] = {
-      ocbsl.tryFoldLeft(args, (acc, ctxs)) {
-        case ((acc, ctxs), arg) =>
+    def tryFoldImpl(c: Code, acc: T, extra: Extra)(using env: Env, ctxs: Ctxs): Either[E, (T, CodeRes)] = {
+      val tpe = codeTpe(c)
+      code2sig(c) match {
+        case Signature(Label.Lit(_) | Label.Var(_), Seq()) => Right((acc, CodeRes(c, ctxs)))
+
+        case Signature(Label.Let, Seq(e, b)) if ctxs.isBoundDef(e) =>
+          tryFold(b, acc, extra)
+
+        case Signature(Label.Let, Seq(e, b)) =>
+          assert(CodeRes.isTerminal(e))
+          assert(!isLitOrVar(e))
+          for {
+            resE <- tryFold(e, acc, extra)
+            _ = assert(resE._2.ctxs.isBoundDef(e))
+            resB <- tryFold(b, resE._1, extra)(using env, resE._2.ctxs)
+          } yield resB
+
+        case Signature(lab: Label.AssumeLike, Seq(pred, body)) =>
+          assert(CodeRes.isTerminal(pred))
+          for {
+            resPred <- tryFold(pred, acc, extra)
+            resBody <- tryFold(body, resPred._1, extra)(using env, resPred._2.ctxs.withAssumeLike(lab, pred))
+          } yield resBody
+
+        case Signature(Label.IfExpr, Seq(cond, thn, els)) =>
+          assert(CodeRes.isTerminal(cond))
+          for {
+            resCond <- tryFold(cond, acc, extra)
+            resThen <- tryFold(thn, resCond._1, extra)(using env, resCond._2.ctxs.withCond(cond))
+            resEls <- tryFold(els, resThen._1, extra)(using env, resCond._2.ctxs.withNegatedCond(cond))
+            resTerminal = codeOfSig(mkIfExpr(resCond._2.terminal, thn, els), tpe)
+            resCr = resCond._2.derived(resTerminal)
+          } yield (resEls._1, resCr)
+
+        case Signature(Label.Or, fst +: rest) =>
+          for {
+            resFst <- tryFold(fst, acc, extra)
+            initCtxs = resFst._2.ctxs.withNegatedCond(resFst._2.terminal)
+            resRest <- ocbsl.tryFoldLeft(rest, (resFst._1, initCtxs)) {
+              case ((acc, ctxs), disj) =>
+                given Ctxs = ctxs
+                tryFold(disj, acc, extra).map {
+                  case (newAcc, disjCr) => (newAcc, disjCr.ctxs.withNegatedCond(disjCr.terminal))
+                }
+            }
+            resTerminal = codeOfSig(mkOr(resFst._2.terminal +: rest), BoolTy)
+            resCr = resFst._2.derived(resTerminal)
+          } yield (resRest._1, resCr)
+
+        case Signature(Label.Not, Seq(n)) =>
+          tryFold(n, acc, extra)
+            .map { case (acc, cr) =>
+              val neg = codeOfSig(mkNot(cr.terminal), BoolTy)
+              (acc, cr.derived(neg))
+            }
+
+        case Signature(Label.Ensuring, Seq(body, pred)) =>
+          for {
+            resBody <- tryFold(body, acc, extra)
+            resPred <- tryFold(pred, resBody._1, extra)
+          } yield resPred
+
+        case Signature(lab: Label.LambdaLike, Seq(body)) =>
+          tryFold(body, acc, extra)(using env.incIf(lab), ctxs)
+            .map { case (acc, _) => (acc, CodeRes(c, ctxs.addBoundDef(c))) }
+
+        case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
+          assert(2 * pats.size == guardRhs.size)
+          assert(CodeRes.isTerminal(scrut))
+          val cases = pats.zip(guardRhs.grouped(2)).map {
+            case (pat, Seq(guard, rhs)) => LabMatchCase(pat, guard, rhs)
+            case _ => sys.error("oh non, je ne sais pas compter :(")
+          }
+          for {
+            resScrut <- tryFold(scrut, acc, extra)
+            accCases <- tryFoldCases(scrut, cases, resScrut._1, extra)(using env, resScrut._2.ctxs)
+            resTerminal = codeOfSig(mkMatchExpr(resScrut._2.terminal, cases), tpe)
+            resCr = resScrut._2.derived(resTerminal)
+          } yield (accCases, resCr)
+
+        case Signature(lab, args) =>
+          assert(args.forall(CodeRes.isTerminal))
+          tryFoldArgs(lab, tpe, args, acc, extra)
+      }
+    }
+
+    final def tryFoldArgs(lab: Label, tpe: Type, args: Seq[Code], acc: T, extra: Extra)(using env: Env, ctxs: Ctxs): Either[E, (T, CodeRes)] = {
+      val folded = ocbsl.tryFoldLeft(args, (acc, ctxs, Seq.empty[CodeRes])) {
+        case ((acc, ctxs, crs), arg) =>
           given Ctxs = ctxs
           assert(CodeRes.isTerminal(arg))
-          tryFold(arg, acc, extra)
-            .map(newAcc => (newAcc, ctxs.addBoundDef(arg)))
-      }.map(_._1)
+          tryFold(arg, acc, extra).map {
+            case (newAcc, newCr) => (newAcc, newCr.ctxs, crs :+ newCr)
+          }
+      }
+      folded.map {
+        case (acc, ctxs, crs) =>
+          given Ctxs = ctxs
+          val combined = combineCodeRes(crs, tpe)(Signature(lab, _))
+          (acc, combined)
+      }
     }
 
     final def tryFoldCase(scrut: Code, matchCase: LabMatchCase, acc: T, extra: Extra)
                          (using env: Env, ctxs0: Ctxs): Either[E, (T, Seq[Code])] = {
       val PatBdgsAndConds(ctxs1, _, patConds) = addPatternBindingsAndConds(ctxs0, scrut, matchCase.pattern)
+      val ctxsForPatConds = ctxs0.addExtraWithoutAssumed(ctxs1) // Comme ctxs1 mais sans les pattern cond (symbolisés par "Assumed")
       for {
-        // TODO: Ok? Après tout, ctxs1 contient les binding et les conds!!!
-        // TODO: ou alors: pure sauf s'il y a des unapply, dans ce cas on check fnpurity des unapply
-        rpatConds <- tryFoldPatternConditions(patConds, acc, extra)(using env, ctxs1)
+        rpatConds <- tryFoldPatternConditions(patConds, acc, extra)(using env, ctxsForPatConds)
         rguard <- tryFold(matchCase.guard, rpatConds, extra)(using env, ctxs1)
+        // Comme guard et rhs sont self-plugged, on ignore leur ctxs résultant
         ctxsForRhs = ctxs1.withCond(matchCase.guard)
-        rrhs <- tryFold(matchCase.rhs, rguard, extra)(using env, ctxsForRhs)
-      } yield (rrhs, patConds :+ matchCase.guard)
+        rrhs <- tryFold(matchCase.rhs, rguard._1, extra)(using env, ctxsForRhs)
+      } yield (rrhs._1, patConds :+ matchCase.guard)
     }
 
     final def tryFoldCases(scrut: Code, cases: Seq[LabMatchCase], acc: T, extra: Extra)
-                    (using env: Env, ctxs: Ctxs): Either[E, T] = {
+                          (using env: Env, ctxs: Ctxs): Either[E, T] = {
       if (cases.isEmpty) Right(acc)
       else {
         tryFoldCase(scrut, cases.head, acc, extra).flatMap {
@@ -2609,23 +2657,33 @@ trait Core extends Definitions { ocbsl =>
       override type Extra = Unit
 
       override def transformImpl(c: Code, repl: Map[Code, Code], extra: Extra)(using env: Env, ctxs: Ctxs): CodeRes = code2sig(c) match {
-        case Signature(Label.Or, first +: _) =>
+        case Signature(Label.Or, first +: rest) =>
           val firstTeared = transform(first, repl, ())
-          CodeRes(c, firstTeared.ctxs.addBoundDef(c))
+          val terminal = codeOfSig(mkOr(firstTeared.terminal +: rest), BoolTy)
+          firstTeared.derived(terminal)
 
         case Signature(Label.Not, Seq(cc)) =>
           val teared = transform(cc, repl, ())
-          teared.derived(codeOfSig(mkNot(teared.terminal), BoolTy))
+          val terminal = codeOfSig(mkNot(teared.terminal), BoolTy)
+          teared.derived(terminal)
 
-        case Signature(Label.IfExpr, Seq(cond, _, _)) =>
+        case Signature(Label.IfExpr, Seq(cond, thn, els)) =>
           val condTeared = transform(cond, repl, ())
-          CodeRes(c, condTeared.ctxs.addBoundDef(c))
+          val terminal = codeOfSig(mkIfExpr(condTeared.terminal, thn, els), codeTpe(c))
+          condTeared.derived(terminal)
 
         case Signature(_: (Label.Ensuring.type | Label.LambdaLike), _) => CodeRes(c, ctxs.addBoundDef(c))
 
-        case Signature(Label.MatchExpr(_), scrut +: _) =>
+        case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
+          assert(2 * pats.size == guardRhs.size)
+          assert(CodeRes.isTerminal(scrut))
+          val cases = pats.zip(guardRhs.grouped(2)).map {
+            case (pat, Seq(guard, rhs)) => LabMatchCase(pat, guard, rhs)
+            case _ => sys.error("oh non, je ne sais pas compter :(")
+          }
           val scrutTeared = transform(scrut, repl, ())
-          CodeRes(c, scrutTeared.ctxs.addBoundDef(c))
+          val terminal = codeOfSig(mkMatchExpr(scrutTeared.terminal, cases), codeTpe(c))
+          scrutTeared.derived(terminal)
 
         case _ => super.transformImpl(c, repl, ())
       }
