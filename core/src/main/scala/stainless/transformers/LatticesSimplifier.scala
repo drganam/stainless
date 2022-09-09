@@ -45,7 +45,7 @@ trait LatticesSimplifier { self =>
 
     val resE = core.codeOfExpr(e)
     val codeE = resE.selfPlugged(core.Ctxs.empty)._2
-    val res = core.uncodeOf(codeE)(using core.RevEnv.empty).expr.copiedFrom(e)
+    val res = core.uncodeOf(codeE).expr.copiedFrom(e)
     vcNum.incrementAndGet()
     res
   }
