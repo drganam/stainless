@@ -1165,7 +1165,9 @@ trait Core extends Definitions { ocbsl =>
         }
         codeOfSig(mkMatchExpr(scrut, cases.toSeq), BoolTy)
 
-      case _ => codeOfSig(mkNot(c), BoolTy)
+      case _ =>
+        assert(CodeRes.isTerminal(c))
+        codeOfSig(mkNot(c), BoolTy)
     }
 
     if (mayRmNeg eq mayAlwaysRmNeg) {
@@ -2490,6 +2492,7 @@ trait Core extends Definitions { ocbsl =>
         case Right((newAcc, cr)) =>
           assert(ctxs.isPrefixOf(cr.ctxs))
           assert(cr.ctxs.isLitVarOrBoundDef(cr.terminal))
+          assert(!CodeRes.isTerminal(c) || cr.terminal == c)
           // TODO: A remettre, mais avec des ctxs "minimisés"
           /*
           val teared = tearDown(c)
@@ -2524,6 +2527,7 @@ trait Core extends Definitions { ocbsl =>
           assert(CodeRes.isTerminal(pred))
           for {
             resPred <- tryFold(pred, acc, extra)
+            _ = assert(resPred._2.terminal == pred)
             resBody <- tryFold(body, resPred._1, extra)(using env, resPred._2.ctxs.withAssumeLike(lab, pred))
           } yield resBody
 
@@ -2531,16 +2535,19 @@ trait Core extends Definitions { ocbsl =>
           assert(CodeRes.isTerminal(cond))
           for {
             resCond <- tryFold(cond, acc, extra)
+            _ = assert(resCond._2.terminal == cond)
             resThen <- tryFold(thn, resCond._1, extra)(using env, resCond._2.ctxs.withCond(cond))
             resEls <- tryFold(els, resThen._1, extra)(using env, resCond._2.ctxs.withNegatedCond(cond))
-            resTerminal = codeOfSig(mkIfExpr(resCond._2.terminal, thn, els), tpe)
+            resTerminal = codeOfSig(mkIfExpr(cond, thn, els), tpe)
             resCr = resCond._2.derived(resTerminal)
           } yield (resEls._1, resCr)
 
         case Signature(Label.Or, fst +: rest) =>
+          assert(CodeRes.isTerminal(fst))
           for {
             resFst <- tryFold(fst, acc, extra)
-            initCtxs = resFst._2.ctxs.withNegatedCond(resFst._2.terminal)
+            _ = assert(resFst._2.terminal == fst)
+            initCtxs = resFst._2.ctxs.withNegatedCond(fst)
             resRest <- ocbsl.tryFoldLeft(rest, (resFst._1, initCtxs)) {
               case ((acc, ctxs), disj) =>
                 given Ctxs = ctxs
@@ -2550,14 +2557,16 @@ trait Core extends Definitions { ocbsl =>
                     (newAcc, disjCr.ctxs.withNegatedCond(disjCr.terminal))
                 }
             }
-            resTerminal = codeOfSig(mkOr(resFst._2.terminal +: rest), BoolTy)
+            resTerminal = codeOfSig(mkOr(fst +: rest), BoolTy)
             resCr = resFst._2.derived(resTerminal)
           } yield (resRest._1, resCr)
 
         case Signature(Label.Not, Seq(n)) =>
+          assert(CodeRes.isTerminal(n))
           tryFold(n, acc, extra)
             .map { case (acc, cr) =>
               val neg = codeOfSig(mkNot(cr.terminal), BoolTy)
+              assert(cr.terminal == n)
               (acc, cr.derived(neg))
             }
 
@@ -2580,8 +2589,9 @@ trait Core extends Definitions { ocbsl =>
           }
           for {
             resScrut <- tryFold(scrut, acc, extra)
+            _ = assert(resScrut._2.terminal == scrut)
             accCases <- tryFoldCases(scrut, cases, resScrut._1, extra)(using env, resScrut._2.ctxs)
-            resTerminal = codeOfSig(mkMatchExpr(resScrut._2.terminal, cases), tpe)
+            resTerminal = codeOfSig(mkMatchExpr(scrut, cases), tpe)
             resCr = resScrut._2.derived(resTerminal)
           } yield (accCases, resCr)
 
@@ -2598,7 +2608,9 @@ trait Core extends Definitions { ocbsl =>
           given Ctxs = ctxs
           assert(CodeRes.isTerminal(arg))
           tryFold(arg, acc, extra).map {
-            case (newAcc, newCr) => (newAcc, newCr.ctxs, crs :+ newCr)
+            case (newAcc, newCr) =>
+              assert(newCr.terminal == arg)
+              (newAcc, newCr.ctxs, crs :+ newCr)
           }
       }
       folded.map {
@@ -2638,6 +2650,152 @@ trait Core extends Definitions { ocbsl =>
     }
 
     def tryFoldPatternConditions(patConds: Seq[Code], acc: T, extra: Extra)(using Env, Ctxs): Either[E, T]
+  }
+
+  trait CodeUnfolder[T] {
+    type Extra
+
+    final def unfold(c: Code, extra: Extra)(using env: Env, ctxs: Ctxs): (T, CodeRes) = {
+      val (t, cr) = unfoldImpl(c, extra)
+      assert(ctxs.isPrefixOf(cr.ctxs))
+      assert(!CodeRes.isTerminal(c) || cr.terminal == c)
+      (t, cr)
+    }
+
+    def unfoldVar(v: VarId, extra: Extra): T
+
+    def unfoldLit[A](l: Literal[A], extra: Extra): T
+
+    def combineLet(e: T, body: T, extra: Extra): T
+
+    def combineEnsuring(body: T, pred: T, extra: Extra): T
+
+    def combineAssumeLike(kind: Label.AssumeLike, pred: T, body: T, extra: Extra): T
+
+    def combineLambdaLike(kind: Label.LambdaLike, body: T, extra: Extra): T
+
+    def combineIf(cond: T, thn: T, els: T, extra: Extra): T
+
+    def combineNot(e: T, extra: Extra): T
+
+    def combineOr(args: Seq[T], extra: Extra): T
+
+    def combineCtorAlike(lab: Label, args: Seq[T], extra: Extra): T
+
+    def combineCase(guard: T, rhs: T, extra: Extra): T
+
+    def combineMatch(scrut: T, cases: Seq[T], extra: Extra): T
+
+    def unfoldImpl(c: Code, extra: Extra)(using env: Env, ctxs: Ctxs): (T, CodeRes) = {
+      val tpe = codeTpe(c)
+      code2sig(c) match {
+        case Signature(Label.Var(v), Seq()) => (unfoldVar(v, extra), CodeRes(c, ctxs))
+        case Signature(Label.Lit(l), Seq()) => (unfoldLit(l, extra), CodeRes(c, ctxs))
+
+        case Signature(Label.Let, Seq(e, body)) if ctxs.isBoundDef(e) => unfold(body, extra)
+
+        case Signature(Label.Let, Seq(e, body)) =>
+          val (te, eCr) = unfold(e, extra)
+          val (tbody, bodyCr) = unfold(body, extra)(using env, eCr.ctxs)
+          val tres = combineLet(te, tbody, extra)
+          (tres, bodyCr)
+
+        case Signature(kind: Label.AssumeLike, Seq(pred, body)) =>
+          val (tpred, predCr) = unfold(pred, extra)
+          assert(predCr.terminal == pred)
+          val (tbody, bodyCr) = unfold(body, extra)(using env, predCr.ctxs.withAssumeLike(kind, pred))
+          val tres = combineAssumeLike(kind, tpred, tbody, extra)
+          (tres, bodyCr)
+
+        case Signature(Label.IfExpr, Seq(cond, thn, els)) =>
+          val (tcond, condCr) = unfold(cond, extra)
+          assert(condCr.terminal == cond)
+          val (tthen, _) = unfold(thn, extra)(using env, condCr.ctxs.withCond(cond))
+          val (tels, _) = unfold(els, extra)(using env, condCr.ctxs.withNegatedCond(cond))
+          val tres = combineIf(tcond, tthen, tels, extra)
+          (tres, condCr.derived(c))
+
+        case Signature(Label.Ensuring, Seq(body, pred)) =>
+          val (tbody, _) = unfold(body, extra)
+          val (tpred, _) = unfold(pred, extra)
+          val tres = combineEnsuring(tbody, tpred, extra)
+          (tres, CodeRes(c, ctxs.addBoundDef(c)))
+
+        case Signature(kind: Label.LambdaLike, Seq(body)) =>
+          val (tbody, _) = unfold(body, extra)(using env.incIf(kind), ctxs)
+          val tres = combineLambdaLike(kind, tbody, extra)
+          (tres, CodeRes(c, ctxs.addBoundDef(c)))
+
+        case Signature(Label.Or, fst +: rest) =>
+          assert(CodeRes.isTerminal(fst))
+          val (tfst, fstCr) = unfold(fst, extra)
+          assert(fstCr.terminal == fst)
+          val tdisjs = rest.foldLeft((Seq(tfst), fstCr.ctxs.withNegatedCond(fst))) {
+            case ((acc, ctxs), disj) =>
+              given Ctxs = ctxs
+              val (tdisj, disjCr) = unfold(disj, extra)
+              (acc :+ tdisj, disjCr.ctxs.withNegatedCond(disjCr.terminal))
+          }._1
+          val tres = combineOr(tdisjs, extra)
+          (tres, fstCr.derived(c))
+
+        case Signature(Label.Not, Seq(e)) =>
+          assert(CodeRes.isTerminal(e))
+          val (te, cr) = unfold(e, extra)
+          assert(cr.terminal == e)
+          val tres = combineNot(te, extra)
+          (tres, cr.derived(c))
+
+        case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
+          assert(2 * pats.size == guardRhs.size)
+          assert(CodeRes.isTerminal(scrut))
+          val cases = pats.zip(guardRhs.grouped(2)).map {
+            case (pat, Seq(guard, rhs)) => LabMatchCase(pat, guard, rhs)
+            case _ => sys.error("oh non, je ne sais pas compter :(")
+          }
+          val (tscrut, scrutCr) = unfold(scrut, extra)
+          assert(scrutCr.terminal == scrut)
+          val tcases = unfoldCases(scrut, cases, extra)(using env, scrutCr.ctxs)
+          val tres = combineMatch(tscrut, tcases, extra)
+          (tres, scrutCr.derived(c))
+
+        case Signature(lab, args) =>
+          val (targsAndCrs, ctxs2) = unfoldArgs(args, extra)
+          val (targs, argsCrs) = targsAndCrs.unzip
+          val tres = combineCtorAlike(lab, targs, extra)
+          val cr = combineCodeRes(argsCrs, tpe)(Signature(lab, _))(using env, ctxs2)
+          (tres, cr)
+      }
+    }
+
+    final def unfoldCase(scrut: Code, cse: LabMatchCase, extra: Extra)(using env: Env, ctxs0: Ctxs): (T, T, Seq[Code]) = {
+      val PatBdgsAndConds(ctxs1, _, patConds) = addPatternBindingsAndConds(ctxs0, scrut, cse.pattern)
+      val (tguard, _) = unfold(cse.guard, extra)(using env, ctxs1)
+      val (trhs, _) = unfold(cse.rhs, extra)(using env, ctxs1.withCond(cse.guard))
+      (tguard, trhs, patConds :+ cse.guard)
+    }
+
+    final def unfoldCases(scrut: Code, cases: Seq[LabMatchCase], extra: Extra)(using env: Env, ctxs: Ctxs): Seq[T] = {
+      def rec(cases: Seq[LabMatchCase], acc: Seq[T])(using ctxs: Ctxs): Seq[T] = cases match {
+        case Seq() => acc
+        case cse +: rest =>
+          val (tguard, trhs, caseConds) = unfoldCase(scrut, cse, extra)
+          val negCaseConds = negatedConjunction(caseConds)
+          rec(rest, acc :+ combineCase(tguard, trhs, extra))(using ctxs.withCond(negCaseConds))
+      }
+      rec(cases, Seq.empty)
+    }
+
+    final def unfoldArgs(args: Seq[Code], extra: Extra)(using env: Env, ctxs: Ctxs): (Seq[(T, CodeRes)], Ctxs) = {
+      args.foldLeft((Seq.empty[(T, CodeRes)], ctxs)) {
+        case ((acc, ctxs), arg) =>
+          given Ctxs = ctxs
+          assert(CodeRes.isTerminal(arg))
+          val (tres, cr) = unfold(arg, extra)
+          assert(cr.terminal == arg)
+          (acc :+ (tres, cr), cr.ctxs)
+      }
+    }
   }
 
   final def tearDown(c: Code)(using env: Env, ctxs: Ctxs): CodeRes = {
