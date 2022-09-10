@@ -228,6 +228,7 @@ trait Core extends Definitions { ocbsl =>
   }
 
   case class Ctxs(ctxs: Seq[Ctx]) {
+    import Ctxs._
     assert(
       ctxs.forall {
         case Ctx.BoundDef(terminal) => !isLitOrVar(terminal)
@@ -329,24 +330,28 @@ trait Core extends Definitions { ocbsl =>
     }
 
     // En gros: On plug jusqu'à ce que l'on atteigne inCtxs
-    def plugged(inCtxs: Ctxs, u: Occurrences, c: Code)(using env: Env): (Occurrences, Code, Set[Code]) = {
+    def plugged(inCtxs: Ctxs, terminal: Code)(using env: Env): (Occurrences, Code, CodeRes) = {
       assert(inCtxs.isPrefixOf(this))
+      assert(CodeRes.isTerminal(terminal))
 
-      def rec(curr: Ctxs, u: Occurrences, c: Code, inlinedLet: Set[Code]): (Occurrences, Code, Set[Code]) = {
+      def rec(curr: Ctxs, u: Occurrences, c: Code, partialCr: PartialCodeRes): (Occurrences, Code, CodeRes) = {
         assert(inCtxs.isPrefixOf(curr))
         assert(curr.isPrefixOf(this))
-        if (curr.ctxs.size == inCtxs.ctxs.size) (u, c, inlinedLet)
-        else {
+        if (curr.ctxs.size == inCtxs.ctxs.size) {
+          val minCr = CodeRes(partialCr.terminal, Ctxs(inCtxs.ctxs ++ partialCr.suffixCtxs))
+          (u, c, minCr)
+        } else {
           assert(curr.ctxs.nonEmpty)
           val (prev, toPlug) = curr.pop.get
-          val (u2, c2, inlinedLet2) = Ctxs.plugCtx(curr, prev, toPlug, u, c, inlinedLet)
-          val res = rec(prev, u2, c2, inlinedLet2)
+          val (u2, c2, partialCr2) = Ctxs.plugCtx(prev, toPlug, u, c, partialCr)
+          val res = rec(prev, u2, c2, partialCr2)
           val noTailRecPls = Ctxs(curr.ctxs)
           res
         }
       }
 
-      rec(this, u, c, Set.empty)
+      val occ = occurrencesOf(terminal)(using env, this)
+      rec(this, occ, terminal, PartialCodeRes(terminal, Seq.empty))
     }
 
     def isBoundDef(c: Code): Boolean = ctxs.exists(_.isBoundDef(c))
@@ -364,7 +369,7 @@ trait Core extends Definitions { ocbsl =>
 
     def addBoundDef(df: Code)(using env: Env): Ctxs = {
       assert(CodeRes.isTerminal(df))
-      // assert(terminalPartsBound(df)) // TODO: Trop puissant pr le moment
+      // assert(terminalPartsBound(df)) // TODO: Trop puissant pr le moment (en raison du addBoundDef ds selfPlugged)
 
       if (isLitOrVar(df) || isBoundDef(df)) this
       else Ctxs(ctxs :+ Ctx.BoundDef(df))
@@ -403,10 +408,15 @@ trait Core extends Definitions { ocbsl =>
   object Ctxs {
     // private val plugCtxsMap = mutable.Map.empty[(Ctxs, Occurrences, Code, OEnv), (Occurrences, Code, Set[Code])]
 
+    private case class PartialCodeRes(terminal: Code, suffixCtxs: Seq[Ctx]) {
+      // Comme on va de "bas en haut", on concatène "à l'envers"
+      def +:(ctx: Ctx): PartialCodeRes = PartialCodeRes(terminal, ctx +: suffixCtxs)
+    }
+
     def empty: Ctxs = new Ctxs(Seq.empty)
 
-    private def plugCtx(curr: Ctxs, prev: Ctxs, toPlug: Ctx, u: Occurrences, c: Code, inlinedLet: Set[Code])
-                       (using env: Env): (Occurrences, Code, Set[Code]) = {
+    private def plugCtx(prev: Ctxs, toPlug: Ctx, u: Occurrences, c: Code, partialCr: PartialCodeRes)
+                       (using env: Env): (Occurrences, Code, PartialCodeRes) = {
       if (Thread.interrupted()) throw new InterruptedException("Oh non :(")
 
       /*
@@ -418,7 +428,7 @@ trait Core extends Definitions { ocbsl =>
       // TODO: Quid si inline dans un lambda mais pas ailleurs "plus loin"???
       // TODO: Cette histoire de assume(...) en début de lambda????
       // TODO: Dire qu'ici et pas ailleurs car on ne veut pas remettre des ctxs.addBoundDef pr les lambdas
-      def inlineAppliedLambda(cLam: Code, in: Code): (Occurrences, Code, Set[Code]) = {
+      def inlineAppliedLambda(cLam: Code, in: Code): (Occurrences, Code, PartialCodeRes) = {
         val Signature(Label.Lambda(params), Seq(body)) = code2sig(cLam)
         object inliner extends CodeTransformer {
           override type Extra = Unit
@@ -435,12 +445,13 @@ trait Core extends Definitions { ocbsl =>
 
         val inlined = inliner.transform(in, Map.empty, ())(using env, prev)
         assert(prev.isPrefixOf(inlined.ctxs))
-        val inlinedOcc = occurrencesOf(inlined.terminal)(using env, inlined.ctxs)
-        val (u, c, inlined2) = inlined.ctxs.plugged(prev, inlinedOcc, inlined.terminal)
-        (u, c, inlined2 + cLam)
+        // Remarque: ici, on "repart de zéro", on discard donc le partialCr actuel
+        val (u, c, minCr) = inlined.ctxs.plugged(prev, inlined.terminal)
+        assert(prev.isPrefixOf(minCr.ctxs))
+        (u, c, PartialCodeRes(minCr.terminal, minCr.ctxs.ctxs.drop(prev.ctxs.size)))
       }
 
-      assert(curr.ctxs == prev.ctxs :+ toPlug)
+      lazy val curr = Ctxs(prev.ctxs :+ toPlug) // Slmt pr les assertions
       assert(u.allSuffixes(curr.impureParts))
       /*
       val uuu0 = occurrencesOf(c)(using env, curr)
@@ -452,8 +463,8 @@ trait Core extends Definitions { ocbsl =>
       }
       */
 
-      val (u2, c2, inlinedLet2) = toPlug match {
-        case Ctx.Assumed(_) => (u, c, inlinedLet)
+      val (u2, c2, partialCr2) = toPlug match {
+        case Ctx.Assumed(cond) => (u, c, Ctx.Assumed(cond) +: partialCr)
 
         case Ctx.BoundDef(terminal) =>
           assert(CodeRes.isTerminal(terminal))
@@ -462,36 +473,36 @@ trait Core extends Definitions { ocbsl =>
           assert(composition(terminal).isOnce)
           val compWoTerm = composition - terminal
           val definitionOccurrence = u(terminal)
-          val bdgCase = needsBinding(terminal, compWoTerm, u, inlinedLet)(using env, prev)
+          val bdgCase = needsBinding(terminal, compWoTerm, u)(using env, prev)
 
           (bdgCase, definitionOccurrence) match {
             case (BindingCase.MustBind, _) =>
               val cLet = codeOfSig(mkLet(terminal, c), codeTpe(c))
               val u2 = compWoTerm ++ u.setTo(terminal, Occurrence.Once(prev.impureParts, env.nesting, OccurrenceKind.Expanded))
-              (u2, cLet, inlinedLet)
+              (u2, cLet, Ctx.BoundDef(terminal) +: partialCr)
             case (BindingCase.Inlinable, Occurrence.Once(_, _, OccurrenceKind.Applied)) if isLambda(terminal) =>
               inlineAppliedLambda(terminal, c)
             case _ =>
-              val u2 = definitionOccurrence match {
-                case Occurrence.Zero => u
-//                case Occurrence.Once(_, _, _) =>
-//                  u ++ compWoTerm
+              val (u2, partialCr2) = definitionOccurrence match {
+                case Occurrence.Zero => (u, partialCr)
                 case Occurrence.Once(inCtxs, nesting, _) =>
                   // En gros: on se sert de la definitionOccurrence pour mettre a jour les occurrences des composant du terminal
-                  u ++ compWoTerm.withInlinedOccurrences(inCtxs.withRemovedBinding(terminal), nesting)
+                  val u2 = u ++ compWoTerm.withInlinedOccurrences(inCtxs.withRemovedBinding(terminal), nesting)
+                  (u2, Ctx.BoundDef(terminal) +: partialCr)
                 case Occurrence.Many =>
                   // Ce cas se passe pour les x.f1.fnField où l'on les inline au lieu de les bind
-                  u ++ compWoTerm.manyied
+                  (u ++ compWoTerm.manyied, Ctx.BoundDef(terminal) +: partialCr)
               }
               val u3 = u2.withRemovedBinding(terminal)
-              (u3, c, inlinedLet + terminal)
+              (u3, c, partialCr2)
           }
 
         case Ctx.AssumeLike(lab, predTerminal) =>
           assert(CodeRes.isTerminal(predTerminal))
           assert(prev.isLitVarOrBoundDef(predTerminal))
+          val u2 = u ++ occurrencesOf(predTerminal)(using env, prev)
           val c2 = codeOfSig(mkAssumeLike(lab, predTerminal, c), codeTpe(c))
-          (u ++ occurrencesOf(predTerminal)(using env, prev), c2, inlinedLet)
+          (u2, c2, Ctx.AssumeLike(lab, predTerminal) +: partialCr)
       }
 
       assert(u2.allSuffixes(prev.impureParts))
@@ -507,7 +518,7 @@ trait Core extends Definitions { ocbsl =>
 
       // plugCtxsMap += (curr, u, c, env) -> (u2, c2, inlinedLet2)
 
-      (u2, c2, inlinedLet2)
+      (u2, c2, partialCr2)
     }
   }
 
@@ -529,8 +540,9 @@ trait Core extends Definitions { ocbsl =>
     def selfPlugged(inCtxs: Ctxs)(using env: Env): (Occurrences, Code) = {
       assert(inCtxs.isPrefixOf(ctxs))
       pluggedMap.getOrElseUpdate((this, inCtxs, env), {
-        val u = occurrencesOf(terminal)(using env, ctxs)
-        val (u2, c, inlinedLet) = ctxs.plugged(inCtxs, u, terminal)
+        val (u2, c, minimizedCr) = ctxs.plugged(inCtxs, terminal)
+        assert(codeTpe(terminal) == codeTpe(c), s"${codeTpe(terminal)} != ${codeTpe(c)}")
+        // Remarque: il se peut que minimizedCr.terminal != terminal en présence de lambda inlining
         /*
         val expected0 = occurrencesOf(c)(using env, inCtxs)
         val expected = expected0.withRemovedBindings(inlinedLet)
@@ -541,36 +553,35 @@ trait Core extends Definitions { ocbsl =>
           assert(false, "owie, not the same :(")
         }
         */
-        assert(codeTpe(terminal) == codeTpe(c), s"${codeTpe(terminal)} != ${codeTpe(c)}")
         // TODO: Idealement, ce truc devrait être retournée par plug? Comme ça, on règle le cas des inline lambdas
-        val minimizedCtxs = {
-          val bdgsToKeep1 = ctxs.impureParts.ctxs.collect {
-            case Ctx.BoundDef(bnd) => bnd
-          }.toSet
-          val bdgsToKeep2 = ctxs.ctxs.collect {
-            case Ctx.BoundDef(bnd) if u2(bnd).nonZero => bnd
-            case Ctx.AssumeLike(_, predTerminal) => predTerminal
-          }.toSet
-          val bdgsToKeep = bdgsToKeep1 ++ bdgsToKeep2
-          val suffix = ctxs.ctxs.drop(inCtxs.size)
-          Ctxs(inCtxs.ctxs ++ suffix.filter {
-            case Ctx.BoundDef(bnd) => bdgsToKeep(bnd)
-            case _ => true
-          })
-        }
-        val minimizedThis = CodeRes(terminal, minimizedCtxs.addBoundDef(terminal))
+//        val minimizedCtxs = {
+//          val bdgsToKeep1 = ctxs.impureParts.ctxs.collect {
+//            case Ctx.BoundDef(bnd) => bnd
+//          }.toSet
+//          val bdgsToKeep2 = ctxs.ctxs.collect {
+//            case Ctx.BoundDef(bnd) if u2(bnd).nonZero => bnd
+//            case Ctx.AssumeLike(_, predTerminal) => predTerminal
+//          }.toSet
+//          val bdgsToKeep = bdgsToKeep1 ++ bdgsToKeep2
+//          val suffix = ctxs.ctxs.drop(inCtxs.size)
+//          Ctxs(inCtxs.ctxs ++ suffix.filter {
+//            case Ctx.BoundDef(bnd) => bdgsToKeep(bnd)
+//            case _ => true
+//          })
+//        }
+//        val minimizedThis = CodeRes(terminal, minimizedCtxs.addBoundDef(terminal))
 
         locally {
           val currEntry = unplugMap.getOrElse((c, env), Map.empty)
           // TODO: Voir si oui ou non c'est ok
           // assert(!currEntry.contains(inCtxs))
-          val newEntry = currEntry + (inCtxs -> (minimizedThis, u2))
+          val newEntry = currEntry + (inCtxs -> (minimizedCr, u2))
           unplugMap += (c, env) -> newEntry
         }
 
         locally {
           val currEntry = pluggedOccMap.getOrElseUpdate((env, c), mutable.Map.empty)
-          assert(currEntry.get(inCtxs).forall(_._2 == minimizedThis))
+          assert(currEntry.get(inCtxs).forall(_._2 == minimizedCr))
           val got = currEntry.get(inCtxs).map { case (expected, _) =>
             val eq = u2.c2u.toSet.intersect(expected.c2u.toSet)
             val diff = (u2.c2u.toSet ++ expected.c2u.toSet) -- eq
@@ -589,7 +600,7 @@ trait Core extends Definitions { ocbsl =>
 //            (got, eq, diff)
 //          }
 //          assert(got.forall(_._1 == u2))
-          currEntry += inCtxs -> (u2, minimizedThis)
+          currEntry += inCtxs -> (u2, minimizedCr)
         }
         (u2, c)
       })
@@ -1882,7 +1893,7 @@ trait Core extends Definitions { ocbsl =>
     case _ => false
   }
 
-  final def needsBinding(terminal: Code, terminalComposition: Occurrences, bodyOccurrences: Occurrences, inlinedLets: Set[Code])(using env: Env, prefix: Ctxs): BindingCase = {
+  final def needsBinding(terminal: Code, terminalComposition: Occurrences, bodyOccurrences: Occurrences)(using env: Env, prefix: Ctxs): BindingCase = {
     assert(!isLitOrVar(terminal))
     assert(!prefix.isBoundDef(terminal))
 
