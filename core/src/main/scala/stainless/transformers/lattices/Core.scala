@@ -1041,24 +1041,6 @@ trait Core extends Definitions { ocbsl =>
       }
     }
 
-    def rmBinding(ctxs: Ctxs, terminal: Code): Ctxs = {
-      assert(code2sig(terminal).label == Label.Or, "Que pour des Or!!!")
-      val prefix0 = ctxs.ctxs.takeWhile {
-        case Ctx.BoundDef(`terminal`) => false
-        case _ => true
-      }
-      if (ctxs.ctxs.size == prefix0.size) ctxs // `terminal` n'est en fait même pas bound, donc rien à retirer
-      else {
-        val prefix = Ctxs(prefix0).addBoundDef(terminal)
-        val occ = ctxs.occurrences(prefix)
-        if (occ(terminal).isZero) ctxs.withRemovedBinding(terminal)
-        else ctxs
-      }
-    }
-
-    // Un terminal - des terminaux, et pas des terminals!!!!
-    def rmBindings(ctxs: Ctxs, terminaux: Seq[Code]): Ctxs = terminaux.foldLeft(ctxs)(rmBinding)
-
     def combineRec(disjs: Seq[CodeRes], acc: CodeRes): CodeRes = {
       disjs match {
         case Seq() => acc
@@ -1074,57 +1056,18 @@ trait Core extends Definitions { ocbsl =>
             val (pluggedOcc, accPlugged) = acc.selfPlugged(last.ctxs.withNegatedCond(last.terminal))
             val newDisjs = simplifiedDisjunction(Seq(last.terminal, accPlugged), polarity = true)(using env, last.ctxs)
 
-            val newAcc = {
-              if (!CodeRes.isTerminal(newDisjs)) {
-                tearDown(newDisjs)(using env, last.ctxs)
-              } else {
-                val prevCtxs = {
-                  // TODO: Cette cond. pluggedOcc pr éviter les dupliqués comme dans System-F n'est pas parfaite, car les disjs sont tjrs aplaties
-                  if (label(last.terminal).isOr && pluggedOcc(last.terminal).isZero) {
-                    last.ctxs.pop match {
-                      case Some((prevCtxs, Ctx.BoundDef(lastBdg))) if lastBdg == last.terminal => prevCtxs
-                      case _ => last.ctxs
-                    }
-                  } else {
-                    last.ctxs
-                  }
+            val prevCtxs = {
+              // TODO: Cette cond. pluggedOcc pr éviter les dupliqués comme dans System-F n'est pas parfaite, car les disjs sont tjrs aplaties
+              if (label(last.terminal).isOr && pluggedOcc(last.terminal).isZero) {
+                last.ctxs.pop match {
+                  case Some((prevCtxs, Ctx.BoundDef(lastBdg))) if lastBdg == last.terminal => prevCtxs
+                  case _ => last.ctxs
                 }
-                tearDown(newDisjs)(using env, prevCtxs)
-//                val newCtxs = code2sig(newDisjs) match {
-//                  case Signature(Label.Or, fst +: _) => prevCtxs.addBoundDef(fst).addBoundDef(newDisjs)
-//                  case _ => prevCtxs.addBoundDef(newDisjs)
-//                }
-//                CodeRes(newDisjs, newCtxs)
+              } else {
+                last.ctxs
               }
             }
-
-            /*
-            val newCtxs = code2sig(last.terminal) match {
-              case Signature(Label.Or, fst +: _) if pluggedOcc(last.terminal).isZero => // TODO: Cette cond. pr éviter les dupliqués comme dans System-F n'est pas parfaite, car les disjs sont tjrs applaties
-                last.ctxs.pop match {
-                  case Some((prevCtxs, Ctx.BoundDef(lastBdg))) if lastBdg == last.terminal =>
-                    prevCtxs.addBoundDef(fst).addBoundDef(newDisjs)
-                  case _ =>
-                    assert(last.ctxs.isLitVarOrBoundDef(fst))
-                    assert(last.ctxs.isLitVarOrBoundDef(last.terminal))
-                    last.ctxs.addBoundDef(newDisjs)
-                }
-              case _ =>
-                last.ctxs.addBoundDef(newDisjs)
-            }
-            val newAcc = CodeRes(newDisjs, newCtxs)
-            */
-
-            /*
-            // TODO: Explication
-            // TODO: Pas si vite! newDisjs peut très bien retourner un non terminal!
-            val newDisjs = simplifiedDisjunction(Seq(last.terminal, accPlugged), polarity = true)(using env, last.ctxs)
-            val prevCtxs = init.lastOption.map(_.ctxs).getOrElse(outerCtxs)
-            val candidateRm = Seq(last.terminal, accPlugged)
-              .filter(c => code2sig(c).label == Label.Or && !prevCtxs.isBoundDef(c))
-            val newCtxs = rmBindings(last.ctxs, candidateRm)
-            val newAcc = CodeRes(newDisjs, newCtxs.addBoundDef(newDisjs))
-            */
+            val newAcc = tearDown(newDisjs)(using env, prevCtxs)
             val res = combineRec(init, newAcc)
             val noTailRecPls = Ctxs(last.ctxs.ctxs)
             res
