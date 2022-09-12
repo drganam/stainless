@@ -1055,7 +1055,8 @@ trait Core extends Definitions { ocbsl =>
           } else {
             val (pluggedOcc, accPlugged) = acc.selfPlugged(last.ctxs.withNegatedCond(last.terminal))
             val preLastCtxs = init.lastOption.map(_.ctxs).getOrElse(outerCtxs)
-            val newAcc = simplifiedDisjunctionCodeRes(last, accPlugged, pluggedOcc, polarity = true)(using env, preLastCtxs)
+            val mayPopLastTerminal = !preLastCtxs.isBoundDef(last.terminal)
+            val newAcc = simplifiedDisjunctionCodeRes(last, accPlugged, pluggedOcc, mayPopLastTerminal, polarity = true)
             val res = combineRec(init, newAcc)
             val noTailRecPls = Ctxs(last.ctxs.ctxs)
             res
@@ -1069,21 +1070,19 @@ trait Core extends Definitions { ocbsl =>
     res
   }
 
-  def simplifiedDisjunctionCodeRes(lhs: CodeRes, rhs: Code, polarity: Boolean)(using env: Env, preLhsCtxs: Ctxs): CodeRes = {
+  def simplifiedDisjunctionCodeRes(lhs: CodeRes, rhs: Code, mayPopCtxs: Boolean, polarity: Boolean)(using env: Env): CodeRes = {
     val rhsComp = occurrencesOf(rhs)(using env, lhs.ctxs)
-    simplifiedDisjunctionCodeRes(lhs, rhs, rhsComp, polarity)
+    simplifiedDisjunctionCodeRes(lhs, rhs, rhsComp, mayPopCtxs, polarity)
   }
 
-  def simplifiedDisjunctionCodeRes(lhs: CodeRes, rhs: Code, rhsComp: Occurrences, polarity: Boolean)(using env: Env, preLhsCtxs: Ctxs): CodeRes = {
-    assert(preLhsCtxs.isPrefixOf(lhs.ctxs))
+  def simplifiedDisjunctionCodeRes(lhs: CodeRes, rhs: Code, rhsComp: Occurrences, mayPopCtxs: Boolean, polarity: Boolean)(using env: Env): CodeRes = {
     val newDisjs = simplifiedDisjunction(Seq(lhs.terminal, rhs), polarity)(using env, lhs.ctxs)
     // TODO: Explication
     val prevCtxs = {
       // TODO: Cette cond. rhsComp pr éviter les dupliqués comme dans System-F n'est pas parfaite, car les disjs sont tjrs aplaties
-      if (label(lhs.terminal).isOr && rhsComp(lhs.terminal).isZero) {
+      if (mayPopCtxs && label(lhs.terminal).isOr && rhsComp(lhs.terminal).isZero) {
         lhs.ctxs.pop match {
-          case Some((prevCtxs, Ctx.BoundDef(lastBdg)))
-            if lastBdg == lhs.terminal && !preLhsCtxs.isBoundDef(lastBdg) => prevCtxs // TODO: cette histoire de preLhsCtxs... en gros ça implique que preLhs == lhs.ctxs car lastBdg apparait en derniere position?
+          case Some((prevCtxs, Ctx.BoundDef(lastBdg))) if lastBdg == lhs.terminal => prevCtxs
           case _ => lhs.ctxs
         }
       } else {
@@ -1190,6 +1189,7 @@ trait Core extends Definitions { ocbsl =>
         val condCr = CodeRes(cond, condCtxs)
         val ctxsForThen = condCtxs.withCond(cond)
         val ctxsForEls = condCtxs.withNegatedCond(cond)
+        lazy val negCond = negCodeOf(cond)
 
         val fstTry: Option[CodeRes] = {
           def unplugBranch(branch: Code, branchCtx: Ctxs): CodeRes = {
@@ -1210,49 +1210,45 @@ trait Core extends Definitions { ocbsl =>
             Some(unplugBranch(els, ctxsForEls))
           } else None
         }
-        def sndTry: CodeRes = (code2sig(thenn), code2sig(els)) match {
-          case (BoolLitSig(true), BoolLitSig(false)) => CodeRes(cond, condCtxs)
+        def sndTry: CodeRes = {
+          lazy val mayPopCond = !prevCtxs.isBoundDef(cond)
+          lazy val mayPopNegCond = !prevCtxs.isBoundDef(negCond)
 
-          case (BoolLitSig(false), BoolLitSig(true)) =>
-            val negCond = negCodeOf(cond)
-            CodeRes(negCond, condCtxs.addBoundDef(negCond))
+          (code2sig(thenn), code2sig(els)) match {
+            case (BoolLitSig(true), BoolLitSig(false)) => CodeRes(cond, condCtxs)
 
-          case (BoolLitSig(true), _) =>
-            // TODO: Au lieu de prevCtxs, ne devrait-on pas passer un preCrCtxs?
-            simplifiedDisjunctionCodeRes(condCr, els, polarity = true)(using env, prevCtxs)
+            case (BoolLitSig(false), BoolLitSig(true)) =>
+              CodeRes(negCond, condCtxs.addBoundDef(negCond))
 
-          case (_, BoolLitSig(true)) =>
-            val negCond = negCodeOf(cond)
-            // TODO: Au lieu de prevCtxs, ne devrait-on pas passer un preCrCtxs?
-            simplifiedDisjunctionCodeRes(condCr.derived(negCond), thenn, polarity = true)(using env, prevCtxs)
+            case (BoolLitSig(true), _) =>
+              simplifiedDisjunctionCodeRes(condCr, els, mayPopCond, polarity = true)
 
-          case (BoolLitSig(false), _) =>
-            // -> !cond && els === !(cond || !els)
-            // TODO: Au lieu de prevCtxs, ne devrait-on pas passer un preCrCtxs?
-            simplifiedDisjunctionCodeRes(condCr, negCodeOf(els), polarity = false)(using env, prevCtxs)
+            case (_, BoolLitSig(true)) =>
+              simplifiedDisjunctionCodeRes(condCr.derived(negCond), thenn, mayPopNegCond, polarity = true)
 
-          case (_, BoolLitSig(false)) =>
-            // -> cond && then === !(!cond || !thenn)
-            val negCond = negCodeOf(cond)
-            // TODO: Au lieu de prevCtxs, ne devrait-on pas passer un preCrCtxs?
-            simplifiedDisjunctionCodeRes(condCr.derived(negCond), negCodeOf(thenn), polarity = false)(using env, prevCtxs)
+            case (BoolLitSig(false), _) =>
+              // -> !cond && els === !(cond || !els)
+              simplifiedDisjunctionCodeRes(condCr, negCodeOf(els), mayPopCond, polarity = false)
 
-          case (Signature(Label.IfExpr, Seq(cond2, thenn2, `els`)), _) =>
-            // -> if (cond && cond2) thenn2 else els === if (!(!cond || !cond2)) thenn2 else els
-            val negCond = negCodeOf(cond)
-            val negCond2 = negCodeOf(cond2)
-            // TODO: Au lieu de prevCtxs, ne devrait-on pas passer un preCrCtxs?
-            val combinedCond = simplifiedDisjunctionCodeRes(condCr.derived(negCond), negCond2, polarity = false)(using env, prevCtxs)
-            val newIfCode = codeOfSig(mkIfExpr(combinedCond.terminal, thenn2, els), tpe)
-            combinedCond.derived(newIfCode)
+            case (_, BoolLitSig(false)) =>
+              // -> cond && then === !(!cond || !thenn)
+              simplifiedDisjunctionCodeRes(condCr.derived(negCond), negCodeOf(thenn), mayPopNegCond, polarity = false)
 
-          case (_, Signature(Label.IfExpr, Seq(cond2, `thenn`, els2))) =>
-            // -> if (cond || cond2) thenn else els2
-            val combinedCond = simplifiedDisjunctionCodeRes(condCr, cond2, polarity = true)(using env, prevCtxs)
-            val newIfCode = codeOfSig(mkIfExpr(combinedCond.terminal, thenn, els2), tpe)
-            combinedCond.derived(newIfCode)
+            case (Signature(Label.IfExpr, Seq(cond2, thenn2, `els`)), _) =>
+              // -> if (cond && cond2) thenn2 else els === if (!(!cond || !cond2)) thenn2 else els
+              val negCond2 = negCodeOf(cond2)
+              val combinedCond = simplifiedDisjunctionCodeRes(condCr.derived(negCond), negCond2, mayPopNegCond, polarity = false)
+              val newIfCode = codeOfSig(mkIfExpr(combinedCond.terminal, thenn2, els), tpe)
+              combinedCond.derived(newIfCode)
 
-          case _ => cr
+            case (_, Signature(Label.IfExpr, Seq(cond2, `thenn`, els2))) =>
+              // -> if (cond || cond2) thenn else els2
+              val combinedCond = simplifiedDisjunctionCodeRes(condCr, cond2, mayPopCond, polarity = true)
+              val newIfCode = codeOfSig(mkIfExpr(combinedCond.terminal, thenn, els2), tpe)
+              combinedCond.derived(newIfCode)
+
+            case _ => cr
+          }
         }
         fstTry.getOrElse(sndTry)
 
