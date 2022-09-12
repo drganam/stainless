@@ -1054,20 +1054,7 @@ trait Core extends Definitions { ocbsl =>
             combineRec(init, acc)
           } else {
             val (pluggedOcc, accPlugged) = acc.selfPlugged(last.ctxs.withNegatedCond(last.terminal))
-            val newDisjs = simplifiedDisjunction(Seq(last.terminal, accPlugged), polarity = true)(using env, last.ctxs)
-
-            val prevCtxs = {
-              // TODO: Cette cond. pluggedOcc pr éviter les dupliqués comme dans System-F n'est pas parfaite, car les disjs sont tjrs aplaties
-              if (label(last.terminal).isOr && pluggedOcc(last.terminal).isZero) {
-                last.ctxs.pop match {
-                  case Some((prevCtxs, Ctx.BoundDef(lastBdg))) if lastBdg == last.terminal => prevCtxs
-                  case _ => last.ctxs
-                }
-              } else {
-                last.ctxs
-              }
-            }
-            val newAcc = tearDown(newDisjs)(using env, prevCtxs)
+            val newAcc = simplifiedDisjunctionCodeRes(last, accPlugged, pluggedOcc, polarity = true)
             val res = combineRec(init, newAcc)
             val noTailRecPls = Ctxs(last.ctxs.ctxs)
             res
@@ -1081,14 +1068,26 @@ trait Core extends Definitions { ocbsl =>
     res
   }
 
-  // TODO: Explication
   def simplifiedDisjunctionCodeRes(lhs: CodeRes, rhs: Code, polarity: Boolean)(using env: Env): CodeRes = {
-    val ctxs = lhs.ctxs.pop match {
-      case Some((prevCtxs, Ctx.BoundDef(last))) if last == lhs.terminal && code2sig(last).label == Label.Or => prevCtxs
-      case _ => lhs.ctxs
+    val rhsComp = occurrencesOf(rhs)(using env, lhs.ctxs)
+    simplifiedDisjunctionCodeRes(lhs, rhs, rhsComp, polarity)
+  }
+
+  def simplifiedDisjunctionCodeRes(lhs: CodeRes, rhs: Code, rhsComp: Occurrences, polarity: Boolean)(using env: Env): CodeRes = {
+    val newDisjs = simplifiedDisjunction(Seq(lhs.terminal, rhs), polarity)(using env, lhs.ctxs)
+    // TODO: Explication
+    val prevCtxs = {
+      // TODO: Cette cond. rhsComp pr éviter les dupliqués comme dans System-F n'est pas parfaite, car les disjs sont tjrs aplaties
+      if (label(lhs.terminal).isOr && rhsComp(lhs.terminal).isZero) {
+        lhs.ctxs.pop match {
+          case Some((prevCtxs, Ctx.BoundDef(lastBdg))) if lastBdg == lhs.terminal => prevCtxs
+          case _ => lhs.ctxs
+        }
+      } else {
+        lhs.ctxs
+      }
     }
-    val simpDisjs = simplifiedDisjunction(Seq(lhs.terminal, rhs), polarity)(using env, ctxs)
-    tearDown(simpDisjs)(using env, ctxs)
+    tearDown(newDisjs)(using env, prevCtxs)
   }
 
   private val negCodeCache = mutable.Map.empty[Code, Code]
@@ -2006,7 +2005,7 @@ trait Core extends Definitions { ocbsl =>
   }
 
   object uncoder extends CodeUnfolder[RevRes] {
-    type Extra = RevEnv
+    override type Extra = RevEnv
 
     override def unfoldImpl(c: Code, renv: RevEnv)(using env: Env, ctxs: Ctxs): (RevRes, CodeRes) = {
       renv.revLetDefs.get(c) match {
@@ -2866,12 +2865,8 @@ trait Core extends Definitions { ocbsl =>
       }
     }
 
-    tear.transform(c, Map.empty, ())
-    // TODO: Pas de unplugged, car il peut nous jouer des tours avec les inlined lambdas
-    /*
     unplugged(c).map(_._1)
       .getOrElse(tear.transform(c, Map.empty, ()))
-    */
   }
 
   //endregion
