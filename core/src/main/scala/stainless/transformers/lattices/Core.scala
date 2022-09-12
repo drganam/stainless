@@ -369,7 +369,7 @@ trait Core extends Definitions { ocbsl =>
 
     def addBoundDef(df: Code)(using env: Env): Ctxs = {
       assert(CodeRes.isTerminal(df))
-      assert(terminalPartsBound(df)) // TODO: Trop puissant pr le moment (en raison du addBoundDef ds selfPlugged)
+      assert(terminalPartsBound(df))
 
       if (isLitOrVar(df) || isBoundDef(df)) this
       else Ctxs(ctxs :+ Ctx.BoundDef(df))
@@ -444,15 +444,6 @@ trait Core extends Definitions { ocbsl =>
               inlineLambda(params.zip(rargs), body)(using env, rctxs)
             case _ => super.transformImpl(c, repl, ())
           }
-          /*
-          val rec = super.transformImpl(c, repl, ())
-          code2sig(rec.terminal) match {
-            case Signature(Label.Application, `cLam` +: args) =>
-              assert(params.size == args.size)
-              inlineLambda(params.zip(args), body)(using env, rec.ctxs)
-            case _ => rec
-          }
-          */
         }
 
         val inlined = inliner.transform(in, Map.empty, ())(using env, prev)
@@ -517,7 +508,7 @@ trait Core extends Definitions { ocbsl =>
   case class CodeRes(terminal: Code, ctxs: Ctxs) {
     assert(CodeRes.isTerminal(terminal), s"Gag: $terminal n'est pas un terminal (est un ${code2sig(terminal)})")
     assert(ctxs.isLitVarOrBoundDef(terminal))
-    assert(ctxs.terminalPartsBound(terminal)) // TODO: Trop puissant pr le moment
+    assert(ctxs.terminalPartsBound(terminal))
 
     lazy val hc: Int = java.util.Objects.hash(terminal, ctxs)
     override def hashCode(): Int = hc
@@ -649,9 +640,6 @@ trait Core extends Definitions { ocbsl =>
     val terminal = cons(codeRess.map(_.terminal))
     // TODO: Etendre ce check à d'autre cas (ensuring, etc.)
     assert(!isLambdaLike(terminal))
-//    val comp = codeRess.foldLeft(Occurrences.of(terminal))(_ ++ _.composition)
-    // Comme les codeRess sont tous bound, c'est juste l'occurrences.of de l'arg qu'on souhaite, pas sa composition!
-//    val comp = codeRess.foldLeft(Occurrences.of(terminal))((acc, arg) => acc ++ Occurrences.of(arg.terminal))
     CodeRes(terminal, ctxs.addBoundDef(terminal))
   }
 
@@ -1204,9 +1192,9 @@ trait Core extends Definitions { ocbsl =>
           // Remarque: pas besoin de la pureté:
           //  -Pour cond: car bound
           //  -Pour la branche "morte": car unreachable
-          if (cond == trueCode || thenn == els) { // TODO: ajouter || implied(cond)
+          if (cond == trueCode || thenn == els || implied(cond)(using env, condCtxs)) {
             Some(unplugBranch(thenn, ctxsForThen))
-          } else if (cond == falseCode) { // TODO: ajouter || implied(neg(cond))
+          } else if (cond == falseCode || implied(negCond)(using env, condCtxs)) {
             Some(unplugBranch(els, ctxsForEls))
           } else None
         }
