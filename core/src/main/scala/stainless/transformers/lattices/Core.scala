@@ -369,7 +369,7 @@ trait Core extends Definitions { ocbsl =>
 
     def addBoundDef(df: Code)(using env: Env): Ctxs = {
       assert(CodeRes.isTerminal(df))
-      // assert(terminalPartsBound(df)) // TODO: Trop puissant pr le moment (en raison du addBoundDef ds selfPlugged)
+      assert(terminalPartsBound(df)) // TODO: Trop puissant pr le moment (en raison du addBoundDef ds selfPlugged)
 
       if (isLitOrVar(df) || isBoundDef(df)) this
       else Ctxs(ctxs :+ Ctx.BoundDef(df))
@@ -417,14 +417,8 @@ trait Core extends Definitions { ocbsl =>
 
     private def plugCtx(prev: Ctxs, toPlug: Ctx, u: Occurrences, c: Code, partialCr: PartialCodeRes)
                        (using env: Env): (Occurrences, Code, PartialCodeRes) = {
-      if (Thread.interrupted()) throw new InterruptedException("Oh non :(")
+      if (Thread.interrupted()) throw new InterruptedException()
 
-      /*
-      plugCtxsMap.get((curr, u, c, env)) match {
-        case Some(r) => return r
-        case None => ()
-      }
-      */
       // TODO: Quid si inline dans un lambda mais pas ailleurs "plus loin"???
       // TODO: Cette histoire de assume(...) en début de lambda????
       // TODO: Dire qu'ici et pas ailleurs car on ne veut pas remettre des ctxs.addBoundDef pr les lambdas
@@ -438,9 +432,27 @@ trait Core extends Definitions { ocbsl =>
                                     (using env: Env, ctxs: Ctxs): CodeRes = code2sig(c) match {
             case Signature(Label.Application, `cLam` +: args) =>
               assert(params.size == args.size)
-              inlineLambda(ctxs, params.zip(args), body)
+              val (rargs, rctxs) = args.foldLeft((Seq.empty[Code], ctxs)) {
+                case ((acc, ctxs), arg) =>
+                  given Ctxs = ctxs
+                  assert(CodeRes.isTerminal(arg))
+                  val rarg = transform(arg, repl, ())
+                  // assert(rarg.terminal == arg) // TODO: Et non c'est pas vrai! En raison de lambda inlining
+                  assert(ctxs.isPrefixOf(rarg.ctxs))
+                  (acc :+ rarg.terminal, rarg.ctxs)
+              }
+              inlineLambda(params.zip(rargs), body)(using env, rctxs)
             case _ => super.transformImpl(c, repl, ())
           }
+          /*
+          val rec = super.transformImpl(c, repl, ())
+          code2sig(rec.terminal) match {
+            case Signature(Label.Application, `cLam` +: args) =>
+              assert(params.size == args.size)
+              inlineLambda(params.zip(args), body)(using env, rec.ctxs)
+            case _ => rec
+          }
+          */
         }
 
         val inlined = inliner.transform(in, Map.empty, ())(using env, prev)
@@ -451,17 +463,7 @@ trait Core extends Definitions { ocbsl =>
         (u, c, PartialCodeRes(minCr.terminal, minCr.ctxs.ctxs.drop(prev.ctxs.size)))
       }
 
-      lazy val curr = Ctxs(prev.ctxs :+ toPlug) // Slmt pr les assertions
-      assert(u.allSuffixes(curr.impureParts))
-      /*
-      val uuu0 = occurrencesOf(c)(using env, curr)
-      val uuu = uuu0.withRemovedBindings(inlinedLet)
-      if (u != uuu) {
-        val eq = u.c2u.toSet.intersect(uuu.c2u.toSet)
-        val diff = (u.c2u.toSet ++ uuu.c2u.toSet) -- eq
-        assert(false, "!!! Pas d'égalité")
-      }
-      */
+      assert(u.allSuffixes(Ctxs(prev.ctxs :+ toPlug).impureParts))
 
       val (u2, c2, partialCr2) = toPlug match {
         case Ctx.Assumed(cond) => (u, c, Ctx.Assumed(cond) +: partialCr)
@@ -506,18 +508,6 @@ trait Core extends Definitions { ocbsl =>
       }
 
       assert(u2.allSuffixes(prev.impureParts))
-      /*
-      val uuu20 = occurrencesOf(c2)(using env, prev)
-      val uuu2 = uuu20.withRemovedBindings(inlinedLet2)
-      if (u2 != uuu2) {
-        val eq = u2.c2u.toSet.intersect(uuu2.c2u.toSet)
-        val diff = (u2.c2u.toSet ++ uuu2.c2u.toSet) -- eq
-        assert(false, "!!! Pas d'égalité2")
-      }
-      */
-
-      // plugCtxsMap += (curr, u, c, env) -> (u2, c2, inlinedLet2)
-
       (u2, c2, partialCr2)
     }
   }
@@ -527,15 +517,10 @@ trait Core extends Definitions { ocbsl =>
   case class CodeRes(terminal: Code, ctxs: Ctxs) {
     assert(CodeRes.isTerminal(terminal), s"Gag: $terminal n'est pas un terminal (est un ${code2sig(terminal)})")
     assert(ctxs.isLitVarOrBoundDef(terminal))
-    // assert(ctxs.terminalPartsBound(terminal)) // TODO: Trop puissant pr le moment
+    assert(ctxs.terminalPartsBound(terminal)) // TODO: Trop puissant pr le moment
 
     lazy val hc: Int = java.util.Objects.hash(terminal, ctxs)
     override def hashCode(): Int = hc
-
-    def ctxsWithoutTerminalLastBound: Ctxs = ctxs.pop match {
-      case Some((prevCtxs, Ctx.BoundDef(`terminal`))) => prevCtxs
-      case _ => ctxs
-    }
 
     def selfPlugged(inCtxs: Ctxs)(using env: Env): (Occurrences, Code) = {
       assert(inCtxs.isPrefixOf(ctxs))
@@ -553,23 +538,6 @@ trait Core extends Definitions { ocbsl =>
           assert(false, "owie, not the same :(")
         }
         */
-        // TODO: Idealement, ce truc devrait être retournée par plug? Comme ça, on règle le cas des inline lambdas
-//        val minimizedCtxs = {
-//          val bdgsToKeep1 = ctxs.impureParts.ctxs.collect {
-//            case Ctx.BoundDef(bnd) => bnd
-//          }.toSet
-//          val bdgsToKeep2 = ctxs.ctxs.collect {
-//            case Ctx.BoundDef(bnd) if u2(bnd).nonZero => bnd
-//            case Ctx.AssumeLike(_, predTerminal) => predTerminal
-//          }.toSet
-//          val bdgsToKeep = bdgsToKeep1 ++ bdgsToKeep2
-//          val suffix = ctxs.ctxs.drop(inCtxs.size)
-//          Ctxs(inCtxs.ctxs ++ suffix.filter {
-//            case Ctx.BoundDef(bnd) => bdgsToKeep(bnd)
-//            case _ => true
-//          })
-//        }
-//        val minimizedThis = CodeRes(terminal, minimizedCtxs.addBoundDef(terminal))
 
         locally {
           val currEntry = unplugMap.getOrElse((c, env), Map.empty)
@@ -998,7 +966,7 @@ trait Core extends Definitions { ocbsl =>
 
   final def simplifiedDisjunction(disj0: Seq[Code], polarity: Boolean)(using Env, Ctxs): Code = {
     assert(disj0.forall(c => codeTpe(c) == BoolTy))
-    val disjs1 = unOrCodes(disj0).filter(_ != falseCode).distinct
+    val disjs1 = unOrCodes(disj0).filter(_ != falseCode).distinct // TODO: Peut-être qu'on ne devrait pas systématiquement aplatir les disjs bound?
     val disjs2 = doSimplifyDisjunction(disjs1, polarity)
     val simp = {
       if (disjs2.isEmpty) falseCode
@@ -1018,7 +986,6 @@ trait Core extends Definitions { ocbsl =>
           // so it is safe to drop them -- including impure expressions.
           val disjs3 = disjs2.take(lastKeptIx + 1)
           val disjs3Purities = disjs3.map(codePurity)
-          // TODO: Pureté imprécise! Il faudrait accumuler les disjs
           if (disjs3Purities.forall(_.isPure)) trueCode
           else {
             // Add a trailing `true` if not already present (because the disjunction will evaluate to true,
@@ -1105,7 +1072,50 @@ trait Core extends Definitions { ocbsl =>
             combineRec(init, acc)
           } else {
             val (pluggedOcc, accPlugged) = acc.selfPlugged(last.ctxs.withNegatedCond(last.terminal))
+            val newDisjs = simplifiedDisjunction(Seq(last.terminal, accPlugged), polarity = true)(using env, last.ctxs)
 
+            val newAcc = {
+              if (!CodeRes.isTerminal(newDisjs)) {
+                tearDown(newDisjs)(using env, last.ctxs)
+              } else {
+                val prevCtxs = {
+                  // TODO: Cette cond. pluggedOcc pr éviter les dupliqués comme dans System-F n'est pas parfaite, car les disjs sont tjrs aplaties
+                  if (label(last.terminal).isOr && pluggedOcc(last.terminal).isZero) {
+                    last.ctxs.pop match {
+                      case Some((prevCtxs, Ctx.BoundDef(lastBdg))) if lastBdg == last.terminal => prevCtxs
+                      case _ => last.ctxs
+                    }
+                  } else {
+                    last.ctxs
+                  }
+                }
+                tearDown(newDisjs)(using env, prevCtxs)
+//                val newCtxs = code2sig(newDisjs) match {
+//                  case Signature(Label.Or, fst +: _) => prevCtxs.addBoundDef(fst).addBoundDef(newDisjs)
+//                  case _ => prevCtxs.addBoundDef(newDisjs)
+//                }
+//                CodeRes(newDisjs, newCtxs)
+              }
+            }
+
+            /*
+            val newCtxs = code2sig(last.terminal) match {
+              case Signature(Label.Or, fst +: _) if pluggedOcc(last.terminal).isZero => // TODO: Cette cond. pr éviter les dupliqués comme dans System-F n'est pas parfaite, car les disjs sont tjrs applaties
+                last.ctxs.pop match {
+                  case Some((prevCtxs, Ctx.BoundDef(lastBdg))) if lastBdg == last.terminal =>
+                    prevCtxs.addBoundDef(fst).addBoundDef(newDisjs)
+                  case _ =>
+                    assert(last.ctxs.isLitVarOrBoundDef(fst))
+                    assert(last.ctxs.isLitVarOrBoundDef(last.terminal))
+                    last.ctxs.addBoundDef(newDisjs)
+                }
+              case _ =>
+                last.ctxs.addBoundDef(newDisjs)
+            }
+            val newAcc = CodeRes(newDisjs, newCtxs)
+            */
+
+            /*
             // TODO: Explication
             // TODO: Pas si vite! newDisjs peut très bien retourner un non terminal!
             val newDisjs = simplifiedDisjunction(Seq(last.terminal, accPlugged), polarity = true)(using env, last.ctxs)
@@ -1114,7 +1124,7 @@ trait Core extends Definitions { ocbsl =>
               .filter(c => code2sig(c).label == Label.Or && !prevCtxs.isBoundDef(c))
             val newCtxs = rmBindings(last.ctxs, candidateRm)
             val newAcc = CodeRes(newDisjs, newCtxs.addBoundDef(newDisjs))
-
+            */
             val res = combineRec(init, newAcc)
             val noTailRecPls = Ctxs(last.ctxs.ctxs)
             res
@@ -1971,7 +1981,7 @@ trait Core extends Definitions { ocbsl =>
           occ
         }
         */
-        // TODO: !!! Ce ne sera pas tout à fait les mêmes car on inline les impures et les yeet de inCtxs!!!
+        // TODO: !!! Ce ne sera pas tout à fait les mêmes car on inline les impures et les yeet de inCtxs!!! -> Ou bien?
         val entries = pluggedOccMap.getOrElseUpdate((env, c), mutable.Map.empty)
         // Remarque: pas de Occurrences.of(c) parce que `c` n'est pas un terminal (c'est un Let ou un AssumeLike)
         val (occs, cr) = entries.getOrElseUpdate(ctxs, super.tryFoldImpl(c, Occurrences.empty, extra).merge)
@@ -2005,9 +2015,9 @@ trait Core extends Definitions { ocbsl =>
   // TODO: Cette histoire de assume(...) en début de lambda????
   // TODO: Cette histoire de assume(...) en début de lambda????
   // TODO: Cette histoire de assume(...) en début de lambda????
-  final def inlineLambda(outerCtxs: Ctxs, argsSubst: Seq[(VarId, Code)], body: Code)(using env: Env): CodeRes = {
+  final def inlineLambda(argsSubst: Seq[(VarId, Code)], body: Code)(using env: Env, outerCtxs: Ctxs): CodeRes = {
     // Essentiellement un freshener + simplifyTopLvl a chaque step
-    object inliner extends CodeTransformer {
+    object impl extends CodeTransformer {
       override type Extra = Unit
 
       override def transformImpl(c: Code, repl: Map[Code, Code], extra: Unit)(using env: Env, ctxs: Ctxs): CodeRes = code2sig(c) match {
@@ -2026,11 +2036,9 @@ trait Core extends Definitions { ocbsl =>
     }
 
     val bodyTpe = codeTpe(body)
-    val initCtxs = argsSubst.foldLeft(outerCtxs) {
-      case (ctxs, (_, arg)) => ctxs.addBoundDef(arg)
-    }
+    assert(argsSubst.forall { case (_, arg) => outerCtxs.isLitVarOrBoundDef(arg) })
     val initRepl = argsSubst.map { case (param, arg) => codeOfVarId(param) -> arg }.toMap
-    val inlined = inliner.transform(body, initRepl, ())(using env, initCtxs)
+    val inlined = impl.transform(body, initRepl, ())(using env, outerCtxs)
     assert(codeTpe(inlined.terminal) == bodyTpe)
     inlined
   }
@@ -3177,6 +3185,8 @@ trait Core extends Definitions { ocbsl =>
         newCode
     }
   }
+
+  final def label(c: Code): Label = code2sig(c).label
 
   final def varTpe(v: VarId): Type = varId2Var(v).getType // TODO: Apparemment, il y a une difference entre .getType et .tpe (pour les refinement type)
 

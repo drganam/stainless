@@ -148,6 +148,11 @@ trait Definitions {
       case _ => false
     }
 
+    def isOr: Boolean = this match {
+      case Or => true
+      case _ => false
+    }
+
     def isLiteral: Boolean = this match {
       case Lit(_) => true
       case _ => false
