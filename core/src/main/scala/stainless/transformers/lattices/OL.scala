@@ -13,13 +13,9 @@ trait OL extends Core {
 
   private val leqCache = mutable.Map.empty[(Code, Code), Boolean]
 
-  override final def implied(rhs: Code)(using env: Env, ctxs: Ctxs): Boolean = {
-    if (rhs == trueCode) true
-    else if (ctxs.allConds.isEmpty) false // car rhs != trueCode
-    else {
-      val lhsConj = conjunct(ctxs.allConds)
-      latticesLeq(lhsConj, rhs)
-    }
+  override final def impliedImpl(rhs: Code)(using env: Env, ctxs: Ctxs): Boolean = {
+    val lhsConj = conjunct(ctxs.allConds)
+    latticesLeq(lhsConj, rhs)
   }
 
   final def latticesLeq(lhs: Code, rhs: Code): Boolean = {
@@ -96,53 +92,25 @@ trait OL extends Core {
     rec(disjs2, Seq.empty)
   }
 
-  override def checkForContradiction(disjs: Seq[Code], polarity: Boolean)(using Env, Ctxs): Option[Int] = {
+  // (On note les disjunctions phi_1,...,phi_n)
+  // S'il existe un i t.q.
+  //   ¬phi_i <= \/_j phi_j    (1)
+  // alors on retourne l'indice k t.q.
+  //   ¬phi_i <= phi_k         (2)
+  //
+  // Remarque: on obtient que:
+  //   ¬phi_i \/ \/_j phi_j === \/_j phi_j
+  //                        === true (par ¬phi_i \/ phi_i)
+  // C-à-d l'existence de i par (1) nous indique que \/_j phi_j === true
+  // Comme dans notre application, on ne peut pas drop tous les phi_j (en raison de la présence des exprs impures)
+  // on est intéressé à trouver un k t.q. \/_j<=k phi_j === true (on pourra alors drop tout ce qui vient après ce k)
+  // C'est précisément le k de (2) qui nous intéresse
+  // En effet, par (1), on a ¬phi_i <= \/_j phi_j ==> il existe un k t.q. ¬phi_i <= phi_k
+  // (voir définition <= cas disjonction sur la droite)
+  override final def checkForDisjunctionContradiction(disjs: Seq[Code])(using Env, Ctxs): Option[Int] = {
     assert(disjs.size >= 2)
-    val disjCode = codeOfSig(mkOr(disjs), BoolTy)
-    val ix = {
-      if (polarity) {
-        val shadowChildren = disjs map negCodeOf
-        shadowChildren.indexWhere(latticesLeq(_, disjCode))
-      } else {
-        val disjNegCode = negCodeOf(disjCode) // Car polarity inversé, donc c'est la négation qu'on passe
-        disjs.indexWhere(latticesLeq(disjNegCode, _))
-      }
-    }
-    if (ix < 0) None else Some(ix)
-  }
-
-  private def codeOfDisjs(d: Seq[Code]): Code = {
-    assert(d.nonEmpty)
-    if (d.size == 1) d.head else codeOfSig(mkOr(d), BoolTy)
-  }
-
-  object NegSig {
-    def unapply(sig: Signature): Option[Code] = sig match {
-      case Signature(Label.Not, Seq(c)) => Some(c)
-      case _ => None
-    }
-  }
-
-  object VarSig {
-    def unapply(sig: Signature): Option[(VarId, Boolean)] = sig match {
-      case Signature(Label.Var(v), _) => Some((v, true))
-      case Signature(Label.Not, Seq(c)) => code2sig(c) match {
-        case Signature(Label.Var(v), _) => Some((v, false))
-        case _ => None
-      }
-      case _ => None
-    }
-  }
-
-  object OrSig {
-    def unapply(sig: Signature): Option[(Seq[Code], Boolean)] = sig match {
-      case Signature(Label.Or, disjs) => Some((disjs, true))
-      case Signature(Label.Not, Seq(c)) => code2sig(c) match {
-        case Signature(Label.Or, disjs) => Some((disjs, false))
-        case _ => None
-      }
-      case _ => None
-    }
+    val negDisjs = disjs map negCodeOf
+    findMap(negDisjs)(negPhiI => indexWhereOpt(disjs)(phiJ => latticesLeq(negPhiI, phiJ)))
   }
 }
 

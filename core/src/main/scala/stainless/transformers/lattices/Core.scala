@@ -420,7 +420,6 @@ trait Core extends Definitions { ocbsl =>
       if (Thread.interrupted()) throw new InterruptedException()
 
       // TODO: Quid si inline dans un lambda mais pas ailleurs "plus loin"???
-      // TODO: Cette histoire de assume(...) en début de lambda????
       // TODO: Dire qu'ici et pas ailleurs car on ne veut pas remettre des ctxs.addBoundDef pr les lambdas
       def inlineAppliedLambda(cLam: Code, in: Code): (Occurrences, Code, PartialCodeRes) = {
         val Signature(Label.Lambda(params), Seq(body)) = code2sig(cLam)
@@ -437,7 +436,8 @@ trait Core extends Definitions { ocbsl =>
                   given Ctxs = ctxs
                   assert(CodeRes.isTerminal(arg))
                   val rarg = transform(arg, repl, ())
-                  // assert(rarg.terminal == arg) // TODO: Et non c'est pas vrai! En raison de lambda inlining
+                  // Remarque: Bien que arg soit un terminal, on n'a pas forcément rarg.terminal == arg,
+                  // parce que arg pourrait très bien être beta-reduced lui aussi
                   assert(ctxs.isPrefixOf(rarg.ctxs))
                   (acc :+ rarg.terminal, rarg.ctxs)
               }
@@ -731,16 +731,13 @@ trait Core extends Definitions { ocbsl =>
         codeOfExprsBound(e, tpe)(mkAnnot(_, flags))
         */
 
-      // TODO: Ne pourrait-on pas envisager certains simplif. ici? Pk "attendre" codeOf?
       case and @ And(_) =>
         val ands = unAnd(and)
         codeOfExpr(Not(Or(ands.map(Not.apply))))
       case or @ Or(_) => transformDisjunction(unOr(or))(codeOfExpr)
       case Not(e) => negExprOf(e)
+      case i @ Implies(_, _) => transformDisjunction(unOr(i))(codeOfExpr)
 
-      case i@Implies(e1, e2) =>
-        transformDisjunction(unOr(i))(codeOfExpr)
-      // codeOfExpr(Or(Not(e1), e2))
       case Equals(e1, e2) => codeOfExprsBound(e1, e2, tpe)(mkEquals)
       case LessThan(e1, e2) => codeOfExprsBound(e1, e2, tpe)(mkLessThan)
       case GreaterThan(e1, e2) => codeOfExprsBound(e1, e2, tpe)(mkGreaterThan)
@@ -827,28 +824,6 @@ trait Core extends Definitions { ocbsl =>
         val rchild = codeOfExpr(child)
         val negChild = negCodeOf(rchild.terminal)
         rchild.derived(negChild)
-        /*
-        val negated =
-          code2sig(rchild.terminal) match {
-            // Pour If et Match, comme on va "push" dans les branches la négation, cela risque de
-            case Signature(Label.IfExpr | Label.MatchExpr(_), _) => codeOfSig(mkNot(rchild.terminal), BoolTy)
-            case _ => negCodeOf(rchild.terminal)
-          }
-        rchild.derived(negated)
-        */
-        /*
-        val ctxs = rchild.ctxs.pop match {
-          case Some((prevCtxs, Ctx.BoundDef(bnd))) if bnd == rchild.terminal =>
-            code2sig(rchild.terminal) match {
-              // Pour If et Match, comme on va "push" dans les branches la négation, on a meilleur temps de remplacer le binding de la non-négation avec celui de la négation pour eviter des potentiel dupliqués (voir LeftPad)
-              case Signature(Label.IfExpr | Label.MatchExpr(_), _) => prevCtxs
-              case _ => rchild.ctxs
-            }
-          case _ => rchild.ctxs
-        }
-        val negChild = negCodeOf(rchild.terminal)
-        CodeRes(negChild, ctxs.addBoundDef(negChild))
-        */
     }
   }
 
@@ -946,29 +921,37 @@ trait Core extends Definitions { ocbsl =>
 
   //region Common to OCBSL and OL
 
-  def implied(rhs: Code)(using env: Env, ctxs: Ctxs): Boolean
+  final def implied(rhs: Code)(using env: Env, ctxs: Ctxs): Boolean = {
+    if (rhs == trueCode || ctxs.allCondsSet(rhs)) true
+    else if (ctxs.allConds.isEmpty) false // car rhs != trueCode
+    else impliedImpl(rhs)
+  }
 
-  def doSimplifyDisjunction(disj0: Seq[Code], polarity: Boolean)(using Env, Ctxs): Seq[Code]
+  def impliedImpl(rhs: Code)(using env: Env, ctxs: Ctxs): Boolean
 
-  def checkForContradiction(disjs: Seq[Code], polarity: Boolean)(using Env, Ctxs): Option[Int]
+  /////////////////////////////
+
+  //region Related to disjunctions processing
+
+  def doSimplifyDisjunction(disjs: Seq[Code], polarity: Boolean)(using Env, Ctxs): Seq[Code]
 
   final def simplifiedDisjunction(disj0: Seq[Code], polarity: Boolean)(using Env, Ctxs): Code = {
     assert(disj0.forall(c => codeTpe(c) == BoolTy))
-    val disjs1 = unOrCodes(disj0).filter(_ != falseCode).distinct // TODO: Peut-être qu'on ne devrait pas systématiquement aplatir les disjs bound?
+    // TODO: unOrCodes devrait-il aussi transformer les And en Or???
+    // TODO: Peut-être qu'on ne devrait pas systématiquement aplatir les disjs/conjs bound?
+    val disjs1 = unOrCodes(disj0).filter(_ != falseCode).distinct
     val disjs2 = doSimplifyDisjunction(disjs1, polarity)
     val simp = {
       if (disjs2.isEmpty) falseCode
       else if (disjs2.size == 1) disjs2.head
       else {
         val lastKeptIx = Some(disjs2.indexOf(trueCode)).filter(_ >= 0)
-          .orElse(checkForContradiction(disjs2, polarity))
+          .orElse(checkForDisjunctionContradiction(disjs2))
           .getOrElse(disjs2.length - 1)
 
         if (lastKeptIx == disjs2.length - 1 && disjs2.last != trueCode) {
           // Nothing simplified, so just make the disjunction and return
-          // TODO: Sort if "truly pure" and not pure due to binding!
-          // val disjs2 = if (purities.forall(_.isPure)) disjs1.sorted else disjs1
-          codeOfSig(mkOr(disjs2), BoolTy)
+          codeOfDisjs(disjs2)
         } else {
           // Due to short-circuiting, once the disjunction evaluates to true, the remaining disjuncts won't ever be evaluated
           // so it is safe to drop them -- including impure expressions.
@@ -977,9 +960,9 @@ trait Core extends Definitions { ocbsl =>
           if (disjs3Purities.forall(_.isPure)) trueCode
           else {
             // Add a trailing `true` if not already present (because the disjunction will evaluate to true,
-            // but due to the presence of impure expressions, we are not allowed to simplify the whole expr to true
+            // but due to the presence of impure expressions, we are not allowed to simplify the whole expr to true)
             val disjs4 = if (disjs3.contains(trueCode)) disjs3 else disjs3 :+ trueCode
-            codeOfSig(mkOr(disjs4), BoolTy)
+            codeOfDisjs(disjs4)
           }
         }
       }
@@ -987,23 +970,10 @@ trait Core extends Definitions { ocbsl =>
     if (polarity) simp else negCodeOf(simp)
   }
 
-  final def tryFoldLeftDisjunction[E, T](disjs: Seq[Code], init: T)
-                                        (f: Ctxs ?=> (T, Code) => Either[E, T])
-                                        (using env: Env, ctxs: Ctxs): Either[E, T] = {
-    ocbsl.tryFoldLeft(disjs, (init, ctxs)) {
-      case ((acc, ctxs), disj) =>
-        given Ctxs = ctxs
-        f(acc, disj).map { newAcc =>
-          val tearedDisj = tearDown(disj)
-          assert(tearedDisj.ctxs.isLitVarOrBoundDef(tearedDisj.terminal))
-          val newCtxs = tearedDisj.ctxs.withNegatedCond(tearedDisj.terminal)
-          (newAcc, newCtxs)
-        }
-    }.map(_._1)
-  }
-
-  final def foldLeftDisjunction[T](disjs: Seq[Code], init: T)(f: Ctxs ?=> (T, Code) => T)(using env: Env, ctxs: Ctxs): T =
-    tryFoldLeftDisjunction[Nothing, T](disjs, init)((t, c) => Right(f(t, c))).merge
+  // Retourne (s'il existe) l'indice k t.q:
+  //   -Pour polarity = true:   \/_j<=k disjs(j) === true
+  //   -Pour polarity = false: ¬\/_j<=k disjs(j) === false
+  def checkForDisjunctionContradiction(disjs: Seq[Code])(using Env, Ctxs): Option[Int]
 
   final def transformDisjunction[T](disjs: Seq[T])(f: Ctxs ?=> T => CodeRes)(using env: Env, outerCtxs: Ctxs): CodeRes = {
     given x_x: Ctxs = sys.error("Carefully select ctxs")
@@ -1080,41 +1050,42 @@ trait Core extends Definitions { ocbsl =>
     tearDown(newDisjs)(using env, prevCtxs)
   }
 
+  //endregion
+
+  /////////////////////////////
+
+
   private val negCodeCache = mutable.Map.empty[Code, Code]
-  private val mayAlwaysRmNeg: Code => Boolean = _ => true
 
-  final def negCodeOf(c: Code): Code = negCodeOf(c)(mayAlwaysRmNeg)
-
-  final def negCodeOf(c: Code)(mayRmNeg: Code => Boolean): Code = {
+  // TODO: Hmm, cela risque de poser problème avec les bindings non?
+  final def negCodeOf(c: Code): Code = {
     assert(codeTpe(c) == BoolTy, s"Got ${codeTpe(c)}")
-    if (mayRmNeg eq mayAlwaysRmNeg) {
-      negCodeCache.get(c) match {
-        case Some(n) => return n
-        case None => ()
-      }
+    negCodeCache.get(c) match {
+      case Some(n) => return n
+      case None => ()
     }
 
     val res = code2sig(c) match {
-      case Signature(Label.Not, Seq(cc)) if mayRmNeg(c) => cc
+      case Signature(Label.Not, Seq(cc)) => cc
       case BoolLitSig(b) => b2c(!b)
-      case LtSig(lhs, rhs) if mayRmNeg(c) => codeOfSig(mkGreaterEquals(lhs, rhs), BoolTy)
-      case GeqSig(lhs, rhs) if mayRmNeg(c) => codeOfSig(mkLessThan(lhs, rhs), BoolTy)
-      case GtSig(lhs, rhs) if mayRmNeg(c) => codeOfSig(mkLessEquals(lhs, rhs), BoolTy)
-      case LeqSig(lhs, rhs) if mayRmNeg(c) => codeOfSig(mkGreaterThan(lhs, rhs), BoolTy)
+      case LtSig(lhs, rhs) => codeOfSig(mkGreaterEquals(lhs, rhs), BoolTy)
+      case GeqSig(lhs, rhs) => codeOfSig(mkLessThan(lhs, rhs), BoolTy)
+      case GtSig(lhs, rhs) => codeOfSig(mkLessEquals(lhs, rhs), BoolTy)
+      case LeqSig(lhs, rhs) => codeOfSig(mkGreaterThan(lhs, rhs), BoolTy)
 
-      case Signature(Label.IfExpr, Seq(cond, thenn, els)) if mayRmNeg(c) =>
-        codeOfSig(mkIfExpr(cond, negCodeOf(thenn)(mayRmNeg), negCodeOf(els)(mayRmNeg)), BoolTy)
+      case Signature(Label.IfExpr, Seq(cond, thenn, els)) =>
+        codeOfSig(mkIfExpr(cond, negCodeOf(thenn), negCodeOf(els)), BoolTy)
 
-      case Signature(Label.Let, Seq(e, body)) if mayRmNeg(c) =>
-        codeOfSig(mkLet(e, negCodeOf(body)(mayRmNeg)), BoolTy)
+      case Signature(Label.Let, Seq(e, body)) =>
+        codeOfSig(mkLet(e, negCodeOf(body)), BoolTy)
 
-      case Signature(lab: Label.AssumeLike, Seq(pred, body)) if mayRmNeg(c) =>
-        codeOfSig(mkAssumeLike(lab, pred, negCodeOf(body)(mayRmNeg)), BoolTy)
+      case Signature(lab: Label.AssumeLike, Seq(pred, body)) =>
+        codeOfSig(mkAssumeLike(lab, pred, negCodeOf(body)), BoolTy)
 
-      case Signature(Label.MatchExpr(pats), scrut +: guardRhs) if mayRmNeg(c) =>
+      case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
         assert(pats.size * 2 == guardRhs.size)
         val cases = guardRhs.grouped(2).zip(pats).map {
-          case (Seq(guard, rhs), pat) => LabMatchCase(pat, guard, negCodeOf(rhs)(mayRmNeg))
+          case (Seq(guard, rhs), pat) => LabMatchCase(pat, guard, negCodeOf(rhs))
           case _ => sys.error("Oh non, on a été dupés :(")
         }
         codeOfSig(mkMatchExpr(scrut, cases.toSeq), BoolTy)
@@ -1124,10 +1095,9 @@ trait Core extends Definitions { ocbsl =>
         codeOfSig(mkNot(c), BoolTy)
     }
 
-    if (mayRmNeg eq mayAlwaysRmNeg) {
-      negCodeCache += c -> res
-      negCodeCache += res -> c
-    }
+    negCodeCache += c -> res
+    negCodeCache += res -> c
+
     res
   }
 
@@ -1198,6 +1168,7 @@ trait Core extends Definitions { ocbsl =>
             Some(unplugBranch(els, ctxsForEls))
           } else None
         }
+
         def sndTry: CodeRes = {
           lazy val mayPopCond = !prevCtxs.isBoundDef(cond)
           lazy val mayPopNegCond = !prevCtxs.isBoundDef(negCond)
@@ -1951,9 +1922,6 @@ trait Core extends Definitions { ocbsl =>
     }
   }
 
-  // TODO: Cette histoire de assume(...) en début de lambda????
-  // TODO: Cette histoire de assume(...) en début de lambda????
-  // TODO: Cette histoire de assume(...) en début de lambda????
   final def inlineLambda(argsSubst: Seq[(VarId, Code)], body: Code)(using env: Env, outerCtxs: Ctxs): CodeRes = {
     // Essentiellement un freshener + simplifyTopLvl a chaque step
     object impl extends CodeTransformer {
@@ -2584,7 +2552,7 @@ trait Core extends Definitions { ocbsl =>
                     (newAcc, disjCr.ctxs.withNegatedCond(disjCr.terminal))
                 }
             }
-            resTerminal = codeOfSig(mkOr(fst +: rest), BoolTy)
+            resTerminal = codeOfDisjs(fst +: rest)
             resCr = resFst._2.derived(resTerminal)
           } yield (resRest._1, resCr)
 
@@ -2832,7 +2800,7 @@ trait Core extends Definitions { ocbsl =>
       override def transformImpl(c: Code, repl: Map[Code, Code], extra: Extra)(using env: Env, ctxs: Ctxs): CodeRes = code2sig(c) match {
         case Signature(Label.Or, first +: rest) =>
           val firstTeared = transform(first, repl, ())
-          val terminal = codeOfSig(mkOr(firstTeared.terminal +: rest), BoolTy)
+          val terminal = codeOfDisjs(firstTeared.terminal +: rest)
           firstTeared.derived(terminal)
 
         case Signature(Label.Not, Seq(cc)) =>
@@ -2996,6 +2964,17 @@ trait Core extends Definitions { ocbsl =>
     }
   }
 
+  object OrSig {
+    def unapply(sig: Signature): Option[(Seq[Code], Boolean)] = sig match {
+      case Signature(Label.Or, disjs) => Some((disjs, true))
+      case Signature(Label.Not, Seq(c)) => code2sig(c) match {
+        case Signature(Label.Or, disjs) => Some((disjs, false))
+        case _ => None
+      }
+      case _ => None
+    }
+  }
+
   object BoolLitSig {
     def unapply(sig: Signature): Option[Boolean] = sig match {
       case Signature(Label.Lit(BooleanLiteral(b)), _) => Some(b)
@@ -3044,6 +3023,11 @@ trait Core extends Definitions { ocbsl =>
   final def findMap[A, B](as: Seq[A])(f: A => Option[B]): Option[B] =
     if (as.isEmpty) None
     else f(as.head).orElse(findMap(as.tail)(f))
+
+  final def indexWhereOpt[A](as: Seq[A])(f: A => Boolean): Option[Int] = {
+    val ix = as.indexWhere(f)
+    if (ix < 0) None else Some(ix)
+  }
 
   final def addIfAbsent[K, V](map: Map[K, V])(kv: (K, V)): Map[K, V] =
     if (map.contains(kv._1)) map else map + kv
@@ -3098,9 +3082,9 @@ trait Core extends Definitions { ocbsl =>
       vId
   }
 
-  final inline def code2sig(c: Code): Signature = code2sigMap(c)
+  final def code2sig(c: Code): Signature = code2sigMap(c)
 
-  final inline def codeTpe(c: Code): Type = codeTpeMap(c)
+  final def codeTpe(c: Code): Type = codeTpeMap(c)
 
   final def freshened(v: VarId): VarId = idOfVariable(varId2Var(v).freshen)
 
@@ -3124,6 +3108,11 @@ trait Core extends Definitions { ocbsl =>
   final def label(c: Code): Label = code2sig(c).label
 
   final def varTpe(v: VarId): Type = varId2Var(v).getType // TODO: Apparemment, il y a une difference entre .getType et .tpe (pour les refinement type)
+
+  final def codeOfDisjs(d: Seq[Code]): Code = {
+    assert(d.nonEmpty)
+    if (d.size == 1) d.head else codeOfSig(mkOr(d), BoolTy)
+  }
 
   final def codeOfIntLit(lit: BigInt, tpe: Type): Code = codeOfLit(intLitOfType(lit, tpe))
 
@@ -3166,6 +3155,7 @@ trait Core extends Definitions { ocbsl =>
 
   final def unAnd(e: Expr): Seq[Expr] = e match {
     case And(es) => es.flatMap(unAnd)
+    case Not(Not(e)) => unAnd(e)
     case e => Seq(e)
   }
 
