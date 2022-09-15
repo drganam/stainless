@@ -62,7 +62,6 @@ class Trace(override val s: Trees, override val t: termination.Trees)
       val m = symbols.functions(model)
       val n = symbols.functions(norm)
 
-      //TODO
       n.params.size >= 1 && n.params.init.size == m.params.size && n.tparams.size == m.tparams.size &&
       n.params.init.zip(m.params).forall(arg => arg._1.tpe == arg._2.tpe)
     }
@@ -83,7 +82,6 @@ class Trace(override val s: Trees, override val t: termination.Trees)
 
       def evalCheck(f: FunDef, m: FunDef): Boolean = {
 
-        //improvement: there could be functions with same counterexample values; use distinct mappings;
         val counterexamples = (Trace.state.values zip Trace.state.keys).map(elem => (elem._1.counterexample, elem._2)).filter(!_._1.isEmpty).map(elem => (elem._1.get, elem._2)).filterNot(_._1.existing).filterNot(_._1.counterexample.isEmpty).filterNot(_._1.fromEval)
 
         def passesAllNewTests = counterexamples.forall(counterexample => {
@@ -114,8 +112,6 @@ class Trace(override val s: Trees, override val t: termination.Trees)
             val expr = syms.functions(f.id).fullBody
             val counterex = pair.counterexample
 
-            //.get breaks if parameter names are not the same
-            //fix: store the info wheter the counterexample comes from the model or the function
             try {
               val invocation = evaluator.program.trees.FunctionInvocation(f.id, Seq(), ref.params.map(vd =>
                 pair.counterexample.collectFirst({ case (k, v) if(k.id.name == vd.id.name) => v }).get))
@@ -144,13 +140,11 @@ class Trace(override val s: Trees, override val t: termination.Trees)
           bval
         })
 
-        def passesAllTests = Trace.getMkTest match { //todo just check for annotation here
+        def passesAllTests = Trace.getMkTest match {
           case Some(t) => {
             val test = symbols.functions(t)
 
-            val r: Range = 1 to 5  //todo fix range
-
-            r.forall(i => {
+            (1 to 5).forall(i => {
               val bval = {
 
                 val getInput = s.TupleSelect(FunctionInvocation(test.id, test.tparams.map(_.tp), Seq(IntegerLiteral(i))), 1)
@@ -200,8 +194,6 @@ class Trace(override val s: Trees, override val t: termination.Trees)
             => funs = tfd::funs
           case _ =>
         }(fd.fullBody)
-        // TODO
-        //(funs.distinct.map(symbols.functions(_)) ++ funs.distinct.flatMap(fd => getFunCalls(symbols.functions(fd)))).distinct
         funs.distinct.map(symbols.functions(_))
       }
 
@@ -425,8 +417,6 @@ class Trace(override val s: Trees, override val t: termination.Trees)
     val specsTsubst = ((lemma.tparams zip fi.tps) ++ (model.tparams zip fi.tps)).map { case (tparam, targ) => tparam.tp.id -> targ }.toMap
     val specsSpecializer = new Specializer(indPattern, indPattern.id, specsTsubst, specsSubst, Map())
 
-    //TODO check
-    //val specs = BodyWithSpecs(model.fullBody).specs
     val specs = BodyWithSpecs(model.fullBody).specs ++ BodyWithSpecs(lemma.fullBody).specs.filterNot(_.kind == MeasureKind)
     val pre = specs.filterNot(_.kind == PostconditionKind).map(spec => spec match {
       case Precondition(cond) => Precondition(specsSpecializer.transform(cond)).setPos(spec)
@@ -553,14 +543,14 @@ object Trace {
     val InitState, ModelFirst, FunFirst, ModelFirstWithSublemmas, FunFirstWithSublemmas = Value
   }
 
-  var eqCheckState = EqCheckState.InitState // skip if !symbols.isRecursive(model) && symbols.isRecursive(function) ?
+  var eqCheckState = EqCheckState.InitState
 
   def nextEqCheckState: Unit = eqCheckState = eqCheckState match {
     case EqCheckState.InitState => EqCheckState.ModelFirst
     case EqCheckState.ModelFirst => EqCheckState.FunFirst
-    case EqCheckState.FunFirst => EqCheckState.ModelFirstWithSublemmas //  skip if there are no sublemmas ?
+    case EqCheckState.FunFirst => EqCheckState.ModelFirstWithSublemmas 
     case EqCheckState.ModelFirstWithSublemmas => EqCheckState.FunFirstWithSublemmas
-    case EqCheckState.FunFirstWithSublemmas => EqCheckState.InitState  //skip if there are no sublemmas ?
+    case EqCheckState.FunFirstWithSublemmas => EqCheckState.InitState  
   }
 
   def resetEqCheckState = eqCheckState = EqCheckState.InitState
@@ -631,12 +621,11 @@ object Trace {
     trace = None
     proof = None
       tmpFunctions match {
-        //TODO skip if x is model
       case x::xs => {
         val n = 3
         tmpModels = allModels.toList.sortBy(m => -m._2).map(_._1).filterNot(state(x).prevModels.contains).take(n)
 
-        if(tmpModels.isEmpty) tmpModels = allModels.keys.take(1).toList //todo skip this function
+        if(tmpModels.isEmpty) tmpModels = allModels.keys.take(1).toList
         nextModel
         tmpFunctions = xs
         function = Some(x)
@@ -698,8 +687,7 @@ object Trace {
     (function, trace) match {
       case (Some(f), Some(t)) => {
         if (report.hasError(function) || report.hasError(proof) || report.hasError(trace)) {
-          //if (!withSublemmas || sublemmasAreValid) reportError(tmpCounterexample) // only if not in the sublemma state or if they are valid
-          if (!withSublemmas) reportError(tmpCounterexample) // only if not in the sublemma state or if they are valid
+          if (!withSublemmas) reportError(tmpCounterexample) // only if not in the sublemma state
           else reportUnknown
         }
         else if (report.hasUnknown(function) || report.hasUnknown(proof) || report.hasUnknown(trace)) reportUnknown
@@ -714,32 +702,11 @@ object Trace {
 
     if(isDone && unknowns.size < cnt) {
       cnt = unknowns.size
-      tmpModels = allModels.keys.toList // TODO only the new ones
+      tmpModels = allModels.keys.toList
       tmpFunctions = unknowns.reverse
       unknowns = List()
       nextFunction
     }
-/*
-    if(isDone) {
-      println("COUNTER - NUMBER OF candidate functions")
-      println(allFunctions.size)
-      println("COUNTER - NUMBER OF proven correct")
-      println(valid)
-      println("COUNTER - NUMBER OF proven incorrect")
-      println(errors.size)
-      println("COUNTER - NUMBER OF unknowns")
-      println(unknowns.size)
-      println("COUNTER - NUMBER OF wrong functions")
-      println(wrong.size)
-
-      println("COUNTER - NUMBER OF ITERATIONS AND GENERATED PROOFS")
-      println(counter)
-      println("COUNTER - NUMBER OF Valid thanks to sublemmas")
-      println(sublemmacounter)
-      println("COUNTER - NUMBER OF Valid thanks to funfirst")
-      println(flippedcounter)
-    }
-*/
     !isDone
   }
 
@@ -811,9 +778,6 @@ object Trace {
 
   def printEverything(using ctx: inox.Context) = {
     import ctx.{ reporter, timers }
-    // println("rank list")
-    // println(allModels)
-    // println(allModels.toList.sortBy(m => -m._2).map(_._1).take(5).map(CheckFilter.fixedFullName))
     if(!clusters.isEmpty || !errors.isEmpty || !unknowns.isEmpty || !wrong.isEmpty) {
       reporter.info(s"Printing equivalence checking results:")
       allModels.keys.foreach(model => if (!clusters(model).isEmpty) {
@@ -850,8 +814,7 @@ object Trace {
           case Some(c) => 
             val m = CheckFilter.fixedFullName(f)
             val ce = c.counterexample.map((k, v) => (k.id, v))
-            val fe = c.fromEval
-            reporter.info(s"Counterexample for the function $m: $ce") //, $fe")
+            reporter.info(s"Counterexample for the function $m: $ce")
         }
       })
 
