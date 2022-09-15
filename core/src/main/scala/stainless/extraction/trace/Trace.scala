@@ -301,7 +301,6 @@ class Trace(override val s: Trees, override val t: termination.Trees)
           Trace.nextEqCheckState
 
           if (m.params.size == f.params.size && evalCheck(f, m)) {
-          //if (m.params.size == f.params.size) {
             val res: List[s.FunDef] = Trace.eqCheckState match {
               case Trace.EqCheckState.ModelFirst =>
                 equivalenceCheck(m, f, false)
@@ -603,7 +602,7 @@ object Trace {
   def getTrace = trace
 
   def setTrace(t: Identifier) = {
-    proof = None // TODO this is a recent change
+    proof = None
     trace = Some(t)
     state(function.get).prevModels = model.get :: state(function.get).prevModels
   }
@@ -636,9 +635,6 @@ object Trace {
       case x::xs => {
         val n = 3
         tmpModels = allModels.toList.sortBy(m => -m._2).map(_._1).filterNot(state(x).prevModels.contains).take(n)
-
-        //case without priorities
-        //tmpModels = allModels.toList.map(_._1).filterNot(state(x).prevModels.contains).take(n)
 
         if(tmpModels.isEmpty) tmpModels = allModels.keys.take(1).toList //todo skip this function
         nextModel
@@ -693,18 +689,10 @@ object Trace {
   var flippedcounter = 0
   var valid = 0
 
-  // TODO cleaning + check validity of sublemmas
   def nextIteration[T <: AbstractReport[T]](report: AbstractReport[T])(implicit context: inox.Context): Boolean = {
     counter = counter + 1
-    if(counter % 25 == 0) printEverything
-
-     //println("sublemmas validity: sublemmas and then if there are no errors nor unknowns")
-     //println(sublemmas(t))
 
     val sublemmasAreValid = sublemmas.forall(s => !report.hasError(Some(s)) && !report.hasUnknown(Some(s)))
-    println(sublemmasAreValid)
-    println(sublemmas)
-
     val sublemmasHaveErrors = sublemmas.exists(s => report.hasError(Some(s)))
 
     (function, trace) match {
@@ -716,7 +704,6 @@ object Trace {
         }
         else if (report.hasUnknown(function) || report.hasUnknown(proof) || report.hasUnknown(trace)) reportUnknown
         else if (sublemmasAreValid) reportValid
-        //else if (sublemmasHaveErrors) reportError(tmpCounterexample) // TODO check
         else reportUnknown
       }
       case (Some(f), _) if(state(f).counterexample != None) =>
@@ -732,6 +719,7 @@ object Trace {
       unknowns = List()
       nextFunction
     }
+/*
     if(isDone) {
       println("COUNTER - NUMBER OF candidate functions")
       println(allFunctions.size)
@@ -751,7 +739,7 @@ object Trace {
       println("COUNTER - NUMBER OF Valid thanks to funfirst")
       println(flippedcounter)
     }
-
+*/
     !isDone
   }
 
@@ -794,7 +782,7 @@ object Trace {
 
       val inc = if (allModels(model.get) > 0) 20 else 100
       allModels = allModels.updated(model.get, allModels(model.get) + inc)
-      allModels = (allModels + (function.get -> 0))//.sortBy(m => -m._2)
+      allModels = (allModels + (function.get -> 0))
 
       clusters = clusters + (function.get -> List())
     }
@@ -823,9 +811,9 @@ object Trace {
 
   def printEverything(using ctx: inox.Context) = {
     import ctx.{ reporter, timers }
-    println("rank list")
-    println(allModels)
-    println(allModels.toList.sortBy(m => -m._2).map(_._1).take(5).map(CheckFilter.fixedFullName))
+    // println("rank list")
+    // println(allModels)
+    // println(allModels.toList.sortBy(m => -m._2).map(_._1).take(5).map(CheckFilter.fixedFullName))
     if(!clusters.isEmpty || !errors.isEmpty || !unknowns.isEmpty || !wrong.isEmpty) {
       reporter.info(s"Printing equivalence checking results:")
       allModels.keys.foreach(model => if (!clusters(model).isEmpty) {
@@ -854,7 +842,6 @@ object Trace {
           case Some(mm) => mm :: path(mm)
           case None => List()
         }
-
       }
 
       allFunctions.foreach(f => {
@@ -862,9 +849,9 @@ object Trace {
           case None => None
           case Some(c) => 
             val m = CheckFilter.fixedFullName(f)
-            val ce = c.counterexample
+            val ce = c.counterexample.map((k, v) => (k.id, v))
             val fe = c.fromEval
-            reporter.info(s"Counterexample for the function $m: $ce, $fe")
+            reporter.info(s"Counterexample for the function $m: $ce") //, $fe")
         }
       })
 
