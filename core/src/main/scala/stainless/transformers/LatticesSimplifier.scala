@@ -20,6 +20,7 @@ trait LatticesSimplifier { self =>
     ThreadLocal.withInitial(() => algo match {
       case UnderlyingAlgo.OCBSL => lattices.OCBSL(trees, symbols, opts)
       case UnderlyingAlgo.OL => lattices.OL(trees, symbols, opts)
+      case UnderlyingAlgo.Bland => lattices.Bland(trees, symbols, opts)
     })
 
   private val vcNum: AtomicInteger = new AtomicInteger(0)
@@ -55,6 +56,7 @@ object LatticesSimplifier {
   enum UnderlyingAlgo {
     case OCBSL
     case OL
+    case Bland
   }
 
   def apply(t: ast.Trees, s: t.Symbols, opts: solvers.PurityOptions, algo: UnderlyingAlgo): LatticesSimplifier{val trees: t.type; val symbols: s.type} = {

@@ -15,11 +15,39 @@ import scala.collection.mutable
 object optFailEarly extends inox.FlagOptionDef("fail-early", false)
 object optFailInvalid extends inox.FlagOptionDef("fail-invalid", false)
 object optVCCache extends inox.FlagOptionDef("vc-cache", true)
-object optOCBSLSimp extends inox.FlagOptionDef("ocbsl-simp", true) // TODO: Set default to false once done
-object optOLSimp extends inox.FlagOptionDef("ol-simp", false)
+object optSimplifier extends inox.OptionDef[SimplifierKind] {
+  override val name: String = "simplifier"
+
+  def default: SimplifierKind = SimplifierKind.OCBSL  // TODO: Set default to Vanilla once done
+
+  def parser: inox.OptionParsers.OptionParser[SimplifierKind] = SimplifierKind.tryFromString
+
+  def usageRhs: String = "vanilla|ocbsl|ol|bland"
+}
 
 object DebugSectionVerification extends inox.DebugSection("verification")
 object DebugSectionFullVC extends inox.DebugSection("full-vc")
+
+enum SimplifierKind {
+  case Vanilla
+  case OCBSL
+  case OL
+  case Bland
+}
+object SimplifierKind {
+  def tryFromString(s: String): Option[SimplifierKind] = s.toLowerCase match {
+    case "vanilla" => Some(Vanilla)
+    case "ocbsl" => Some(OCBSL)
+    case "ol" | "olympique lyonnais" => Some(OL)
+    case "bland" | "unflavored" | "lattice-core" => Some(Bland)
+    case _ => None
+  }
+  def toLatticeAlgo(self: OCBSL.type | OL.type | Bland.type): LatticesSimplifier.UnderlyingAlgo = self match {
+    case OCBSL => LatticesSimplifier.UnderlyingAlgo.OCBSL
+    case OL => LatticesSimplifier.UnderlyingAlgo.OL
+    case Bland => LatticesSimplifier.UnderlyingAlgo.Bland
+  }
+}
 
 trait VerificationChecker { self =>
   val program: Program
@@ -100,36 +128,26 @@ trait VerificationChecker { self =>
     val initMap: Map[VC, VCResult] = vcs.map(vc => vc -> unknownResult).toMap
 
     import MainHelpers._
+    import SimplifierKind._
 
     val simplifyVC: Expr => Expr = {
-      val useOCBSL = context.options.findOptionOrDefault(optOCBSLSimp)
-      val useOL = context.options.findOptionOrDefault(optOLSimp)
-      if (useOCBSL || useOL) {
-        if (useOCBSL && useOL) {
-          reporter.warning("Both OCBSL and OL are selected, defaulting to OL")
-        }
-        // Note: the class instance is outside of the closure scope to avoid repeated creation instances
-        // (so that computation can be preserved across VCs)
-        val algo = {
-          if (useOL) LatticesSimplifier.UnderlyingAlgo.OL
-          else LatticesSimplifier.UnderlyingAlgo.OCBSL
-        }
-        val latticeSimp = LatticesSimplifier(trees, symbols, PurityOptions.assumeChecked, algo)
-        (e: Expr) => latticeSimp.simplify(
-          simplifyLets(removeAssertions(e)))
-      } else {
-        (e: Expr) => simplifyExpr(
-          simplifyLets(removeAssertions(e))
-        )(using PurityOptions.assumeChecked)
+      context.options.findOptionOrDefault(optSimplifier) match {
+        case lat@(OCBSL | OL | Bland) =>
+          // Note: the class instance is outside of the closure scope to avoid repeated creation instances
+          // (so that computation can be preserved across VCs)
+          val latticeSimp = LatticesSimplifier(trees, symbols, PurityOptions.assumeChecked, toLatticeAlgo(lat))
+          (e: Expr) =>latticeSimp.simplify(
+            simplifyLets(removeAssertions(e)))
+        case Vanilla =>
+          (e: Expr) => simplifyExpr(
+            simplifyLets(removeAssertions(e))
+          )(using PurityOptions.assumeChecked)
       }
     }
 
     def processVC(vc: VC): Option[(VC, VCResult)] = {
       if (stop) None else {
         val simplifiedCondition = simplifyVC(vc.condition)
-        /*simplifyExpr(
-          simplifyLets(removeAssertions(vc.condition))
-        )(using PurityOptions.assumeChecked)*/
 
         // For some reasons, the synthesized copy method lacks default parameters...
         val simplifiedVC = (vc.copy()(condition = simplifiedCondition, fid = vc.fid, kind = vc.kind, satisfiability = vc.satisfiability): VC).setPos(vc)
