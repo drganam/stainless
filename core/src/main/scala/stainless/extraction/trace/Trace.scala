@@ -203,6 +203,12 @@ class Trace(override val s: Trees, override val t: termination.Trees)
         f1.returnType == f2.returnType
       }
 
+      def checkArgsSet(f1: FunDef, f2: FunDef) = {
+        f1.params.size == f2.params.size && f1.tparams.size == f2.tparams.size &&
+        f1.params.map(_.tpe).toSet ==  f2.params.map(_.tpe).toSet &&
+        f1.returnType == f2.returnType
+      }
+
       // f1Calls: functions that are called from f1
       // f2Calls: functions that are called from f2
       // returns a list of sublemmas for each candidate pair (same signature + name?) + replacement map
@@ -212,7 +218,7 @@ class Trace(override val s: Trees, override val t: termination.Trees)
         val f1Calls = getFunCalls(fd1).filter(!_.flags.exists(_.name == "library"))
         val f2Calls = getFunCalls(fd2).filter(!_.flags.exists(_.name == "library"))
 
-        val pairs = f1Calls zip f1Calls.map(m => f2Calls.find(f => m != f && checkArgs(m, f) && f.id.name == m.id.name).orElse(f2Calls.find(f => m != f && checkArgs(m, f))))
+        val pairs = f1Calls zip f1Calls.map(m => f2Calls.find(f => m != f && checkArgsSet(m, f) && f.id.name == m.id.name).orElse(f2Calls.find(f => m != f && checkArgsSet(m, f))))
 
         val validpairs = pairs.filter(elem => elem._2 != None)
 
@@ -237,6 +243,7 @@ class Trace(override val s: Trees, override val t: termination.Trees)
             List(inductPattern(symbols, fd2, fd2, "replacement", (sf zip sm).toMap).setPos(fd2.getPos).copy(flags = Seq(s.Derived(Some(fd2.id)))))
         }
 
+        println(replacement)
 
         val newParamTps = eqLemma.tparams.map{tparam => tparam.tp}
         val newParamVars = eqLemma.params.map{param => param.toVariable}
@@ -245,7 +252,7 @@ class Trace(override val s: Trees, override val t: termination.Trees)
 
         val subst = (fdSpecs.params.map(_.id) zip newParamVars).toMap
         val tsubst = (fdSpecs.tparams zip newParamTps).map { case (tparam, targ) => tparam.tp.id -> targ }.toMap
-        val specializer = new Specializer(eqLemma, eqLemma.id, tsubst, subst, Map())
+        val specializer = new Specializer(eqLemma, eqLemma.id, tsubst, subst, Map(), symbols)
 
         val specs = BodyWithSpecs(fdSpecs.fullBody).specs.filter(s => s.kind == LetKind || s.kind == PreconditionKind)
         val pre = specs.map(spec => spec match {
@@ -253,21 +260,31 @@ class Trace(override val s: Trees, override val t: termination.Trees)
           case LetInSpec(vd, expr) => LetInSpec(vd, specializer.transform(expr))
         })
 
+        val newParamVars2 = 
+          if (checkArgs(fd1, fd2)) newParamVars
+          else replacement match {
+          case Nil => fd2.params.map{param => newParamVars.find(elem => elem.tpe == param.toVariable.tpe).getOrElse(param.toVariable)}
+          case h::t => fd2.params.map{param => newParamVars.find(elem => elem.tpe == param.toVariable.tpe).getOrElse(param.toVariable)}
+        }
+
         val fun1 = s.FunctionInvocation(fd1.id, newParamTps, newParamVars)
         val fun2 = replacement match {
-          case Nil => s.FunctionInvocation(fd2.id, newParamTps, newParamVars)
-          case h::t => s.FunctionInvocation(h.id, newParamTps, newParamVars)
+          case Nil => 
+            s.FunctionInvocation(fd2.id, newParamTps, newParamVars2)
+          case h::t => 
+            s.FunctionInvocation(h.id, newParamTps, newParamVars2)
         }
 
         val (normFun1, normFun2) = Trace.getNorm match {
           case Some(n) if (checkArgsNorm(fun1.id, n)) => (
-            s.FunctionInvocation(n, newParamTps, newParamVars :+ fun1),
-            s.FunctionInvocation(n, newParamTps, newParamVars :+ fun2))
+            s.FunctionInvocation(n, newParamTps, newParamVars2 :+ fun1),
+            s.FunctionInvocation(n, newParamTps, newParamVars2 :+ fun2))
           case _ => (fun1, fun2)
         }
 
         val res = s.ValDef.fresh("res", s.UnitType())
         val cond = s.Equals(normFun1, normFun2)
+        println(cond)
         val post = Postcondition(Lambda(Seq(res), cond))
         val body = s.UnitLiteral()
         val withPre = exprOps.reconstructSpecs(pre, Some(body), s.UnitType())
@@ -369,6 +386,8 @@ class Trace(override val s: Trees, override val t: termination.Trees)
 
           if (Trace.sublemmas.contains(lemma.id)) Trace.sublemmas = helper.id :: Trace.sublemmas
 
+          println(helper)
+          println(lemma)
           List(helper, lemma)
         }
 
@@ -407,13 +426,13 @@ class Trace(override val s: Trees, override val t: termination.Trees)
     val tpairs = model.tparams zip fi.tps
     val tsubst = tpairs.map { case (tparam, targ) => tparam.tp.id -> targ } .toMap
     val subst = (model.params.map(_.id) zip fi.args).toMap
-    val specializer = new Specializer(model, indPattern.id, tsubst, subst, replacement)
+    val specializer = new Specializer(model, indPattern.id, tsubst, subst, replacement, symbols)
 
     val fullBodySpecialized = specializer.transform(exprOps.withoutSpecs(model.fullBody).get)
 
     val specsSubst = (lemma.params.map(_.id) zip newParamVars).toMap ++ (model.params.map(_.id) zip newParamVars).toMap
     val specsTsubst = ((lemma.tparams zip fi.tps) ++ (model.tparams zip fi.tps)).map { case (tparam, targ) => tparam.tp.id -> targ }.toMap
-    val specsSpecializer = new Specializer(indPattern, indPattern.id, specsTsubst, specsSubst, Map())
+    val specsSpecializer = new Specializer(indPattern, indPattern.id, specsTsubst, specsSubst, Map(), symbols)
 
     val specs = BodyWithSpecs(model.fullBody).specs ++ BodyWithSpecs(lemma.fullBody).specs.filterNot(_.kind == MeasureKind)
     val pre = specs.filterNot(_.kind == PostconditionKind).map(spec => spec match {
@@ -453,7 +472,8 @@ class Trace(override val s: Trees, override val t: termination.Trees)
       newId: Identifier,
       tsubst: Map[Identifier, Type],
       vsubst: Map[Identifier, Expr],
-      replacement: Map[Identifier, Identifier] // replace function calls
+      replacement: Map[Identifier, Identifier], // replace function calls
+      symbols: s.Symbols
     ) extends s.ConcreteSelfTreeTransformer { slf =>
 
       override def transform(expr: slf.s.Expr): slf.t.Expr = expr match {
@@ -464,8 +484,16 @@ class Trace(override val s: Trees, override val t: termination.Trees)
           val fi1 = FunctionInvocation(newId, tps = fi.tps, args = fi.args)
           super.transform(fi1.copiedFrom(fi))
 
-        case fi: FunctionInvocation if replacement.contains(fi.id) =>
-          val fi1 = FunctionInvocation(replacement.getOrElse(fi.id, fi.id), tps = fi.tps, args = fi.args)
+        //f1(a, b) -> f2(b, a)
+        case fi @ FunctionInvocation(tfd, tps, args) if replacement.contains(fi.id) =>
+          val replacement_id = replacement.getOrElse(fi.id, fi.id)
+          val replacement_fd = symbols.functions(replacement_id)
+          println(replacement_fd.params.map(_.toVariable))
+          println(args)
+          val paramZip = args.zip(symbols.functions(tfd).params.map(_.toVariable))
+          val replacement_args1 = replacement_fd.params.map(_.toVariable).map{param => paramZip.find(elem => elem._2.tpe == param.tpe)}
+          val replacement_args: Seq[Expr] = replacement_args1.flatten.map(_._1)
+          val fi1 = FunctionInvocation(replacement_id, tps = fi.tps, args = replacement_args)
           super.transform(fi1.copiedFrom(fi))
 
         case _ => super.transform(expr)
