@@ -532,7 +532,6 @@ trait Core extends Definitions { ocbsl =>
 
         locally {
           val currEntry = unplugMap.getOrElse((c, env), Map.empty)
-          // TODO: Voir si oui ou non c'est ok
           // assert(!currEntry.contains(inCtxs))
           val newEntry = currEntry + (inCtxs -> (minimizedCr, u2))
           unplugMap += (c, env) -> newEntry
@@ -540,25 +539,14 @@ trait Core extends Definitions { ocbsl =>
 
         locally {
           val currEntry = pluggedOccMap.getOrElseUpdate((env, c), mutable.Map.empty)
-          assert(currEntry.get(inCtxs).forall(_._2 == minimizedCr))
-          val got = currEntry.get(inCtxs).map { case (expected, _) =>
-            val eq = u2.c2u.toSet.intersect(expected.c2u.toSet)
-            val diff = (u2.c2u.toSet ++ expected.c2u.toSet) -- eq
-            (expected, eq, diff)
-          }
-//          val thirdOne = occurrencesOf(c)(using env, inCtxs)
-//          val eq = u2.c2u.toSet.intersect(thirdOne.c2u.toSet)
-//          val diff = (u2.c2u.toSet ++ thirdOne.c2u.toSet) -- eq
-          assert(got.forall(_._1 == u2))
-//          assert(currEntry.get(inCtxs.impureParts).forall(_ == u2))
-
-//          val got = currEntry.toSeq.map { case (inCtxs2, occ2) =>
-//            val got = occ2.withReplacedPrefix(inCtxs2, inCtxs.impureParts)
-//            val eq = u2.c2u.toSet.intersect(got.c2u.toSet)
-//            val diff = (u2.c2u.toSet ++ got.c2u.toSet) -- eq
-//            (got, eq, diff)
+//          assert(currEntry.get(inCtxs).forall(_._2 == minimizedCr))
+//          val got = currEntry.get(inCtxs).map { case (expected, _) =>
+//            val eq = u2.c2u.toSet.intersect(expected.c2u.toSet)
+//            val diff = (u2.c2u.toSet ++ expected.c2u.toSet) -- eq
+//            (expected, eq, diff)
 //          }
 //          assert(got.forall(_._1 == u2))
+
           currEntry += inCtxs -> (u2, minimizedCr)
         }
         (u2, c)
