@@ -937,8 +937,7 @@ trait Core extends Definitions { ocbsl =>
 
   final def simplifiedDisjunction(disj0: Seq[Code], polarity: Boolean)(using Env, Ctxs): Code = {
     assert(disj0.forall(c => codeTpe(c) == BoolTy))
-    // TODO: unOrCodes devrait-il aussi transformer les And en Or???
-    // TODO: Peut-être qu'on ne devrait pas systématiquement aplatir les disjs/conjs bound?
+    // TODO: Peut-être qu'on ne devrait pas systématiquement aplatir les disjs bound?
     val disjs1 = unOrCodes(disj0).filter(_ != falseCode).distinct
     val disjs2 = doSimplifyDisjunction(disjs1, polarity)
     val simp = {
@@ -2207,54 +2206,13 @@ trait Core extends Definitions { ocbsl =>
     /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
     def uncodeOfNot(c: Code, renv: RevEnv)(using env: Env, ctxs: Ctxs): (RevRes, CodeRes) = {
-      def mayRmNeg(op: Code): Boolean = {
-        def isSimple(c: Code): Boolean = isLitOrVar(c) || renv.revLetDefs.contains(c)
-
-        // TODO: Dire pk ! pour le op: car s'il est bind, une inversion risque de dupliquer les operandes
-        def mayRm(operands: Seq[Code]): Boolean = operands.forall(isSimple) || !renv.revLetDefs.contains(op)
-
-        code2sig(op) match {
-          case Signature(Label.Not, Seq(cc)) => mayRm(Seq(cc))
-          case Signature(Label.GreaterThan | Label.GreaterEquals |
-                         Label.LessThan | Label.LessEquals, Seq(lhs, rhs)) => mayRm(Seq(lhs, rhs))
-          case Signature(_: (Label.IfExpr.type | Label.MatchExpr.type), _) => false
-          case _ => true
-        }
-      }
-
       code2sig(c) match {
-//        case Signature(Label.Or, disjs) =>
-//          /*
-//          assert(CodeRes.isTerminal(disjs.head))
-//          assert(ctxs.terminalPartsBound(disjs.head))
-//          val negDisjs = disjs.map(negCodeOf(_)(mayRmNeg))
-//          val (resOrNeg, orNegCr) = unfold(codeOfSig(mkOr(negDisjs), BoolTy), renv)
-//          val Or(disjsExprs) = resOrNeg.expr
-//          val res = RevRes(And(disjsExprs), resOrNeg.used)
-//          (res, ???)
-//          */
-//          /*
-//          val negDisjs = disjs.foldLeft((Seq.empty[RevRes], ctxs)) {
-//            case ((acc, ctxs), disj) =>
-//              given Ctxs = ctxs
-//
-//              // Pas de tearDown, car là tout a été plug. Si on fait un tearDown, on risque de créer des dupliqués car l'info précises des BoundDef est perdues
-//              val negated = negCodeOf(disj)(mayRmNeg)
-//              val negRes = uncodeOf(negated)
-//              val newCtxs = {
-//                // Comme on est en négation, pour le next ctxs, on souhaite avoir ctxs avec comme bounddef la négation
-//                // du terminal de disj et comme condition le terminal de disj
-//                val tearedDisj = tearDown(disj)
-//                assert(tearedDisj.ctxs.isLitVarOrBoundDef(tearedDisj.terminal))
-//                val negatedDisjTerminal = negCodeOf(tearedDisj.terminal)
-//                tearedDisj.ctxs.addBoundDef(negatedDisjTerminal)
-//                  .withCond(tearedDisj.terminal)
-//              }
-//              (acc :+ negRes, newCtxs)
-//          }._1
-//          */
-//          // RevRes(And(negDisjs.map(_.expr)), negDisjs.flatMap(_.used).toSet)
-//          ???
+        case Signature(Label.Or, _) =>
+          val (orRR, orCr) = unfold(c, renv)
+          val Or(disjsExprs) = orRR.expr
+          val rr = RevRes(And(disjsExprs map not), orRR.used)
+          val cr = orCr.derived(codeOfSig(mkNot(c), BoolTy))
+          (rr, cr)
 
         case _ =>
           val (res, cr) = unfold(c, renv)
