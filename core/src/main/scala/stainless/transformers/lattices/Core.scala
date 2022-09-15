@@ -2207,11 +2207,20 @@ trait Core extends Definitions { ocbsl =>
 
     def uncodeOfNot(c: Code, renv: RevEnv)(using env: Env, ctxs: Ctxs): (RevRes, CodeRes) = {
       code2sig(c) match {
-        case Signature(Label.Or, _) =>
-          val (orRR, orCr) = unfold(c, renv)
-          val Or(disjsExprs) = orRR.expr
-          val rr = RevRes(And(disjsExprs map not), orRR.used)
-          val cr = orCr.derived(codeOfSig(mkNot(c), BoolTy))
+        case Signature(Label.Or, fst +: rest) =>
+          val (fstRR0, fstCr) = unfold(fst, renv)
+          assert(fstCr.terminal == fst)
+          val fstRR = RevRes(not(fstRR0.expr), fstRR0.used)
+          // TODO: Expliquer ce qu'on fait: en gros on pousse les négation pour les revres, mais on la garde en dehors pr les crs
+          val rrs = rest.foldLeft((Seq(fstRR), fstCr.ctxs.withNegatedCond(fstCr.terminal))) {
+            case ((accRR, ctxs), disj) =>
+              given Ctxs = ctxs
+              val (disjRR0, disjCr) = unfold(disj, renv)
+              val disjRR = RevRes(not(disjRR0.expr), disjRR0.used)
+              (accRR :+ disjRR, disjCr.ctxs.withNegatedCond(disjCr.terminal))
+          }._1
+          val rr = RevRes(And(rrs.map(_.expr)), rrs.flatMap(_.used).toSet)
+          val cr = fstCr.derived(c).derived(codeOfSig(mkNot(c), BoolTy))
           (rr, cr)
 
         case _ =>
