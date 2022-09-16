@@ -54,15 +54,10 @@ class SMTZ3VerificationSuite extends VerificationSuite {
     case "verification/valid/BitsTricksSlow" => Skip
 
     // TODO: Added
-    case "verification/valid/Passes1" => Skip
-    case "verification/valid/Passes2" => Skip
-    case "verification/invalid/Passes1" => Skip
-    case "verification/invalid/Passes2" => Skip
-    case "verification/valid/StateMachine" => Skip
-    case "verification/valid/QuantifierUnification" => Skip
-    case "verification/invalid/BadConcRope" => Skip
-    case "verification/invalid/LambdaEquality2" => Skip
-    case "verification/false-valid/ChooseNothing" => Skip
+    case "verification/valid/QuantifierUnification" => Skip // Can't verify
+    case "verification/invalid/BadConcRope" => Skip // Dud VC times out instead of being falsified
+    case "verification/false-valid/ChooseNothing" => Skip // Correctly rejected
+    case "verification/false-valid/MakeFalse" => Skip // Correctly rejected
 
     case _ => super.filter(ctx, name)
   }

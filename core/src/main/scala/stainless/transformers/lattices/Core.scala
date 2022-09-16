@@ -13,20 +13,6 @@ trait Core extends Definitions { ocbsl =>
   import Purity._
   import scala.collection.mutable // A bit ironic that we import mutable stuff right after "Purity"...
 
-  // TODO: Et les assms???
-  // TODO: Et les assms???
-  // TODO: Et les assms???
-  // TODO: Et les assms???
-
-  // TODO: On pourrait simplifier les trucs du genre !isInstanceOf[A] && isInstanceOf[B] en isInstanceOf[B] pour les patmat?
-
-  // TODO (liste de rappel):
-  //    - Pour le cache, il faudra qu'on serialize les mapping signature -> code
-  //    Il faudra aussi que ce mapping soit le même pr ts les threads!!!
-  //      -sig2code: on ajoute 1 indirection par ordinal de label pour diminuer les contention
-  //      -code2sig: un simple atomicref d'array fera amplement l'affaire (faudra faire attention pr ne pas faire des allocs concurrentes...)
-
-
   private val pluggedMap = mutable.Map.empty[(CodeRes, Ctxs, Env), (Occurrences, Code)]
   private val unplugMap = mutable.Map.empty[(Code, Env), Map[Ctxs, (CodeRes, Occurrences)]]
 
@@ -380,6 +366,7 @@ trait Core extends Definitions { ocbsl =>
       code2sig(terminal) match {
         case Signature(Label.IfExpr, Seq(cond, _, _)) => isLitVarOrBoundDef(cond)
         case Signature(Label.MatchExpr(_), scrut +: _) => isLitVarOrBoundDef(scrut)
+        case Signature(Label.Passes(_), scrut +: _) => isLitVarOrBoundDef(scrut)
         case Signature(Label.Or, fst +: _) => isLitVarOrBoundDef(fst)
         case Signature(Label.Not, Seq(e)) => isLitVarOrBoundDef(e)
         case Signature(_: (Label.Ensuring.type | Label.LambdaLike), _) => true
@@ -569,7 +556,6 @@ trait Core extends Definitions { ocbsl =>
       val (compThenn, cThenn) = thenn.selfPlugged(cond.ctxs.withCond(cond.terminal))
       val (compEls, cEls) = els.selfPlugged(cond.ctxs.withNegatedCond(cond.terminal))
       val terminal = codeOfSig(mkIfExpr(cond.terminal, cThenn, cEls), tpe)
-//      val compIf = cond.composition ++ compThenn ++ compEls ++ Occurrences.of(terminal)(using env, cond.ctxs)
       CodeRes(terminal, cond.ctxs.addBoundDef(terminal))
     }
 
@@ -578,11 +564,9 @@ trait Core extends Definitions { ocbsl =>
       assert(ctxs.isPrefixOf(body.ctxs))
       val (compBody, cBody) = body.selfPlugged(ctxs)(using env.incIf(lab))
       val terminal = codeOfSig(mkLambdaLike(lab, cBody), tpe)
-//      val compLambda = compBody ++ Occurrences.of(terminal)
       CodeRes(terminal, ctxs.addBoundDef(terminal))
     }
 
-    // TODO: On pourrait faire mieux (p.ex. extraire des trucs communs ds body pr en faire beneficier pred)
     def ensuring(body: CodeRes, pred: CodeRes, tpe: Type)(using env: Env, ctxs: Ctxs): CodeRes = {
       assert(ctxs.isPrefixOf(pred.ctxs))
       assert(ctxs.isPrefixOf(body.ctxs))
@@ -592,26 +576,32 @@ trait Core extends Definitions { ocbsl =>
         case Signature(Label.Lambda(_), Seq(`trueCode`)) => cBody
         case _ => codeOfSig(mkEnsuring(cBody, cPred), tpe)
       }
-//      val compEnsuring = compBody ++ compPred ++ Occurrences.of(terminal)
       CodeRes(terminal, ctxs.addBoundDef(terminal))
     }
 
     def matchExpr(scrut: CodeRes, cases: Seq[CodeResMatchCase], tpe: Type)(using env: Env): CodeRes = {
       assert(cases.nonEmpty)
       val terminal = codeOfSig(mkMatchExpr(scrut.terminal, cases.map(_.mc)), tpe)
-//      val compMatch = cases.foldLeft(scrut.composition)(_ ++ _.composition) ++ Occurrences.of(terminal)(using env, scrut.ctxs)
+      CodeRes(terminal, scrut.ctxs.addBoundDef(terminal))
+    }
+
+    def passes(scrut: CodeRes, cases: Seq[CodeResMatchCase], tpe: Type)(using env: Env): CodeRes = {
+      assert(cases.nonEmpty)
+      assert(codeTpe(scrut.terminal) match {
+        case TupleType(bases) => bases.size == 2
+        case _ => false
+      })
+      val terminal = codeOfSig(mkPasses(scrut.terminal, cases.map(_.mc)), tpe)
       CodeRes(terminal, scrut.ctxs.addBoundDef(terminal))
     }
 
     def err(ofTpe: Type, descr: String, tpe: Type)(using env: Env, ctxs: Ctxs): CodeRes = {
       val terminal = codeOfSig(mkError(ofTpe, descr), tpe)
-//      val comp = Occurrences.of(terminal)
       CodeRes(terminal, ctxs.addBoundDef(terminal))
     }
 
     def noTree(ofTpe: Type, tpe: Type)(using env: Env, ctxs: Ctxs): CodeRes = {
       val terminal = codeOfSig(mkNoTree(ofTpe), tpe)
-//      val comp = Occurrences.of(terminal)
       CodeRes(terminal, ctxs.addBoundDef(terminal))
     }
   }
@@ -690,7 +680,6 @@ trait Core extends Definitions { ocbsl =>
         codeOfExpr(body)(using env, rpred.ctxs.withAssumeLike(lab, rpred.terminal))
 
       case Ensuring(body, pred) =>
-        // TODO: Ok?
         val rbody = codeOfExpr(body)
         val rpred = codeOfExpr(pred) // Using the default ctxs (not rbody.ctxs)
         CodeRes.ensuring(rbody, rpred, tpe)
@@ -706,18 +695,7 @@ trait Core extends Definitions { ocbsl =>
         val adt @ ADTType(_, _) = e.getType
         codeOfExprsBound(e, tpe)(mkADTSelector(_, adt, s.constructor, selector))
 
-      // TODO: Annotated peut empecher certaines simplif. non? Voir la PR de Georg.
-      // TODO: On pourrait p-e ignorer Annotated? De toute façon, si c'est pour avoir des DropVCs, cela ne change rien dans notre cas de figure?
-      //  -> sauf p-e si on fait un "uncodeOf" et qu'on a besoin de restaurer certaines annotation, mais là on pourrait p-e envisager
-      //  une map ad-hoc qui contient ces infos...?
-      case Annotated(e, flags) => // codeOfExpr(e)
-        codeOfExprsBound(e, tpe)(mkAnnot(_, flags))
-        /*
-        // TODO: Gros gag: pourrait-on envisager d'assigner le même code pour la sig. de Annotated que pour la sig. de e ????
-        //    Il faudra faire cette update un peu hacky à la fin. On aura besoin de manip les 2 maps par nous meme
-        //    sans passer par updateCodeSig. On devra également avoir une map auxiliaire qui se souvient des exprs annotées pour ce uncodeOf...
-        codeOfExprsBound(e, tpe)(mkAnnot(_, flags))
-        */
+      case Annotated(e, flags) => codeOfExprsBound(e, tpe)(mkAnnot(_, flags))
 
       case and @ And(_) =>
         val ands = unAnd(and)
@@ -752,6 +730,10 @@ trait Core extends Definitions { ocbsl =>
 
       case TupleSelect(e, index) => codeOfExprsBound(e, tpe)(mkTupleSelect(_, index))
 
+      case StringConcat(lhs, rhs) => codeOfExprsBound(lhs, rhs, tpe)(mkStringConcat)
+      case SubString(expr, start, end) => codeOfExprsBound(expr, start, end, tpe)(mkSubString)
+      case StringLength(expr) => codeOfExprsBound(expr, tpe)(mkStringLength)
+
       case FiniteSet(elems, base) => codeOfExprsBound(elems, tpe)(mkFiniteSet(_, base))
       case SetAdd(set, elem) => codeOfExprsBound(set, elem, tpe)(mkSetAdd)
       case ElementOfSet(elem, set) => codeOfExprsBound(elem, set, tpe)(mkElementOfSet)
@@ -781,13 +763,23 @@ trait Core extends Definitions { ocbsl =>
       case Error(ofTpe, descr) => CodeRes.err(ofTpe, descr, tpe)
       case NoTree(ofTpe) => CodeRes.noTree(ofTpe, tpe)
 
-      // TODO: Passer en revue la pureté: p.ex. si on est pas exhaustif, devrait-on retourner "assumeChecked"?
       case MatchExpr(scrut, cases) =>
         // Ici, on fait qqchose de similaire au IfExpr
         val rscrut = codeOfExpr(scrut)
         assert(codeTpe(rscrut.terminal) == scrut.getType, s"${codeTpe(rscrut.terminal)} != ${scrut.getType}")
         val rcases = signatureOfCases(rscrut.terminal, cases, Seq.empty)(using env, rscrut.ctxs)
         CodeRes.matchExpr(rscrut, rcases, tpe)
+
+      case Passes(in, out, cases) =>
+        val rin = codeOfExpr(in)
+        val rout = codeOfExpr(out)(using env, rin.ctxs)
+        val tupleScrutCr = {
+          val tpe = TupleType(Seq(in.getType, out.getType))
+          val code = codeOfSig(mkTuple(Seq(rin.terminal, rout.terminal)), tpe)
+          rout.derived(code)
+        }
+        val rcases = signatureOfCases(tupleScrutCr.terminal, cases, Seq.empty)(using env, tupleScrutCr.ctxs)
+        CodeRes.passes(tupleScrutCr, rcases, tpe)
 
       case e =>
         throw new UnsupportedOperationException("computeSignature: Do not know how to handle "+e)
@@ -1069,13 +1061,9 @@ trait Core extends Definitions { ocbsl =>
       case Signature(lab: Label.AssumeLike, Seq(pred, body)) =>
         codeOfSig(mkAssumeLike(lab, pred, negCodeOf(body)), BoolTy)
 
-      case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
-        assert(pats.size * 2 == guardRhs.size)
-        val cases = guardRhs.grouped(2).zip(pats).map {
-          case (Seq(guard, rhs), pat) => LabMatchCase(pat, guard, negCodeOf(rhs))
-          case _ => sys.error("Oh non, on a été dupés :(")
-        }
-        codeOfSig(mkMatchExpr(scrut, cases.toSeq), BoolTy)
+      case MatchExprSig(scrut, cases) =>
+        val ncases = cases.map(c => c.copy(rhs = negCodeOf(c.rhs)))
+        codeOfSig(mkMatchExpr(scrut, ncases), BoolTy)
 
       case _ =>
         assert(CodeRes.isTerminal(c))
@@ -1354,13 +1342,7 @@ trait Core extends Definitions { ocbsl =>
       case Signature(Label.BVShiftLeft | Label.BVAShiftRight | Label.BVLShiftRight, Seq(e1, e2)) =>
         if (e2 == zero) cr.derived(e1) else cr
 
-      case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
-        assert(CodeRes.isTerminal(scrut))
-        assert(2 * pats.size == guardRhs.size)
-        val (guards, rhss) = guardRhs.grouped(2).map { case Seq(guard, rhs) => (guard, rhs) }.toSeq.unzip
-        val cases = pats.zip(guards).zip(rhss).map {
-          case ((pat, guard), rhs) => LabMatchCase(pat, guard, rhs)
-        }
+      case MatchExprSig(scrut, cases) =>
         // Voir explication IfExpr
         val scrutCr = cr.ctxs.ctxs match {
           case prevCtxs :+ (bScrut@Ctx.BoundDef(scrut2)) :+ Ctx.BoundDef(match2) if scrut2 == scrut && cr.terminal == match2 =>
@@ -1978,16 +1960,22 @@ trait Core extends Definitions { ocbsl =>
           val res = RevRes(Let(new ValDef(varId2Var(v)), e.expr, body.expr), e.used ++ body.used)
           (res, bodyCr)
 
-        case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
-          assert(2 * pats.size == guardRhs.size)
-          assert(CodeRes.isTerminal(scrut))
-          val cases = pats.zip(guardRhs.grouped(2)).map {
-            case (pat, Seq(guard, rhs)) => LabMatchCase(pat, guard, rhs)
-            case _ => sys.error("oh non, je ne sais pas compter :(")
-          }
+        case MatchExprSig(scrut, cases) =>
           val (eScrut, scrutCr) = unfold(scrut, renv)
           val (rcases, used) = uncodeOfCases(scrut, cases, renv)(using env, scrutCr.ctxs)
           val res = RevRes(MatchExpr(eScrut.expr, rcases), eScrut.used ++ used)
+          (res, scrutCr.derived(c))
+
+        case PassesSig(scrut, cases) =>
+          val (eScrut, scrutCr) = unfold(scrut, renv)
+          val (rcases, used) = uncodeOfCases(scrut, cases, renv)(using env, scrutCr.ctxs)
+          assert(eScrut.expr.getType match {
+            case TupleType(bases) => bases.length == 2
+            case _ => false
+          })
+          val fst = symbols.tupleSelect(eScrut.expr, 1, true)
+          val snd = symbols.tupleSelect(eScrut.expr, 2, true)
+          val res = RevRes(Passes(fst, snd, rcases), eScrut.used ++ used)
           (res, scrutCr.derived(c))
 
         case _ => super.unfoldImpl(c, renv)
@@ -2003,6 +1991,8 @@ trait Core extends Definitions { ocbsl =>
     override def combineCase(guard: RevRes, rhs: RevRes, renv: RevEnv): RevRes = sys.error("match expression are explicitly handled")
 
     override def combineMatch(scrut: RevRes, cases: Seq[RevRes], renv: RevEnv): RevRes = sys.error("match expression are explicitly handled")
+
+    override def combinePasses(scrut: RevRes, cases: Seq[RevRes], renv: RevEnv): RevRes = sys.error("passes expression are explicitly handled")
 
     override def unfoldVar(v: VarId, renv: RevEnv): RevRes = RevRes(varId2Var(v), Set(v))
 
@@ -2137,6 +2127,16 @@ trait Core extends Definitions { ocbsl =>
         case Label.TupleSelect(index) =>
           val Seq(e) = eargs
           TupleSelect(e, index)
+
+        case Label.StringConcat =>
+          val Seq(lhs, rhs) = eargs
+          StringConcat(lhs, rhs)
+        case Label.SubString =>
+          val Seq(expr, start, end) = eargs
+          SubString(expr, start, end)
+        case Label.StringLength =>
+          val Seq(expr) = eargs
+          StringLength(expr)
 
         case Label.FiniteSet(base) => FiniteSet(eargs, base)
         case Label.SetAdd =>
@@ -2364,17 +2364,17 @@ trait Core extends Definitions { ocbsl =>
         case Signature(Label.NoTree(ofTpe), Seq()) =>
           CodeRes.noTree(ofTpe, tpe)
 
-        case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
-          assert(2 * pats.size == guardRhs.size)
-          assert(CodeRes.isTerminal(scrut))
-          val (guards, rhss) = guardRhs.grouped(2).map { case Seq(guard, rhs) => (guard, rhs) }.toSeq.unzip
-          val cases = pats.zip(guards).zip(rhss).map {
-            case ((pat, guard), rhs) => LabMatchCase(pat, guard, rhs)
-          }
+        case MatchExprSig(scrut, cases) =>
           val rscrut = transform(scrut, repl, extra)
           assert(rscrut.ctxs.isLitVarOrBoundDef(rscrut.terminal))
           val rcases = transformCases(scrut, rscrut.terminal, cases, repl + (scrut -> rscrut.terminal), extra, Seq.empty)(using env, rscrut.ctxs)
           CodeRes.matchExpr(rscrut, rcases, tpe)
+
+        case PassesSig(scrut, cases) =>
+          val rscrut = transform(scrut, repl, extra)
+          assert(rscrut.ctxs.isLitVarOrBoundDef(rscrut.terminal))
+          val rcases = transformCases(scrut, rscrut.terminal, cases, repl + (scrut -> rscrut.terminal), extra, Seq.empty)(using env, rscrut.ctxs)
+          CodeRes.passes(rscrut, rcases, tpe)
 
         // TODO: Que pour les cas triviaux où env est le même, bindings std, etc.
         case Signature(lab, children) => transformSeq(children, tpe, repl, extra)(Signature(lab, _))
@@ -2530,18 +2530,21 @@ trait Core extends Definitions { ocbsl =>
           tryFold(body, acc, extra)(using env.incIf(lab), ctxs)
             .map { case (acc, _) => (acc, CodeRes(c, ctxs.addBoundDef(c))) }
 
-        case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
-          assert(2 * pats.size == guardRhs.size)
-          assert(CodeRes.isTerminal(scrut))
-          val cases = pats.zip(guardRhs.grouped(2)).map {
-            case (pat, Seq(guard, rhs)) => LabMatchCase(pat, guard, rhs)
-            case _ => sys.error("oh non, je ne sais pas compter :(")
-          }
+        case MatchExprSig(scrut, cases) =>
           for {
             resScrut <- tryFold(scrut, acc, extra)
             _ = assert(resScrut._2.terminal == scrut)
             accCases <- tryFoldCases(scrut, cases, resScrut._1, extra)(using env, resScrut._2.ctxs)
             resTerminal = codeOfSig(mkMatchExpr(scrut, cases), tpe)
+            resCr = resScrut._2.derived(resTerminal)
+          } yield (accCases, resCr)
+
+        case PassesSig(scrut, cases) =>
+          for {
+            resScrut <- tryFold(scrut, acc, extra)
+            _ = assert(resScrut._2.terminal == scrut)
+            accCases <- tryFoldCases(scrut, cases, resScrut._1, extra)(using env, resScrut._2.ctxs)
+            resTerminal = codeOfSig(mkPasses(scrut, cases), tpe)
             resCr = resScrut._2.derived(resTerminal)
           } yield (accCases, resCr)
 
@@ -2636,6 +2639,8 @@ trait Core extends Definitions { ocbsl =>
 
     def combineMatch(scrut: T, cases: Seq[T], extra: Extra): T
 
+    def combinePasses(scrut: T, cases: Seq[T], extra: Extra): T
+
     def unfoldImpl(c: Code, extra: Extra)(using env: Env, ctxs: Ctxs): (T, CodeRes) = {
       val tpe = codeTpe(c)
       code2sig(c) match {
@@ -2696,17 +2701,18 @@ trait Core extends Definitions { ocbsl =>
           val tres = combineNot(te, extra)
           (tres, cr.derived(c))
 
-        case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
-          assert(2 * pats.size == guardRhs.size)
-          assert(CodeRes.isTerminal(scrut))
-          val cases = pats.zip(guardRhs.grouped(2)).map {
-            case (pat, Seq(guard, rhs)) => LabMatchCase(pat, guard, rhs)
-            case _ => sys.error("oh non, je ne sais pas compter :(")
-          }
+        case MatchExprSig(scrut, cases) =>
           val (tscrut, scrutCr) = unfold(scrut, extra)
           assert(scrutCr.terminal == scrut)
           val tcases = unfoldCases(scrut, cases, extra)(using env, scrutCr.ctxs)
           val tres = combineMatch(tscrut, tcases, extra)
+          (tres, scrutCr.derived(c))
+
+        case PassesSig(scrut, cases) =>
+          val (tscrut, scrutCr) = unfold(scrut, extra)
+          assert(scrutCr.terminal == scrut)
+          val tcases = unfoldCases(scrut, cases, extra)(using env, scrutCr.ctxs)
+          val tres = combinePasses(tscrut, tcases, extra)
           (tres, scrutCr.derived(c))
 
         case Signature(lab, args) =>
@@ -2770,15 +2776,14 @@ trait Core extends Definitions { ocbsl =>
 
         case Signature(_: (Label.Ensuring.type | Label.LambdaLike), _) => CodeRes(c, ctxs.addBoundDef(c))
 
-        case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
-          assert(2 * pats.size == guardRhs.size)
-          assert(CodeRes.isTerminal(scrut))
-          val cases = pats.zip(guardRhs.grouped(2)).map {
-            case (pat, Seq(guard, rhs)) => LabMatchCase(pat, guard, rhs)
-            case _ => sys.error("oh non, je ne sais pas compter :(")
-          }
+        case MatchExprSig(scrut, cases) =>
           val scrutTeared = transform(scrut, repl, ())
           val terminal = codeOfSig(mkMatchExpr(scrutTeared.terminal, cases), codeTpe(c))
+          scrutTeared.derived(terminal)
+
+        case PassesSig(scrut, cases) =>
+          val scrutTeared = transform(scrut, repl, ())
+          val terminal = codeOfSig(mkPasses(scrutTeared.terminal, cases), codeTpe(c))
           scrutTeared.derived(terminal)
 
         case _ => super.transformImpl(c, repl, ())
@@ -2968,6 +2973,34 @@ trait Core extends Definitions { ocbsl =>
   object GtSig {
     def unapply(sig: Signature): Option[(Code, Code)] = sig match {
       case Signature(Label.GreaterThan, Seq(lhs, rhs)) => Some((lhs, rhs))
+      case _ => None
+    }
+  }
+
+  object MatchExprSig {
+    def unapply(sig: Signature): Option[(Code, Seq[LabMatchCase])] = sig match {
+      case Signature(Label.MatchExpr(pats), scrut +: guardRhs) =>
+        assert(2 * pats.size == guardRhs.size)
+        assert(CodeRes.isTerminal(scrut))
+        val cases = pats.zip(guardRhs.grouped(2)).map {
+          case (pat, Seq(guard, rhs)) => LabMatchCase(pat, guard, rhs)
+          case _ => sys.error("oh non, je ne sais pas compter :(")
+        }
+        Some((scrut, cases))
+      case _ => None
+    }
+  }
+
+  object PassesSig {
+    def unapply(sig: Signature): Option[(Code, Seq[LabMatchCase])] = sig match {
+      case Signature(Label.Passes(pats), scrut +: guardRhs) =>
+        assert(2 * pats.size == guardRhs.size)
+        assert(CodeRes.isTerminal(scrut))
+        val cases = pats.zip(guardRhs.grouped(2)).map {
+          case (pat, Seq(guard, rhs)) => LabMatchCase(pat, guard, rhs)
+          case _ => sys.error("oh non, je ne sais pas compter :(")
+        }
+        Some((scrut, cases))
       case _ => None
     }
   }

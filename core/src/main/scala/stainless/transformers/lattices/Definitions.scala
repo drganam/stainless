@@ -54,6 +54,7 @@ trait Definitions {
     case Decreases
 
     case MatchExpr(patterns: Seq[LabelledPattern])
+    case Passes(patterns: Seq[LabelledPattern])
     case IfExpr
     case Application
     case Lambda(params: Seq[VarId])
@@ -282,6 +283,11 @@ trait Definitions {
     assert(cases.nonEmpty)
     val (pats, guards, rhs) = cases.map(mc => (mc.pattern, mc.guard, mc.rhs)).unzip3
     Signature(Label.MatchExpr(pats), scrut +: guards.zip(rhs).flatMap((g, r) => Seq(g, r)))
+  }
+  final def mkPasses(scrut: Code, cases: Seq[LabMatchCase]): Signature = {
+    assert(cases.nonEmpty)
+    val (pats, guards, rhs) = cases.map(mc => (mc.pattern, mc.guard, mc.rhs)).unzip3
+    Signature(Label.Passes(pats), scrut +: guards.zip(rhs).flatMap((g, r) => Seq(g, r)))
   }
   final def mkIfExpr(cond: Code, thn: Code, els: Code): Signature = Signature(Label.IfExpr, Seq(cond, thn, els))
   final def mkApp(callee: Code, args: Seq[Code]): Signature = Signature(Label.Application, callee +: args)
