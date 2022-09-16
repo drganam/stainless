@@ -526,13 +526,24 @@ trait Core extends Definitions { ocbsl =>
 
         locally {
           val currEntry = pluggedOccMap.getOrElseUpdate((env, c), mutable.Map.empty)
-//          assert(currEntry.get(inCtxs).forall(_._2 == minimizedCr))
-//          val got = currEntry.get(inCtxs).map { case (expected, _) =>
-//            val eq = u2.c2u.toSet.intersect(expected.c2u.toSet)
-//            val diff = (u2.c2u.toSet ++ expected.c2u.toSet) -- eq
-//            (expected, eq, diff)
-//          }
-//          assert(got.forall(_._1 == u2))
+          // assert(currEntry.get(inCtxs).forall(_._2 == minimizedCr)) // TODO: Pas forcément, p.ex. si on a des exprs pures réordonnées ou qui se trouvent dans des selfPlugged
+          if (debug) {
+            // Pour comparer les occurrences, on enlève les "simples" car ceux-ci peuvent apparaitre une ou plrs fois
+            // sans pour autant changer le code final car ceux-ci ne sont pas bound
+            val u2WithoutSimple = Occurrences(u2.c2u.filter {
+              case (c, _) => !isVarOrSelector(c)
+            })
+            val alreadyThere = currEntry.get(inCtxs)
+            val got = alreadyThere.map { case (expected0, _) =>
+              val expected = Occurrences(expected0.c2u.filter {
+                case (c, _) => !isVarOrSelector(c)
+              })
+              val eq = u2WithoutSimple.c2u.toSet.intersect(expected.c2u.toSet)
+              val diff = (u2WithoutSimple.c2u.toSet ++ expected.c2u.toSet) -- eq
+              (expected, eq, diff)
+            }
+            assert(got.forall(_._1 == u2WithoutSimple))
+          }
 
           currEntry += inCtxs -> (u2, minimizedCr)
         }
@@ -782,7 +793,7 @@ trait Core extends Definitions { ocbsl =>
         CodeRes.passes(tupleScrutCr, rcases, tpe)
 
       case e =>
-        throw new UnsupportedOperationException("computeSignature: Do not know how to handle "+e)
+        throw new UnsupportedOperationException(s"codeOfExpr: Do not know how to handle $e")
     }
     assert(ctxs.isPrefixOf(res.ctxs))
     simplifyTopLvl(res)
@@ -959,21 +970,41 @@ trait Core extends Definitions { ocbsl =>
 
     assert(disjs.size >= 2)
 
-    def transformRec(disjs: Seq[T], rdisjsAcc: Seq[CodeRes])(using ctxs: Ctxs): (Seq[CodeRes], Ctxs) = {
+    def peelDisjs(disjs: Seq[Code], ctxs: Ctxs): (Seq[CodeRes], Ctxs) = {
+      disjs.foldLeft((Seq.empty[CodeRes], ctxs)) {
+        case ((acc, ctxs), disj) =>
+          given Ctxs = ctxs
+          assert(!label(disj).isOr)
+          val teared = tearDown(disj)
+          (acc :+ teared, teared.ctxs.withNegatedCond(teared.terminal))
+      }
+    }
+
+    def transformRec(disjs: Seq[T], rdisjsAcc: Seq[CodeRes])(using ctxs: Ctxs): Seq[CodeRes] = {
       assert(rdisjsAcc.isEmpty || rdisjsAcc.last.ctxs.isPrefixOf(ctxs))
       assert(outerCtxs.isPrefixOf(ctxs))
-      if (disjs.isEmpty) (rdisjsAcc, ctxs)
+      if (disjs.isEmpty) rdisjsAcc
       else {
         val re: CodeRes = f(disjs.head)
         assert(codeTpe(re.terminal) == BoolTy, s"Got ${codeTpe(re.terminal)}")
         assert(ctxs.isPrefixOf(re.ctxs))
         val neg = negCodeOf(re.terminal)
-        val newCtxs = re.ctxs.withCond(neg)
-        if (neg == falseCode) (rdisjsAcc :+ re, newCtxs) // On s'arrête ici, et on ajoute en effet false dans les conds, c'est voulu. Cela permet d'avoir le comportement inverse avec combineRec
+        if (neg == falseCode) rdisjsAcc :+ re
         else {
-          val res = transformRec(disjs.tail, rdisjsAcc :+ re)(using newCtxs)
-          val noTailRecPls = Ctxs(re.ctxs.ctxs)
-          res
+          (code2sig(re.terminal), re.ctxs.pop) match {
+            case (Signature(Label.Or, reDisjs), Some((rePrevCtxs, Ctx.BoundDef(lastBound)))) if re.terminal == lastBound && re.ctxs.size > ctxs.size =>
+              assert(!ctxs.isBoundDef(lastBound))
+              val (reDisjsCrs, nextCtxs) = peelDisjs(reDisjs, rePrevCtxs)
+              val res = transformRec(disjs.tail, rdisjsAcc ++ reDisjsCrs)(using nextCtxs)
+              val noTailRecPls = Ctxs(nextCtxs.ctxs)
+              res
+
+            case _ =>
+              val nextCtxs = re.ctxs.withCond(neg)
+              val res = transformRec(disjs.tail, rdisjsAcc :+ re)(using nextCtxs)
+              val noTailRecPls = Ctxs(nextCtxs.ctxs)
+              res
+          }
         }
       }
     }
@@ -1001,9 +1032,10 @@ trait Core extends Definitions { ocbsl =>
       }
     }
 
-    val (disjsCodeRes, lastCtxs) = transformRec(disjs, Seq.empty)(using outerCtxs)
-    assert(disjsCodeRes.last.ctxs.isPrefixOf(lastCtxs))
-    val res = combineRec(disjsCodeRes, CodeRes(falseCode, lastCtxs))
+    val disjsCodeRes = transformRec(disjs, Seq.empty)(using outerCtxs)
+    val last = disjsCodeRes.last
+    val initAcc = CodeRes(falseCode, last.ctxs.withNegatedCond(last.terminal))
+    val res = combineRec(disjsCodeRes, initAcc)
     res
   }
 
@@ -1771,6 +1803,7 @@ trait Core extends Definitions { ocbsl =>
     case MustBind // ... the `e` must be bound (appears in `body` if pure, may not appear if impure)
   }
 
+  // TODO: Aussi rajouter les parameterless adt, et renomer ce truc en "isSimple"
   // x, x.a, x.a.b etc.
   final def isVarOrSelector(c: Code): Boolean = code2sig(c) match {
     case Signature(Label.Var(_), Seq()) => true
@@ -1849,22 +1882,15 @@ trait Core extends Definitions { ocbsl =>
                             (using env: Env, ctxs: Ctxs): Either[Nothing, (Occurrences, CodeRes)] = {
       if (ctxs.isBoundDef(c)) Right((acc ++ Occurrences.of(c), CodeRes(c, ctxs)))
       else if (!CodeRes.isTerminal(c)) {
-        /*
-        val entries = pluggedOccMap.get((env, c)) //, sys.error("Oh non :("))
-        entries.flatMap(_.get(ctxs)).getOrElse {
-          // val (prefix, occ) = entries.head // N'importe quelle entry
-          // occ.withReplacedPrefix(prefix, ctxs.impureParts)
-          // sys.error("Oh non, y a rien :(")
-          val teared = tearDown(c)
-          val (occ, plugged) = teared.selfPlugged(ctxs)
-          occ
-        }
-        */
-        // TODO: !!! Ce ne sera pas tout à fait les mêmes car on inline les impures et les yeet de inCtxs!!! -> Ou bien?
-        val entries = pluggedOccMap.getOrElseUpdate((env, c), mutable.Map.empty)
         // Remarque: pas de Occurrences.of(c) parce que `c` n'est pas un terminal (c'est un Let ou un AssumeLike)
-        val (occs, cr) = entries.getOrElseUpdate(ctxs, super.tryFoldImpl(c, Occurrences.empty, extra).merge)
-        Right((acc ++ occs, cr))
+        pluggedOccMap.get((env, c)).flatMap(_.get(ctxs)) match {
+          case Some((occs, cr)) =>
+            Right((acc ++ occs, cr))
+          case None =>
+            val cr = tearDown(c)
+            val (occs, plg) = cr.selfPlugged(ctxs)
+            Right((acc ++ occs, cr))
+        }
       } else {
         // CodeRes + occurrences, mais sans acc
         // (on pourrait inclure acc dans les appels récursifs, etc., mais c'est facile de l'oublier
