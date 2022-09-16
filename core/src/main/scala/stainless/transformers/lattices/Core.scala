@@ -531,12 +531,12 @@ trait Core extends Definitions { ocbsl =>
             // Pour comparer les occurrences, on enlève les "simples" car ceux-ci peuvent apparaitre une ou plrs fois
             // sans pour autant changer le code final car ceux-ci ne sont pas bound
             val u2WithoutSimple = Occurrences(u2.c2u.filter {
-              case (c, _) => !isVarOrSelector(c)
+              case (c, _) => !isSimple(c)
             })
             val alreadyThere = currEntry.get(inCtxs)
             val got = alreadyThere.map { case (expected0, _) =>
               val expected = Occurrences(expected0.c2u.filter {
-                case (c, _) => !isVarOrSelector(c)
+                case (c, _) => !isSimple(c)
               })
               val eq = u2WithoutSimple.c2u.toSet.intersect(expected.c2u.toSet)
               val diff = (u2WithoutSimple.c2u.toSet ++ expected.c2u.toSet) -- eq
@@ -1803,15 +1803,14 @@ trait Core extends Definitions { ocbsl =>
     case MustBind // ... the `e` must be bound (appears in `body` if pure, may not appear if impure)
   }
 
-  // TODO: Aussi rajouter les parameterless adt, et renomer ce truc en "isSimple"
-  // x, x.a, x.a.b etc.
-  final def isVarOrSelector(c: Code): Boolean = code2sig(c) match {
-    case Signature(Label.Var(_), Seq()) => true
-    case Signature(Label.ADTSelector(_, _, _), Seq(e)) => isVarOrSelector(e)
-    case Signature(Label.TupleSelect(_), Seq(e)) => isVarOrSelector(e)
-//    case Signature(Label.ArrayLength, Seq(e)) => isVarOrSelector(e)
-//    case Signature(Label.Plus, Seq(a, b)) => isLit(a) || isLit(b)
-//    case Signature(Label.Minus, Seq(a, b)) => isLit(a) || isLit(b)
+  final def isSimple(c: Code): Boolean = code2sig(c) match {
+    case Signature(Label.Lit(_) | Label.Var(_), Seq()) => true
+    case Signature(Label.ADTSelector(_, _, _), Seq(e)) => isSimple(e)
+    case Signature(Label.TupleSelect(_), Seq(e)) => isSimple(e)
+    case Signature(Label.ArrayLength, Seq(e)) => isSimple(e)
+    case Signature(Label.ADT(_, _), args) => args.isEmpty
+    case Signature(Label.Plus | Label.Minus | Label.Times | Label.Division
+                   | Label.Modulo | Label.Remainder, Seq(lhs, rhs)) => isLit(lhs) || isLit(rhs)
     case _ => false
   }
 
@@ -1829,7 +1828,7 @@ trait Core extends Definitions { ocbsl =>
           val terminalIsPure = codePurity(terminal)
           definitionOccurrence match {
             case Occurrence.Many =>
-              if (!isLambda(terminal) && isVarOrSelector(terminal)) BindingCase.Inlinable
+              if (!isLambda(terminal) && isSimple(terminal)) BindingCase.Inlinable
               else BindingCase.MustBind
             case Occurrence.Zero =>
               // Si une expr impure n'apparait pas dans le body, on ne peut pas l'éliminer, il faut donc le bind
