@@ -476,6 +476,12 @@ class Trace(override val s: Trees, override val t: termination.Trees)
       symbols: s.Symbols
     ) extends s.ConcreteSelfTreeTransformer { slf =>
 
+      def checkArgs(f1: FunDef, f2: FunDef) = {
+        f1.params.size == f2.params.size && f1.tparams.size == f2.tparams.size &&
+        f1.params.zip(f2.params).forall(arg => arg._1.tpe == arg._2.tpe) &&
+        f1.returnType == f2.returnType
+      }
+    
       override def transform(expr: slf.s.Expr): slf.t.Expr = expr match {
         case v: Variable =>
           vsubst.getOrElse(v.id, super.transform(v))
@@ -485,15 +491,21 @@ class Trace(override val s: Trees, override val t: termination.Trees)
           super.transform(fi1.copiedFrom(fi))
 
         //f1(a, b) -> f2(b, a)
+        // only complicate if arg signatures do not match !
         case fi @ FunctionInvocation(tfd, tps, args) if replacement.contains(fi.id) =>
           val replacement_id = replacement.getOrElse(fi.id, fi.id)
           val replacement_fd = symbols.functions(replacement_id)
-          println(replacement_fd.params.map(_.toVariable))
-          println(args)
-          val paramZip = args.zip(symbols.functions(tfd).params.map(_.toVariable))
-          val replacement_args1 = replacement_fd.params.map(_.toVariable).map{param => paramZip.find(elem => elem._2.tpe == param.tpe)}
-          val replacement_args: Seq[Expr] = replacement_args1.flatten.map(_._1)
-          val fi1 = FunctionInvocation(replacement_id, tps = fi.tps, args = replacement_args)
+          val fd = symbols.functions(fi.id)
+          val fi1 = if (checkArgs(replacement_fd, fd)) 
+            FunctionInvocation(replacement.getOrElse(fi.id, fi.id), tps = fi.tps, args = fi.args)
+            else {
+              println(replacement_fd.params.map(_.toVariable))
+              println(args)
+              val paramZip = args.zip(symbols.functions(tfd).params.map(_.toVariable))
+              val replacement_args1 = replacement_fd.params.map(_.toVariable).map{param => paramZip.find(elem => elem._2.tpe == param.tpe)}
+              val replacement_args: Seq[Expr] = replacement_args1.flatten.map(_._1)
+              FunctionInvocation(replacement_id, tps = fi.tps, args = replacement_args)
+            }
           super.transform(fi1.copiedFrom(fi))
 
         case _ => super.transform(expr)
