@@ -279,8 +279,16 @@ trait VerificationChecker { self =>
     import SolverResponses._
     val s = sf.getNewSolver()
 
+//    def exprSize(e: Expr): Long = {
+//      val Operator(es, _) = e
+//      es.map(exprSize).sum + 1
+//    }
+
     try {
       val cond = vc.condition
+//      val orig = simplifyLets(removeAssertions(origVC.condition))
+//      val vanilla = simplifyExpr(orig)(using PurityOptions.assumeChecked)
+//      println(s"HERE-IS-SIZES ${Seq(orig, vc.condition, vanilla).map(exprSize).mkString("     ")}")
 
       reporter.synchronized {
         reporter.debug(s" - Now solving '${vc.kind}' VC for ${vc.fid.asString} @${vc.getPos}...")

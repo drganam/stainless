@@ -531,12 +531,12 @@ trait Core extends Definitions { ocbsl =>
             // Pour comparer les occurrences, on enlève les "simples" car ceux-ci peuvent apparaitre une ou plrs fois
             // sans pour autant changer le code final car ceux-ci ne sont pas bound
             val u2WithoutSimple = Occurrences(u2.c2u.filter {
-              case (c, _) => !isSimple(c)
+              case (c, _) => !isSimple(c)(using inCtxs)
             })
             val alreadyThere = currEntry.get(inCtxs)
             val got = alreadyThere.map { case (expected0, _) =>
               val expected = Occurrences(expected0.c2u.filter {
-                case (c, _) => !isSimple(c)
+                case (c, _) => !isSimple(c)(using inCtxs)
               })
               val eq = u2WithoutSimple.c2u.toSet.intersect(expected.c2u.toSet)
               val diff = (u2WithoutSimple.c2u.toSet ++ expected.c2u.toSet) -- eq
@@ -1258,20 +1258,32 @@ trait Core extends Definitions { ocbsl =>
         cr.derived(tupleSelect(e, i, tpe))
 
       case Signature(Label.ArraySelect, Seq(arr, i)) =>
-        def collectIndicesValues(arr: Code, indices: Map[Code, Code]): Map[Code, Code] = code2sig(arr) match {
+        def getVal(arr: Code): Option[Code] = code2sig(arr) match {
           case Signature(Label.ArrayUpdated, Seq(arr2, j, newValue)) =>
-            collectIndicesValues(arr2, addIfAbsent(indices)(j -> newValue))
-          case Signature(Label.LargeArray(_, _), _ :+ default :+ _) =>
-            addIfAbsent(indices)(i -> default)
+            if (i == j) Some(newValue)
+            else {
+              // If `i` and `j` are provably different, we can recur on `arr2`
+              // Otherwise, we cannot be sure if we need to return `newValue`, or the result of the recursion
+              val ijNeq = (label(i), label(j)) match {
+                case (li@Label.Lit(_), lj@Label.Lit(_)) => li != lj
+                case _ =>
+                  Seq(codeOfSig(mkEquals(i, j), BoolTy), codeOfSig(mkEquals(j, i), BoolTy))
+                    .map(c => codeOfSig(mkNot(c), BoolTy))
+                    .exists(cr.ctxs.allCondsSet.contains)
+              }
+              if (ijNeq) getVal(arr2)
+              else None
+            }
+          case Signature(Label.LargeArray(_, _), elems :+ default :+ _) if elems.isEmpty =>
+            Some(default)
           case Signature(Label.FiniteArray(_), elems) =>
             code2sig(i) match {
-              case Signature(Label.Lit(Int32Literal(ii)), _) => addIfAbsent(indices)(i -> elems(ii))
-              case _ => indices
+              case Signature(Label.Lit(Int32Literal(ii)), _) => Some(elems(ii))
+              case _ => None
             }
-          case _ => indices
+          case _ => None
         }
-        collectIndicesValues(arr, Map.empty)
-          .get(i).map(cr.derived)
+        getVal(arr).map(cr.derived)
           .getOrElse(cr)
 
       case Signature(Label.ArrayLength, Seq(arr)) =>
@@ -1803,15 +1815,20 @@ trait Core extends Definitions { ocbsl =>
     case MustBind // ... the `e` must be bound (appears in `body` if pure, may not appear if impure)
   }
 
-  final def isSimple(c: Code): Boolean = code2sig(c) match {
+  final def isSimple(c: Code)(using ctxs: Ctxs): Boolean = code2sig(c) match {
     case Signature(Label.Lit(_) | Label.Var(_), Seq()) => true
     case Signature(Label.ADTSelector(_, _, _), Seq(e)) => isSimple(e)
     case Signature(Label.TupleSelect(_), Seq(e)) => isSimple(e)
     case Signature(Label.ArrayLength, Seq(e)) => isSimple(e)
     case Signature(Label.ADT(_, _), args) => args.isEmpty
     case Signature(Label.Plus | Label.Minus | Label.Times | Label.Division
-                   | Label.Modulo | Label.Remainder, Seq(lhs, rhs)) => isLit(lhs) || isLit(rhs)
-    case _ => false
+                   | Label.Modulo | Label.Remainder
+                   | Label.BVAnd | Label.BVOr | Label.BVXor | Label.BVShiftLeft
+                   | Label.BVAShiftRight | Label.BVLShiftRight, Seq(lhs, rhs)) => isLit(lhs) || isLit(rhs)
+    case Signature(Label.BVSignedToUnsigned | Label.BVUnsignedToSigned
+                   | Label.BVNarrowingCast(_) | Label.BVWideningCast(_)
+                   | Label.BVNot, Seq(e)) => isSimple(e)
+    case _ => ctxs.isBoundDef(c)
   }
 
   final def needsBinding(terminal: Code, terminalComposition: Occurrences, bodyOccurrences: Occurrences)(using env: Env, prefix: Ctxs): BindingCase = {

@@ -3,12 +3,11 @@
 package stainless
 
 import scala.concurrent.Await
-import scala.concurrent.duration._
-
+import scala.concurrent.duration.*
 import stainless.utils.YesNoOnly
-
-import extraction.xlang.{ TreeSanitizer, trees => xt }
+import extraction.xlang.{TreeSanitizer, trees as xt}
 import extraction.utils.DebugSymbols
+import stainless.verification.*
 
 trait ComponentTestSuite extends inox.TestSuite with inox.ResourceUtils with InputUtils { self =>
 
@@ -22,6 +21,7 @@ trait ComponentTestSuite extends inox.TestSuite with inox.ResourceUtils with Inp
       verification.optStrictArithmetic(false),
       termination.optInferMeasures(false),
       termination.optCheckMeasures(YesNoOnly.No),
+      optSimplifier(SimplifierKind.OL)
     )
   )
 

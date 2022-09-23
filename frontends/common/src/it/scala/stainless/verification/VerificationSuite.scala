@@ -8,7 +8,7 @@ import org.scalatest._
 trait VerificationSuite extends VerificationComponentTestSuite {
 
   override def configurations = super.configurations.map { seq =>
-    Seq(optTypeChecker(false), optOLSimp(true)) ++ seq
+    Seq(optTypeChecker(false)) ++ seq
   }
 
   override protected def optionsString(options: inox.Options): String = {
@@ -54,6 +54,7 @@ class SMTZ3VerificationSuite extends VerificationSuite {
     case "verification/valid/BitsTricksSlow" => Skip
 
     // TODO: Added
+    case "verification/invalid/LambdaEquality2" => Skip
     case "verification/valid/QuantifierUnification" => Skip // Can't verify
     case "verification/invalid/BadConcRope" => Skip // Dud VC times out instead of being falsified
     case "verification/false-valid/ChooseNothing" => Skip // Correctly rejected
