@@ -89,15 +89,6 @@ class Trace(override val s: Trees, override val t: termination.Trees)
         println(f.id)
         println(m.id)
 
-        /*
-        
-          println("simpleEvalCheck")
-          println(info.counterexample.values)
-          val v = info.counterexample.values ++ info.counterexample.values
-          v.find(elem => elem.toVariable.tpe == v.head.tpe)
-          true
-        })
-        */
         println(allCounterexamples)
         allCounterexamples.forall(info => {
           val pair = info
@@ -136,10 +127,10 @@ class Trace(override val s: Trees, override val t: termination.Trees)
             //println(a.toString == b.toString)
 
             try {
-              val invocation = evaluator.program.trees.FunctionInvocation(f.id, Seq(), ref.params.map(vd =>
+              val invocation = evaluator.program.trees.FunctionInvocation(f.id, Seq(), f.params.map(vd =>
                 pair.counterexample.find({ elem => elem._1.tpe.toString == vd.tpe.toString}).get._2))
 
-              val invocationM = evaluator.program.trees.FunctionInvocation(m.id, Seq(), ref.params.map(vd =>
+              val invocationM = evaluator.program.trees.FunctionInvocation(m.id, Seq(), m.params.map(vd =>
                 pair.counterexample.find({ elem => elem._1.tpe.toString == vd.tpe.toString}).get._2))
 
               println("ok")
@@ -305,17 +296,21 @@ class Trace(override val s: Trees, override val t: termination.Trees)
       // returns a list of sublemmas for each candidate pair (same signature + name?) + replacement map
       // res._1 sublemma + its sublemmas and replacement
       // res._2 and res._3 map for replacement
-      def makeSublemmas(fd1: s.FunDef, fd2: s.FunDef): List[(List[s.FunDef], s.FunDef, s.FunDef)] = {
+      def makeSublemmas(fd1: s.FunDef, fd2: s.FunDef): List[(List[s.FunDef], List[(Identifier, Identifier)])] = {
         val f1Calls = getFunCalls(fd1).filter(!_.flags.exists(_.name == "library"))
         val f2Calls = getFunCalls(fd2).filter(!_.flags.exists(_.name == "library"))
 
+        // maps each call from fd1 to a list of candidates from fd2
         //val pairs = f1Calls zip f1Calls.map(m => f2Calls.find(f => m != f && checkArgsSet(m, f) && f.id.name == m.id.name).orElse(f2Calls.find(f => m != f && checkArgsSet(m, f))))
         val pairs = f1Calls zip f1Calls.map(m => f2Calls.filter(f => m != f && checkArgsSet(m, f)))
 
-        val validpairs = pairs.map(elem => (elem._1, elem._2.find(f => f.id.name == elem._1.id.name && simpleEvalCheck(elem._1, f)).orElse(elem._2.find(f => (simpleEvalCheck(elem._1, f)))))).filter(elem => !elem._2.isEmpty)
+        // maps each call from fd1 to its "best" match from fd2
+        val validpairs = pairs.map(elem => (elem._1, elem._2.find(f => f.id.name == elem._1.id.name && checkArgs(elem._1, f) && simpleEvalCheck(elem._1, f)).orElse(elem._2.find(f => checkArgs(elem._1, f) && simpleEvalCheck(elem._1, f))).orElse(elem._2.find(f => simpleEvalCheck(elem._1, f))))).filter(elem => !elem._2.isEmpty)
 
         validpairs.map(elem => (elem._1, elem._2) match {
-          case (m, Some(f)) => (equivalenceCheck(m, f, true), m, f)
+          case (m, Some(f)) => 
+            val fc = inductPattern(symbols, f, f, "swap", (f.params.map(_.id) zip (f.params.tail ++ List(f.params.head)).map(_.id)).toMap).setPos(f.getPos).copy(flags = Seq(s.Derived(Some(f.id))))
+            (equivalenceCheck(m, f, true), List((m.id, f.id)))
         })
       }
 
@@ -329,9 +324,9 @@ class Trace(override val s: Trees, override val t: termination.Trees)
         val replacement: List[FunDef] = sublemmas match {
           case Nil => List()
           case _ =>
-            val sm = sublemmas.map(_._2).map(_.id)
-            val sf = sublemmas.map(_._3).map(_.id)
-            List(inductPattern(symbols, fd2, fd2, "replacement", (sf zip sm).toMap).setPos(fd2.getPos).copy(flags = Seq(s.Derived(Some(fd2.id)))))
+            //val sm = sublemmas.map(_._2).map(_.id)
+            //val sf = sublemmas.map(_._3).map(_.id)
+            List(inductPattern(symbols, fd2, fd2, "replacement", sublemmas.map(_._2).flatten.toMap).setPos(fd2.getPos).copy(flags = Seq(s.Derived(Some(fd2.id)))))
         }
 
         val newParamTps = eqLemma.tparams.map{tparam => tparam.tp}
@@ -352,9 +347,9 @@ class Trace(override val s: Trees, override val t: termination.Trees)
         val newParamVars2 = 
           if (checkArgs(fd1, fd2)) newParamVars
           else replacement match {
-          case Nil => fd2.params.map{param => newParamVars.find(elem => elem.tpe == param.toVariable.tpe).getOrElse(param.toVariable)}
-          case h::t => fd2.params.map{param => newParamVars.find(elem => elem.tpe == param.toVariable.tpe).getOrElse(param.toVariable)}
-        }
+            case Nil => fd2.params.map{param => newParamVars.find(elem => elem.tpe == param.toVariable.tpe).getOrElse(param.toVariable)}
+            case h::t => fd2.params.map{param => newParamVars.find(elem => elem.tpe == param.toVariable.tpe).getOrElse(param.toVariable)}
+          }
 
         val fun1 = s.FunctionInvocation(fd1.id, newParamTps, newParamVars)
         val fun2 = replacement match {
