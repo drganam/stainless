@@ -296,7 +296,7 @@ class Trace(override val s: Trees, override val t: termination.Trees)
       // returns a list of sublemmas for each candidate pair (same signature + name?) + replacement map
       // res._1 sublemma + its sublemmas and replacement
       // res._2 and res._3 map for replacement
-      def makeSublemmas(fd1: s.FunDef, fd2: s.FunDef): List[(List[s.FunDef], List[(Identifier, Identifier)])] = {
+      def makeSublemmas(fd1: s.FunDef, fd2: s.FunDef): List[(List[s.FunDef], List[s.FunDef], List[s.FunDef])] = {
         val f1Calls = getFunCalls(fd1).filter(!_.flags.exists(_.name == "library"))
         val f2Calls = getFunCalls(fd2).filter(!_.flags.exists(_.name == "library"))
 
@@ -309,8 +309,9 @@ class Trace(override val s: Trees, override val t: termination.Trees)
 
         validpairs.map(elem => (elem._1, elem._2) match {
           case (m, Some(f)) => 
-            val fc = inductPattern(symbols, f, f, "swap", (f.params.map(_.id) zip (f.params.tail ++ List(f.params.head)).map(_.id)).toMap).setPos(f.getPos).copy(flags = Seq(s.Derived(Some(f.id))))
-            (equivalenceCheck(m, f, true), List((m.id, f.id)))
+            //val fc = inductPattern(symbols, f, f, "swap", (f.params.map(_.id) zip (f.params.tail ++ List(f.params.head)).map(_.id)).toMap).setPos(f.getPos).copy(flags = Seq(s.Derived(Some(f.id))))
+            val fc = inductPattern(symbols, f, f, "swap", Map()).setPos(f.getPos).copy(flags = Seq(s.Derived(Some(f.id))))
+            (equivalenceCheck(m, f, true), List(m), List(f))
         })
       }
 
@@ -324,9 +325,9 @@ class Trace(override val s: Trees, override val t: termination.Trees)
         val replacement: List[FunDef] = sublemmas match {
           case Nil => List()
           case _ =>
-            //val sm = sublemmas.map(_._2).map(_.id)
-            //val sf = sublemmas.map(_._3).map(_.id)
-            List(inductPattern(symbols, fd2, fd2, "replacement", sublemmas.map(_._2).flatten.toMap).setPos(fd2.getPos).copy(flags = Seq(s.Derived(Some(fd2.id)))))
+            val sm = sublemmas.map(_._2).flatten.map(_.id)
+            val sf = sublemmas.map(_._3).flatten.map(_.id)
+            List(inductPattern(symbols, fd2, fd2, "replacement", (sf zip sm).toMap).setPos(fd2.getPos).copy(flags = Seq(s.Derived(Some(fd2.id)))))
         }
 
         val newParamTps = eqLemma.tparams.map{tparam => tparam.tp}
@@ -380,7 +381,7 @@ class Trace(override val s: Trees, override val t: termination.Trees)
           fullBody = BodyWithSpecs(withPre).withSpec(post).reconstructed,
           flags = Seq(s.Derived(Some(fd1.id)), s.Annotation("traceInduct",List(StringLiteral(fd1.id.name)))),
           returnType = s.UnitType()
-        ).copiedFrom(eqLemma) :: sublemmas.flatMap(_._1)) ++ replacement
+        ).copiedFrom(eqLemma) :: sublemmas.flatMap(_._1)) ++ replacement ++ sublemmas.map(_._3).flatten
       }
 
       (Trace.getModel, Trace.getFunction) match {
