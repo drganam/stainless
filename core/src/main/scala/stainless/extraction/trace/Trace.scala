@@ -130,14 +130,17 @@ class Trace(override val s: Trees, override val t: termination.Trees)
             println(swap)
 
             try {
-              val invocation = evaluator.program.trees.FunctionInvocation(f.id, Seq(), f.params.map(vd =>
-                pair.counterexample.find({ elem => elem._1.tpe.toString == vd.tpe.toString}).get._2))
 
-              val invocationM = if (!swap)
-                evaluator.program.trees.FunctionInvocation(m.id, Seq(), (m.params.tail ++ List(m.params.head)).map(vd =>
-                  pair.counterexample.find({ elem => elem._1.tpe.toString == vd.tpe.toString}).get._2))
-                else evaluator.program.trees.FunctionInvocation(m.id, Seq(), m.params.map(vd =>
-                  pair.counterexample.find({ elem => elem._1.tpe.toString == vd.tpe.toString}).get._2))
+
+              //a b c
+              //x y z 
+              //1 2 3
+
+              val invocation = evaluator.program.trees.FunctionInvocation(f.id, Seq(), (f.params zip pair.counterexample).map(_._2).map(_._2))
+
+              val invocationM = if (swap)
+                evaluator.program.trees.FunctionInvocation(m.id, Seq(), (m.params zip pair.counterexample).map(_._2).map(_._2).tail ++ List((m.params zip pair.counterexample).map(_._2).map(_._2).head))
+                else evaluator.program.trees.FunctionInvocation(m.id, Seq(), (m.params zip pair.counterexample).map(_._2).map(_._2))
 
               println("ok")
               (evaluator.eval(invocation), evaluator.eval(invocationM)) match {
