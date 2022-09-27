@@ -36,7 +36,7 @@ trait Core extends Definitions { ocbsl =>
   final val trueCode: Code = codeOfSig(trueSig, BoolTy)
   final val unitCode: Code = codeOfSig(unitSig, UnitType())
 
-  final inline val debug = true
+  final inline val debug = false
 
   final inline def assert(cond: => Boolean): Unit =
     inline if (debug) Predef.assert(cond)
@@ -330,9 +330,7 @@ trait Core extends Definitions { ocbsl =>
           assert(curr.ctxs.nonEmpty)
           val (prev, toPlug) = curr.pop.get
           val (u2, c2, partialCr2) = Ctxs.plugCtx(prev, toPlug, u, c, partialCr)
-          val res = rec(prev, u2, c2, partialCr2)
-          val noTailRecPls = Ctxs(curr.ctxs)
-          res
+          rec(prev, u2, c2, partialCr2)
         }
       }
 
@@ -995,15 +993,11 @@ trait Core extends Definitions { ocbsl =>
             case (Signature(Label.Or, reDisjs), Some((rePrevCtxs, Ctx.BoundDef(lastBound)))) if re.terminal == lastBound && re.ctxs.size > ctxs.size =>
               assert(!ctxs.isBoundDef(lastBound))
               val (reDisjsCrs, nextCtxs) = peelDisjs(reDisjs, rePrevCtxs)
-              val res = transformRec(disjs.tail, rdisjsAcc ++ reDisjsCrs)(using nextCtxs)
-              val noTailRecPls = Ctxs(nextCtxs.ctxs)
-              res
+              transformRec(disjs.tail, rdisjsAcc ++ reDisjsCrs)(using nextCtxs)
 
             case _ =>
               val nextCtxs = re.ctxs.withCond(neg)
-              val res = transformRec(disjs.tail, rdisjsAcc :+ re)(using nextCtxs)
-              val noTailRecPls = Ctxs(nextCtxs.ctxs)
-              res
+              transformRec(disjs.tail, rdisjsAcc :+ re)(using nextCtxs)
           }
         }
       }
@@ -1025,9 +1019,7 @@ trait Core extends Definitions { ocbsl =>
             val preLastCtxs = init.lastOption.map(_.ctxs).getOrElse(outerCtxs)
             val mayPopLastTerminal = !preLastCtxs.isBoundDef(last.terminal)
             val newAcc = simplifiedDisjunctionCodeRes(last, accPlugged, pluggedOcc, mayPopLastTerminal, polarity = true)
-            val res = combineRec(init, newAcc)
-            val noTailRecPls = Ctxs(last.ctxs.ctxs)
-            res
+            combineRec(init, newAcc)
           }
       }
     }
@@ -1559,9 +1551,7 @@ trait Core extends Definitions { ocbsl =>
             }
           case SimplifiedCase.Unchanged(caseCtxs, rhsCtxs, caseConds, comp) =>
             val negCaseConds = negatedConjunction(caseConds)
-            val res = rec(rest, acc :+ (currCase, caseCtxs, rhsCtxs, comp))(using ctxs.withCond(negCaseConds))
-            val noTailRecPls = Ctxs(ctxs.ctxs)
-            res
+            rec(rest, acc :+ (currCase, caseCtxs, rhsCtxs, comp))(using ctxs.withCond(negCaseConds))
         }
     }
 
@@ -1828,6 +1818,7 @@ trait Core extends Definitions { ocbsl =>
     case Signature(Label.BVSignedToUnsigned | Label.BVUnsignedToSigned
                    | Label.BVNarrowingCast(_) | Label.BVWideningCast(_)
                    | Label.BVNot, Seq(e)) => isSimple(e)
+    case Signature(Label.ArraySelect, Seq(a, i)) => isSimple(a) && isSimple(i)
     case _ => ctxs.isBoundDef(c)
   }
 
@@ -1868,28 +1859,21 @@ trait Core extends Definitions { ocbsl =>
               assert(prefix.impureParts.ctxs.size + 1 <= inCtxs.ctxs.size)
               assert(inCtxs.ctxs(prefix.impureParts.ctxs.size) == Ctx.BoundDef(terminal))
 
-//              lazy val sequencingPreserved: Boolean = {
-//                val extras = inCtxs.ctxs.drop(prefix.ctxs.size + 1) // +1 car c'est après ce binding
-//                extras.forall {
-//                  case Ctx.Assumed(_) | Ctx.AssumeLike(_, _) => false // Condition supplémentaire; donc impure
-//                  case Ctx.BoundDef(extra) => inlinedLets(extra)
-//                }
-//              }
-//              if (env.nesting == occurrenceNesting && sequencingPreserved) BindingCase.Inlinable
               if (env.nesting == occurrenceNesting && inCtxs.ctxs.size == prefix.impureParts.ctxs.size + 1) BindingCase.Inlinable
-              else {
-                BindingCase.MustBind
-              }
+              else BindingCase.MustBind
           }
         }
     }
   }
 
+  private val occOfInst = new occOf
   final def occurrencesOf(c: Code)(using env: Env, ctxs: Ctxs): Occurrences =
-    occOf.tryFold(c, Occurrences.empty, ()).merge._1
+    occOfInst.tryFold(c, Occurrences.empty, ()).merge._1
 
-  object occOf extends CodeTryFolder[Nothing, Occurrences] {
+  class occOf extends CodeTryFolder[Nothing, Occurrences] {
     override type Extra = Unit
+
+    private val cache = mutable.Map.empty[(Env, Ctxs, Code), (Occurrences, CodeRes)]
 
     override def tryFoldPatternConditions(patConds: Seq[Code], acc: Occurrences, extra: Unit)
                                          (using Env, Ctxs): Either[Nothing, Occurrences] = Right(acc)
@@ -1897,37 +1881,41 @@ trait Core extends Definitions { ocbsl =>
     override def tryFoldImpl(c: Code, acc: Occurrences, extra: Unit)
                             (using env: Env, ctxs: Ctxs): Either[Nothing, (Occurrences, CodeRes)] = {
       if (ctxs.isBoundDef(c)) Right((acc ++ Occurrences.of(c), CodeRes(c, ctxs)))
-      else if (!CodeRes.isTerminal(c)) {
-        // Remarque: pas de Occurrences.of(c) parce que `c` n'est pas un terminal (c'est un Let ou un AssumeLike)
-        pluggedOccMap.get((env, c)).flatMap(_.get(ctxs)) match {
-          case Some((occs, cr)) =>
-            Right((acc ++ occs, cr))
-          case None =>
-            val cr = tearDown(c)
-            val (occs, plg) = cr.selfPlugged(ctxs)
-            Right((acc ++ occs, cr))
-        }
-      } else {
-        // CodeRes + occurrences, mais sans acc
-        // (on pourrait inclure acc dans les appels récursifs, etc., mais c'est facile de l'oublier
-        // alors on le rajoute tout à la fin)
-        val (occs, cr) = code2sig(c) match {
-          case Signature(Label.Lit(_), Seq()) => (Occurrences.empty, CodeRes(c, ctxs))
-          case Signature(Label.Var(_), Seq()) => (Occurrences.of(c), CodeRes(c, ctxs))
+      else {
+        val (occs, cr) = cache.getOrElseUpdate((env, ctxs, c), {
+          if (!CodeRes.isTerminal(c)) {
+            // Remarque: pas de Occurrences.of(c) parce que `c` n'est pas un terminal (c'est un Let ou un AssumeLike)
+            pluggedOccMap.get((env, c)).flatMap(_.get(ctxs)) match {
+              case Some((occs, cr)) => (occs, cr)
+              case None =>
+                val cr = tearDown(c)
+                val (occs, plg) = cr.selfPlugged(ctxs)
+                (occs, cr)
+            }
+          } else {
+            // CodeRes + occurrences, mais sans acc
+            // (on pourrait inclure acc dans les appels récursifs, etc., mais c'est facile de l'oublier
+            // alors on le rajoute tout à la fin)
+            val (occs, cr) = code2sig(c) match {
+              case Signature(Label.Lit(_), Seq()) => (Occurrences.empty, CodeRes(c, ctxs))
+              case Signature(Label.Var(_), Seq()) => (Occurrences.of(c), CodeRes(c, ctxs))
 
-          case Signature(Label.Application, callee +: args) =>
-            assert(CodeRes.isTerminal(callee))
-            assert(args.forall(CodeRes.isTerminal))
-            val (occCallee0, calleeCr) = tryFold(callee, Occurrences.empty, ()).merge
-            assert(occCallee0(callee) == Occurrence.Once(calleeCr.ctxs.impureParts, env.nesting, OccurrenceKind.Expanded))
-            val occCallee = occCallee0.setAsApplied(callee)
-            val (occArgs, resCr) = tryFoldArgs(args, codeTpe(c), occCallee, ())(mkApp(calleeCr.terminal, _))(using env, calleeCr.ctxs).merge
-            (occArgs ++ Occurrences.of(resCr.terminal)(using env, resCr.ctxs), resCr)
+              case Signature(Label.Application, callee +: args) =>
+                assert(CodeRes.isTerminal(callee))
+                assert(args.forall(CodeRes.isTerminal))
+                val (occCallee0, calleeCr) = tryFold(callee, Occurrences.empty, ()).merge
+                assert(occCallee0(callee) == Occurrence.Once(calleeCr.ctxs.impureParts, env.nesting, OccurrenceKind.Expanded))
+                val occCallee = occCallee0.setAsApplied(callee)
+                val (occArgs, resCr) = tryFoldArgs(args, codeTpe(c), occCallee, ())(mkApp(calleeCr.terminal, _))(using env, calleeCr.ctxs).merge
+                (occArgs ++ Occurrences.of(resCr.terminal)(using env, resCr.ctxs), resCr)
 
-          case _ =>
-            val (occs, cr) = super.tryFoldImpl(c, Occurrences.empty, ()).merge
-            (occs ++ Occurrences.of(cr.terminal)(using env, cr.ctxs), cr)
-        }
+              case _ =>
+                val (occs, cr) = super.tryFoldImpl(c, Occurrences.empty, ()).merge
+                (occs ++ Occurrences.of(cr.terminal)(using env, cr.ctxs), cr)
+            }
+            (occs, cr)
+          }
+        })
         Right((acc ++ occs, cr))
       }
     }
