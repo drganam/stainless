@@ -85,6 +85,8 @@ class Trace(override val s: Trees, override val t: termination.Trees)
         val subCounterexamples = Trace.state.values.flatMap(_.subCounterexamples)
 
         val allCounterexamples = (counterexamples ++ subCounterexamples)
+        println("updating ordring")
+        println(o)
         Trace.ordering = Trace.ordering ++ Map(f.id -> o)
         Trace.ordering = Trace.ordering ++ Map(m.id -> o)
 
@@ -341,9 +343,15 @@ class Trace(override val s: Trees, override val t: termination.Trees)
         //TODO !!!
         //val validswappairs = swappairs.map(elem => (elem._1, elem._2.find(f => f.id.name == elem._1.id.name && checkArgs(elem._1, f) && simpleEvalCheck(elem._1, f, true)).orElse(elem._2.find(f => checkArgs(elem._1, f) && simpleEvalCheck(elem._1, f, true))).orElse(elem._2.find(f => simpleEvalCheck(elem._1, f, true))))).filter(elem => !elem._2.isEmpty)
         val validswappairs = swappairs.map(elem => (elem._1, elem._2.find(f => Range(0, elem._1.params.size).toList.permutations.toList.tail.exists(o => 
+          println(elem._1.params.map(_.tpe).map(_.toString))
+          println(f.params.map(_.tpe).map(_.toString))
+          println(Range(0, f.params.size).map(i => f.params(o(i))).map(_.tpe).map(_.toString))
+          println(o)
           elem._1.params.map(_.tpe).map(_.toString).toList ==
           Range(0, f.params.size).map(i => f.params(o(i))).map(_.tpe).map(_.toString).toList &&
           simpleEvalCheck(elem._1, f, o))))).filter(elem => !elem._2.isEmpty)
+
+        println(validswappairs)
 
 
         validpairs.map(elem => (elem._1, elem._2) match {
