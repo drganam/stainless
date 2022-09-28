@@ -79,21 +79,37 @@ class Trace(override val s: Trees, override val t: termination.Trees)
 
     def generateEqLemma: List[s.FunDef] = {
 
-      def simpleEvalCheck(m: FunDef, f: FunDef, o: List[Int] = Trace.orderings(0)): Boolean = {
+      def simpleEvalCheck(m: FunDef, f: FunDef, o: List[Int]): Boolean = {
 
         val counterexamples = Trace.state.values.map(elem => elem.counterexample).filter(!_.isEmpty).map(elem => elem.get).filterNot(_.counterexample.isEmpty)
         val subCounterexamples = Trace.state.values.flatMap(_.subCounterexamples)
 
         val allCounterexamples = (counterexamples ++ subCounterexamples)
+        Trace.ordering = Trace.ordering ++ Map(f.id -> o)
+        Trace.ordering = Trace.ordering ++ Map(m.id -> o)
 
         println(f.id)
         println(m.id)
 
-        println(allCounterexamples)
-        allCounterexamples.forall(info => {
+        println(allCounterexamples.map(_.counterexample))
+        println(allCounterexamples.size)
+        allCounterexamples.filter{elem => 
+          println("gggggggggggggggggggggggggggggggggggggg")
+          println(elem.counterexample.keys)
+          println(elem.counterexample.keys.toList.map(_.tpe).map(_.toString).toList)
+          println(f.params.map(_.tpe).map(_.toString).toList)
+          println(m.params.map(_.tpe).map(_.toString).toList)
+          elem.counterexample.values.size == f.params.size &&
+          m.params.map(_.tpe).map(_.toString).toList ==
+          elem.counterexample.keys.toList.map(_.tpe).map(_.toString).toList &&
+          elem.counterexample.keys.toList.map(_.tpe).map(_.toString).toList ==
+          Range(0, f.params.size).map(i => f.params(o(i))).map(_.tpe).map(_.toString).toList
+        }.forall(info => {
+          println("jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj")
           val pair = info
           val ref = m
 
+        
           val bval = {
             type ProgramType = Program{val trees: pair.prog.trees.type; val symbols: pair.prog.symbols.type}
             val prog: ProgramType = pair.prog.asInstanceOf[ProgramType]
@@ -128,28 +144,14 @@ class Trace(override val s: Trees, override val t: termination.Trees)
             //println(a.toString == b.toString)
             println("ooooooooooooooooooooooooooooooooooooo")
             println(o)
-            Trace.ordering = o
+            Trace.ordering = Trace.ordering ++ Map(f.id -> o)
+            Trace.ordering = Trace.ordering ++ Map(m.id -> o)
             try {
-
-
-              //a b c
-              //x y z 
-              //1 2 3
-
-              // f is fixed !
-              //f.params: 1 2 3 4 : Bool, Int, Bool, Bool
-              //m.params: 1 2 3 4 : Int, Int, Bool, Bool
-
-              // p1: Int1, Int2, Bool1, Bool2
-              // p2: Int2, Int1, Bool1, Bool2
-              // p3: Int1, Int2, Bool2, Bool1
-              // p4: 
-
               val invocationM = evaluator.program.trees.FunctionInvocation(m.id, Seq(), (m.params zip pair.counterexample).map(_._2).map(_._2))
 
               val a = (f.params zip pair.counterexample).map(_._2).map(_._2)
               val order = o
-              val invocation = evaluator.program.trees.FunctionInvocation(f.id, Seq(), a(order(0))::a(order(1))::a(order(2)) :: Nil)
+              val invocation = evaluator.program.trees.FunctionInvocation(f.id, Seq(), Range(0, a.size).map(i => a(order(i))))
                // else evaluator.program.trees.FunctionInvocation(m.id, Seq(), a)
 
               println(invocation)
@@ -323,21 +325,22 @@ class Trace(override val s: Trees, override val t: termination.Trees)
         val f1Calls = getFunCalls(fd1).filter(!_.flags.exists(_.name == "library"))
         val f2Calls = getFunCalls(fd2).filter(!_.flags.exists(_.name == "library"))
 
-        //Trace.ordering = Trace.orderings(0)
-
         val pairs = f1Calls zip f1Calls.map(m => f2Calls.filter(f => m != f && checkArgsSet(m, f)))
 
         // maps each call from fd1 to its "best" match from fd2
-        val goodpairs = pairs.map(elem => (elem._1, elem._2.find(f => f.id.name == elem._1.id.name && checkArgs(elem._1, f) && simpleEvalCheck(elem._1, f)).orElse(elem._2.find(f => checkArgs(elem._1, f) && simpleEvalCheck(elem._1, f))).orElse(elem._2.find(f => simpleEvalCheck(elem._1, f)))))
+        val goodpairs = pairs.map(elem => (elem._1, elem._2.find(f => f.id.name == elem._1.id.name && checkArgs(elem._1, f) && simpleEvalCheck(elem._1, f, Range(0, elem._1.params.size).toList.permutations.toList(0))).orElse(elem._2.find(f => checkArgs(elem._1, f) && simpleEvalCheck(elem._1, f, Range(0, elem._1.params.size).toList.permutations.toList(0)))).orElse(elem._2.find(f => simpleEvalCheck(elem._1, f, Range(0, elem._1.params.size).toList.permutations.toList(0))))))
         val validpairs = goodpairs.filter(elem => !elem._2.isEmpty)
         val swappairs = pairs.filter(elem => !validpairs.map(_._1).contains(elem._1)) //pairs -- validpairs
         println("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         println(validpairs)
         println("bbbbbbbbbbbbbbbbbbbbbbbbbbbb")
         println(swappairs)
+
+        
+
         //TODO !!!
         //val validswappairs = swappairs.map(elem => (elem._1, elem._2.find(f => f.id.name == elem._1.id.name && checkArgs(elem._1, f) && simpleEvalCheck(elem._1, f, true)).orElse(elem._2.find(f => checkArgs(elem._1, f) && simpleEvalCheck(elem._1, f, true))).orElse(elem._2.find(f => simpleEvalCheck(elem._1, f, true))))).filter(elem => !elem._2.isEmpty)
-        val validswappairs = swappairs.map(elem => (elem._1, elem._2.find(f => Trace.orderings.exists(o => simpleEvalCheck(elem._1, f, o))))).filter(elem => !elem._2.isEmpty)
+        val validswappairs = swappairs.map(elem => (elem._1, elem._2.find(f => Range(0, elem._1.params.size).toList.permutations.toList.tail.exists(o => simpleEvalCheck(elem._1, f, o))))).filter(elem => !elem._2.isEmpty)
 
 
         validpairs.map(elem => (elem._1, elem._2) match {
@@ -382,13 +385,16 @@ class Trace(override val s: Trees, override val t: termination.Trees)
         })
 
         val newParamVars2 = 
-          if (checkArgs(fd1, fd2) && swapping) newParamVars(Trace.ordering(0)) :: newParamVars(Trace.ordering(1)) :: newParamVars(Trace.ordering(2)) :: Nil
+          if (checkArgs(fd1, fd2) && swapping) Range(0, newParamVars.size).map(i => newParamVars(Trace.ordering(fd1.id)(i)))
           else if (checkArgs(fd1, fd2)) newParamVars
           else replacement match {
             case Nil => fd2.params.map{param => newParamVars.find(elem => elem.tpe == param.toVariable.tpe).getOrElse(param.toVariable)}
             case h::t => fd2.params.map{param => newParamVars.find(elem => elem.tpe == param.toVariable.tpe).getOrElse(param.toVariable)}
           }
 
+        // TODO store ordering pair match, not only one, otherwise it gets erased when they stack up
+
+        println("ordering")
         println(Trace.ordering)
         println(newParamVars)
         println(newParamVars2)
@@ -625,22 +631,13 @@ class Trace(override val s: Trees, override val t: termination.Trees)
           val fd = symbols.functions(fi.id)
           val fi1 = if (checkArgs(replacement_fd, fd)) 
             //FunctionInvocation(replacement_id, tps = fi.tps, args = fi.args)
-            val order = Trace.ordering
+            val order = Trace.ordering(fi.id)
             println(order)
             println(fi.args)
-            val args1 = fi.args(0) :: fi.args(2) :: fi.args(1) :: Nil
-            val args2 = fi.args(1) :: fi.args(0) :: fi.args(2) :: Nil
-            val args3 = fi.args(1) :: fi.args(2) :: fi.args(0) :: Nil
-            val args4 = fi.args(2) :: fi.args(1) :: fi.args(0) :: Nil
-            val args5 = fi.args(2) :: fi.args(0) :: fi.args(1) :: Nil
-            val args6 = fi.args(0) :: fi.args(1) :: fi.args(2) :: Nil
 
-            val a = if (args1(order(0))::args1(order(1))::args1(order(2)):: Nil == fi.args) args1 
-                    else if (args2(order(0))::args2(order(1))::args2(order(2)):: Nil == fi.args) args2
-                    else if (args3(order(0))::args3(order(1))::args3(order(2)):: Nil == fi.args) args3
-                    else if (args4(order(0))::args4(order(1))::args4(order(2)):: Nil == fi.args) args4
-                    else if (args5(order(0))::args5(order(1))::args5(order(2)):: Nil == fi.args) args5
-                    else args6
+            val argsPermutations = fi.args.permutations
+
+            val a = argsPermutations.find(a => Range(0, fi.args.size).map(i => a(order(i))) == fi.args).getOrElse(fi.args)
             
             FunctionInvocation(replacement_id, tps = fi.tps, args = a)
             else {
@@ -740,16 +737,7 @@ object Trace {
   def funFirst = eqCheckState == EqCheckState.FunFirst || eqCheckState == EqCheckState.FunFirstWithSublemmas
   def withSublemmas = eqCheckState == EqCheckState.ModelFirstWithSublemmas || eqCheckState == EqCheckState.FunFirstWithSublemmas
 
-  var orderings = List(
-                      List(0, 1, 2),
-                      List(0, 2, 1),
-                      List(1, 0, 2),
-                      List(1, 2, 0),
-                      List(2, 0, 1),
-                      List(2, 1, 0)
-                  )
-
-  var ordering = orderings(0)
+  var ordering: Map[Identifier, List[Int]] = Map()
   var cnt = 0
 
   def apply(ts: Trees, tt: termination.Trees)(using inox.Context): ExtractionPipeline {
