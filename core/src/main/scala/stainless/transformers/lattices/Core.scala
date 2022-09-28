@@ -1220,6 +1220,9 @@ trait Core extends Definitions { ocbsl =>
       case Signature(lab@Label.ADTSelector(_, _, _), Seq(e)) =>
         cr.derived(adtSelect(e, lab, tpe))
 
+      case Signature(Label.FunctionInvocation(fn, Seq()), Seq()) if codePurityInst.fnPurity(fn).isPure =>
+        codeOfExpr(getFunction(fn).fullBody)(using env, cr.ctxs, LetValSubst.empty)
+
       case Signature(Label.ADT(id, tps), args) =>
         // Simplification de ADT(base.fld1, base.fld2, etc.) en base si base est de meme nature que l'adt construite
         val ctor: TypedADTConstructor = getConstructor(id, tps)
@@ -1377,6 +1380,20 @@ trait Core extends Definitions { ocbsl =>
 
       case Signature(Label.BVShiftLeft | Label.BVAShiftRight | Label.BVLShiftRight, Seq(e1, e2)) =>
         if (e2 == zero) cr.derived(e1) else cr
+
+      case Signature(Label.BVWideningCast(bvt), Seq(e)) =>
+        label(e) match {
+          case Label.Lit(bv@BVLiteral(signed, _, _)) =>
+            cr.derived(codeOfLit(BVLiteral(signed, bv.toBigInt, bvt.size)))
+          case _ => cr
+        }
+
+      case Signature(Label.BVNarrowingCast(bvt), Seq(e)) =>
+        label(e) match {
+          case Label.Lit(bv@BVLiteral(signed, _, _)) if fits(bv.toBigInt, bvt) =>
+            cr.derived(codeOfLit(BVLiteral(signed, bv.toBigInt, bvt.size)))
+          case _ => cr
+        }
 
       case MatchExprSig(scrut, cases) =>
         // Voir explication IfExpr
@@ -1819,6 +1836,9 @@ trait Core extends Definitions { ocbsl =>
                    | Label.BVNarrowingCast(_) | Label.BVWideningCast(_)
                    | Label.BVNot, Seq(e)) => isSimple(e)
     case Signature(Label.ArraySelect, Seq(a, i)) => isSimple(a) && isSimple(i)
+    case Signature(Label.FunctionInvocation(id, _), args) => codePurityInst.fnPurity(id).isPure && args.forall(a => label(a).isUnitLiteral)
+    case Signature(Label.Equals | Label.GreaterEquals | Label.GreaterThan | Label.LessEquals | Label.LessThan, Seq(a, b)) => isSimple(a) && isSimple(b)
+    case Signature(Label.Or | Label.Not, args) => args.size <= 2 && args.forall(isSimple)
     case _ => ctxs.isBoundDef(c)
   }
 
@@ -2108,7 +2128,7 @@ trait Core extends Definitions { ocbsl =>
           assert(eargs.size >= 2)
           val recons: (Expr, Expr) => Expr = if (lab == Label.Plus) Plus.apply else Times.apply
           val e1 +: e2 +: rest = eargs
-          rest.foldRight(recons(e1, e2))(recons)
+          rest.foldLeft(recons(e1, e2))(recons)
         case Label.Minus =>
           val Seq(lhs, rhs) = eargs
           Minus(lhs, rhs)
@@ -3137,18 +3157,21 @@ trait Core extends Definitions { ocbsl =>
   final def intLitOfType(lit: BigInt, tpe: Type): Literal[_] = tpe match {
     case IntegerType() => IntegerLiteral(lit)
     case RealType() => FractionLiteral(lit, 1)
-    case BVType(signed, size) =>
-      // BVLiteral guards against signed=true and lit < 0, but not against lit not fitting
-      // into the given bitwidth (it wrap-around)
-      val (loIncl, hiExcl) = {
-        if (signed) (-BigInt(2).pow(size - 1), BigInt(2).pow(size - 1))
-        else (BigInt(0), BigInt(2).pow(size))
-      }
-      if (!(loIncl <= lit && lit < hiExcl)) {
-        sys.error(s"$lit does not fit into $tpe  (with range [$loIncl, $hiExcl[)")
-      }
+    case bvt@BVType(signed, size) =>
+      assert(fits(lit, bvt))
       BVLiteral(signed, lit, size)
     case _ => sys.error(s"$tpe is not an integer-like type")
+  }
+
+  final def fits(lit: BigInt, bvt: BVType): Boolean = {
+    if (bvt.signed && lit < 0) false
+    else {
+      val (loIncl, hiExcl) = {
+        if (bvt.signed) (-BigInt(2).pow(bvt.size - 1), BigInt(2).pow(bvt.size - 1))
+        else (BigInt(0), BigInt(2).pow(bvt.size))
+      }
+      !(loIncl <= lit && lit < hiExcl)
+    }
   }
 
   final def codeOfVarId(v: VarId): Code = codeOfSig(mkVar(v), varTpe(v))

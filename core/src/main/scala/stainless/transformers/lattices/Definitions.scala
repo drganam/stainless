@@ -159,6 +159,11 @@ trait Definitions {
       case _ => false
     }
 
+    def isUnitLiteral: Boolean = this match {
+      case Lit(UnitLiteral()) => true
+      case _ => false
+    }
+
     def isLitOrVar: Boolean = this match {
       case Lit(_) | Var(_) => true
       case _ => false
