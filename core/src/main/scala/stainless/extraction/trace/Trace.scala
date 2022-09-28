@@ -396,7 +396,11 @@ class Trace(override val s: Trees, override val t: termination.Trees)
         })
 
         val newParamVars2 = Trace.ordering.get(fd1.id) match {
-          case Some(o) => Range(0, newParamVars.size).map(i => newParamVars(o(i)))
+          case Some(order) => 
+            //val argsPermutations = newParamVars.permutations
+            //val a = argsPermutations.find(a => Range(0, newParamVars.size).map(i => a(order(i))) == newParamVars).getOrElse(newParamVars)
+            //a 
+            Range(0, newParamVars.size).map(i => newParamVars(a(i)))
           case None => newParamVars
         }
 
@@ -640,11 +644,13 @@ class Trace(override val s: Trees, override val t: termination.Trees)
           val fi1 = //if (checkArgs(replacement_fd, fd)) 
             //FunctionInvocation(replacement_id, tps = fi.tps, args = fi.args)
             val order = Trace.ordering(fi.id)
+            println("secondsecondsecondsecond")
             println(order)
             println(fi.args)
             val argsPermutations = fi.args.permutations
             val a = argsPermutations.find(a => Range(0, fi.args.size).map(i => a(order(i))) == fi.args).getOrElse(fi.args)
             
+            println(FunctionInvocation(replacement_id, tps = fi.tps, args = a))
             FunctionInvocation(replacement_id, tps = fi.tps, args = a)
             // else {
             //   val paramZip = args.zip(symbols.functions(tfd).params.map(_.toVariable))
