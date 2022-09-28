@@ -93,7 +93,7 @@ class Trace(override val s: Trees, override val t: termination.Trees)
 
         println(allCounterexamples.map(_.counterexample))
         println(allCounterexamples.size)
-        allCounterexamples.filter{elem => 
+        val validCounterexamples = allCounterexamples.filter{elem => 
           println("gggggggggggggggggggggggggggggggggggggg")
           println(elem.counterexample.keys)
           println(elem.counterexample.keys.toList.map(_.tpe).map(_.toString).toList)
@@ -104,7 +104,9 @@ class Trace(override val s: Trees, override val t: termination.Trees)
           elem.counterexample.keys.toList.map(_.tpe).map(_.toString).toList &&
           elem.counterexample.keys.toList.map(_.tpe).map(_.toString).toList ==
           Range(0, f.params.size).map(i => f.params(o(i))).map(_.tpe).map(_.toString).toList
-        }.forall(info => {
+        }
+
+        validCounterexamples.forall(info => {
           println("jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj")
           val pair = info
           val ref = m
@@ -328,7 +330,7 @@ class Trace(override val s: Trees, override val t: termination.Trees)
         val pairs = f1Calls zip f1Calls.map(m => f2Calls.filter(f => m != f && checkArgsSet(m, f)))
 
         // maps each call from fd1 to its "best" match from fd2
-        val goodpairs = pairs.map(elem => (elem._1, elem._2.find(f => f.id.name == elem._1.id.name && checkArgs(elem._1, f) && simpleEvalCheck(elem._1, f, Range(0, elem._1.params.size).toList.permutations.toList(0))).orElse(elem._2.find(f => checkArgs(elem._1, f) && simpleEvalCheck(elem._1, f, Range(0, elem._1.params.size).toList.permutations.toList(0)))).orElse(elem._2.find(f => simpleEvalCheck(elem._1, f, Range(0, elem._1.params.size).toList.permutations.toList(0))))))
+        val goodpairs = pairs.map(elem => (elem._1, elem._2.find(f => f.id.name == elem._1.id.name && checkArgs(elem._1, f) && simpleEvalCheck(elem._1, f, Range(0, elem._1.params.size).toList.permutations.toList(0))).orElse(elem._2.find(f => checkArgs(elem._1, f) && simpleEvalCheck(elem._1, f, Range(0, elem._1.params.size).toList.permutations.toList(0))))))
         val validpairs = goodpairs.filter(elem => !elem._2.isEmpty)
         val swappairs = pairs.filter(elem => !validpairs.map(_._1).contains(elem._1)) //pairs -- validpairs
         println("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
@@ -336,11 +338,12 @@ class Trace(override val s: Trees, override val t: termination.Trees)
         println("bbbbbbbbbbbbbbbbbbbbbbbbbbbb")
         println(swappairs)
 
-        
-
         //TODO !!!
         //val validswappairs = swappairs.map(elem => (elem._1, elem._2.find(f => f.id.name == elem._1.id.name && checkArgs(elem._1, f) && simpleEvalCheck(elem._1, f, true)).orElse(elem._2.find(f => checkArgs(elem._1, f) && simpleEvalCheck(elem._1, f, true))).orElse(elem._2.find(f => simpleEvalCheck(elem._1, f, true))))).filter(elem => !elem._2.isEmpty)
-        val validswappairs = swappairs.map(elem => (elem._1, elem._2.find(f => Range(0, elem._1.params.size).toList.permutations.toList.tail.exists(o => simpleEvalCheck(elem._1, f, o))))).filter(elem => !elem._2.isEmpty)
+        val validswappairs = swappairs.map(elem => (elem._1, elem._2.find(f => Range(0, elem._1.params.size).toList.permutations.toList.tail.exists(o => 
+          elem._1.params.map(_.tpe).map(_.toString).toList ==
+          Range(0, f.params.size).map(i => f.params(o(i))).map(_.tpe).map(_.toString).toList &&
+          simpleEvalCheck(elem._1, f, o))))).filter(elem => !elem._2.isEmpty)
 
 
         validpairs.map(elem => (elem._1, elem._2) match {
@@ -384,13 +387,10 @@ class Trace(override val s: Trees, override val t: termination.Trees)
           case LetInSpec(vd, expr) => LetInSpec(vd, specializer.transform(expr))
         })
 
-        val newParamVars2 = 
-          if (checkArgs(fd1, fd2) && swapping) Range(0, newParamVars.size).map(i => newParamVars(Trace.ordering(fd1.id)(i)))
-          else if (checkArgs(fd1, fd2)) newParamVars
-          else replacement match {
-            case Nil => fd2.params.map{param => newParamVars.find(elem => elem.tpe == param.toVariable.tpe).getOrElse(param.toVariable)}
-            case h::t => fd2.params.map{param => newParamVars.find(elem => elem.tpe == param.toVariable.tpe).getOrElse(param.toVariable)}
-          }
+        val newParamVars2 = Trace.ordering.get(fd1.id) match {
+          case Some(o) => Range(0, newParamVars.size).map(i => newParamVars(o(i)))
+          case None => newParamVars
+        }
 
         // TODO store ordering pair match, not only one, otherwise it gets erased when they stack up
 
@@ -629,23 +629,21 @@ class Trace(override val s: Trees, override val t: termination.Trees)
           val replacement_fd = replacement.find((k, v) => k.id == fi.id).get._2
           val replacement_id = replacement_fd.id
           val fd = symbols.functions(fi.id)
-          val fi1 = if (checkArgs(replacement_fd, fd)) 
+          val fi1 = //if (checkArgs(replacement_fd, fd)) 
             //FunctionInvocation(replacement_id, tps = fi.tps, args = fi.args)
             val order = Trace.ordering(fi.id)
             println(order)
             println(fi.args)
-
             val argsPermutations = fi.args.permutations
-
             val a = argsPermutations.find(a => Range(0, fi.args.size).map(i => a(order(i))) == fi.args).getOrElse(fi.args)
             
             FunctionInvocation(replacement_id, tps = fi.tps, args = a)
-            else {
-              val paramZip = args.zip(symbols.functions(tfd).params.map(_.toVariable))
-              val replacement_args1 = replacement_fd.params.map(_.toVariable).map{param => paramZip.find(elem => elem._2.tpe == param.tpe)}
-              val replacement_args: Seq[Expr] = replacement_args1.flatten.map(_._1)
-              FunctionInvocation(replacement_id, tps = fi.tps, args = replacement_args)
-            }
+            // else {
+            //   val paramZip = args.zip(symbols.functions(tfd).params.map(_.toVariable))
+            //   val replacement_args1 = replacement_fd.params.map(_.toVariable).map{param => paramZip.find(elem => elem._2.tpe == param.tpe)}
+            //   val replacement_args: Seq[Expr] = replacement_args1.flatten.map(_._1)
+            //   FunctionInvocation(replacement_id, tps = fi.tps, args = replacement_args)
+            // }
           super.transform(fi1.copiedFrom(fi))
 
         case _ => super.transform(expr)
