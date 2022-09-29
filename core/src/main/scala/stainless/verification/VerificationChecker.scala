@@ -175,7 +175,7 @@ trait VerificationChecker { self =>
         Some(vc -> res)
       }
     }
-//    val keep = Set(
+    val keep = Set(
 //      (57, 13, "body assertion: Inlined precondition of check"),
 //      (493, 18, "body assertion"),
 //      (803, 16, "postcondition"),
@@ -184,7 +184,9 @@ trait VerificationChecker { self =>
 //      (655, 16, "body assertion"),
 //      (803, 16, "postcondition"),
 //      (57, 13, "body assertion: Inlined precondition of check"),
-//    )
+//      (1062, 12, "body assertion"),
+//      (1077, 12, "body assertion"),
+    )
 //    val filteredVcs = vcs.filter { vc =>
 //      keep.exists { case (line, col, label) => vc.getPos.line == line && vc.getPos.col == col && vc.kind.name.startsWith(label) }
 //    }

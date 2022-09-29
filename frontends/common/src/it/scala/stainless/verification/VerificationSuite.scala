@@ -55,6 +55,7 @@ class SMTZ3VerificationSuite extends VerificationSuite {
 
     // TODO: Added
     case "verification/invalid/LambdaEquality2" => Skip
+    case "verification/valid/StateMachine" => Skip // Unsupported unapply with recs
     case "verification/valid/QuantifierUnification" => Skip // Can't verify
     case "verification/invalid/BadConcRope" => Skip // Dud VC times out instead of being falsified
     case "verification/false-valid/ChooseNothing" => Skip // Correctly rejected

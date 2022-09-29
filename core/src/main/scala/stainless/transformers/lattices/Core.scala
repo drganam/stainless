@@ -1306,6 +1306,19 @@ trait Core extends Definitions { ocbsl =>
           case Label.LessThan | Label.GreaterThan => falseCode
         }
         if (e1 == e2) cr.derived(resIfEq)
+        else if (lab == Label.Equals) {
+          (code2sig(e1), code2sig(e2)) match {
+            case (BoolLitSig(b), _) =>
+              assert(codeTpe(e2) == BoolTy)
+              if (b) cr.derived(e2) else cr.derived(negCodeOf(e2))
+            case (_, BoolLitSig(b)) =>
+              assert(codeTpe(e1) == BoolTy)
+              if (b) cr.derived(e1) else cr.derived(negCodeOf(e1))
+            case _ =>
+              if (provablyNeq(e1, e2)) cr.derived(falseCode)
+              else cr
+          }
+        }
         else (code2sig(e1), code2sig(e2)) match {
           case (IntLikeLitSig(b1), IntLikeLitSig(b2)) =>
             val res = lab match {
@@ -1335,7 +1348,7 @@ trait Core extends Definitions { ocbsl =>
           case (IntLikeLitSig(i1), IntLikeLitSig(i2)) =>
             cr.derived(codeOfIntLit(i1 - i2, tpe))
           case (MinusSig(a, IntLikeLitCode(i1)), IntLikeLitSig(i2)) =>
-            val res = codeOfSig(mkMinus(a, codeOfIntLit(i1 - i2, tpe)), tpe)
+            val res = codeOfSig(mkMinus(a, codeOfIntLit(i1 + i2, tpe)), tpe)
             cr.derived(res)
           case (MinusSig(IntLikeLitCode(i1), a), IntLikeLitSig(i2)) =>
             val res = codeOfSig(mkMinus(codeOfIntLit(i1 - i2, tpe), a), tpe)
@@ -2973,6 +2986,13 @@ trait Core extends Definitions { ocbsl =>
 
   //region Misc
 
+  object LitSig {
+    def unapply(sig: Signature): Option[Literal[_]] = sig match {
+      case Signature(Label.Lit(l), _) => Some(l)
+      case _ => None
+    }
+  }
+
   object IntLikeLitSig {
     def unapply(sig: Signature): Option[BigInt] = sig match {
       case Signature(Label.Lit(bv@BVLiteral(_, _, _)), _) => Some(bv.toBigInt)
@@ -3099,6 +3119,22 @@ trait Core extends Definitions { ocbsl =>
     rec(as, init)
   }
 
+  final def provablyNeq(c1: Code, c2: Code): Boolean = {
+    def argsNeq(args1: Seq[Code], args2: Seq[Code]): Boolean =
+      args1.size != args2.size || args1.zip(args2).exists(provablyNeq.tupled)
+
+    (code2sig(c1), code2sig(c2)) match {
+      case (LitSig(l1), LitSig(l2)) => l1 != l2
+      case (Signature(Label.ADT(id1, tps1), args1), Signature(Label.ADT(id2, tps2), args2)) =>
+        id1 != id2 || tps1 != tps2 || argsNeq(args1, args2)
+      case (Signature(Label.FiniteArray(_), elems1), Signature(Label.FiniteArray(_), elems2)) =>
+        argsNeq(elems1, elems2)
+      case (Signature(Label.FiniteSet(_), elems1), Signature(Label.FiniteSet(_), elems2)) =>
+        argsNeq(elems1, elems2)
+      case _ => false
+    }
+  }
+
   // Is `c` an ADT with constructor `id`?
   //   Some(true) - Yes
   //   Some(false) - No
@@ -3188,7 +3224,7 @@ trait Core extends Definitions { ocbsl =>
         if (bvt.signed) (-BigInt(2).pow(bvt.size - 1), BigInt(2).pow(bvt.size - 1))
         else (BigInt(0), BigInt(2).pow(bvt.size))
       }
-      !(loIncl <= lit && lit < hiExcl)
+      loIncl <= lit && lit < hiExcl
     }
   }
 
