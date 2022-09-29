@@ -1498,11 +1498,11 @@ trait Core extends Definitions { ocbsl =>
         case _ => cstFold(rest, acc :+ h, cst)
       }
     }
-    def recons(terms0: Seq[Code]): Code = {
+    def recons(terms0: Seq[Code], sort: Boolean): Code = {
       assert(terms0.nonEmpty)
       if (terms0.size == 1) terms0.head
       else {
-        val terms = terms0.sorted
+        val terms = if (sort) terms0.sorted else terms0
         val sig = if (op == Label.Plus) mkPlus(terms) else mkTimes(terms)
         codeOfSig(sig, tpe)
       }
@@ -1512,8 +1512,9 @@ trait Core extends Definitions { ocbsl =>
     val (nonLits, cst) = cstFold(terms, Seq.empty, neutral)
     lazy val cstCode = codeOfIntLit(cst, tpe)
     if (nonLits.isEmpty) cstCode
-    else if (cst == neutral) recons(nonLits)
-    else recons(nonLits :+ cstCode)
+    else if (terms == nonLits && cst == neutral) recons(Seq(lhs, rhs), sort = false) // En gros, si on n'a rien fait, on retourne l'original, sans sort, car sort peut causer des "ennuis" lorsque l'on mélange multiplication et addition...
+    else if (cst == neutral) recons(nonLits, sort = true)
+    else recons(nonLits :+ cstCode, sort = true)
   }
 
   enum SimplifiedCase {
