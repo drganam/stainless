@@ -96,16 +96,16 @@ class Trace(override val s: Trees, override val t: termination.Trees)
         println(allCounterexamples.map(_.counterexample))
         println(allCounterexamples.size)
         val validCounterexamples = allCounterexamples.filter{elem => 
-          println("gggggggggggggggggggggggggggggggggggggg")
-          println(elem.counterexample.keys)
-          println(elem.counterexample.keys.toList.map(_.tpe).map(_.toString).toList)
-          println(f.params.map(_.tpe).map(_.toString).toList)
-          println(m.params.map(_.tpe).map(_.toString).toList)
-          elem.counterexample.values.size == f.params.size &&
-          m.params.map(_.tpe).map(_.toString).toList ==
-          elem.counterexample.keys.toList.map(_.tpe).map(_.toString).toList &&
-          elem.counterexample.keys.toList.map(_.tpe).map(_.toString).toList ==
-          Range(0, f.params.size).map(i => f.params(o(i))).map(_.tpe).map(_.toString).toList
+          // println("gggggggggggggggggggggggggggggggggggggg")
+          // println(elem.counterexample.keys)
+          // println(elem.counterexample.keys.toList.map(_.tpe).map(_.toString).toList)
+          // println(f.params.map(_.tpe).map(_.toString).toList)
+          // println(m.params.map(_.tpe).map(_.toString).toList)
+          elem.counterexample.values.size == f.params.size //&&
+          // m.params.map(_.tpe).map(_.toString).toList ==
+          // elem.counterexample.keys.toList.map(_.tpe).map(_.toString).toList &&
+          // elem.counterexample.keys.toList.map(_.tpe).map(_.toString).toList ==
+          // Range(0, f.params.size).map(i => f.params(o(i))).map(_.tpe).map(_.toString).toList
         }
 
         validCounterexamples.forall(info => {
@@ -151,12 +151,12 @@ class Trace(override val s: Trees, override val t: termination.Trees)
             Trace.ordering = Trace.ordering ++ Map(f.id -> o)
             Trace.ordering = Trace.ordering ++ Map(m.id -> o)
             try {
-              val invocationM = evaluator.program.trees.FunctionInvocation(m.id, Seq(), (m.params zip pair.counterexample).map(_._2).map(_._2))
 
               val a = (f.params zip pair.counterexample).map(_._2).map(_._2)
               val order = o
               val invocation = evaluator.program.trees.FunctionInvocation(f.id, Seq(), Range(0, a.size).map(i => a(order(i))))
                // else evaluator.program.trees.FunctionInvocation(m.id, Seq(), a)
+              val invocationM = evaluator.program.trees.FunctionInvocation(m.id, Seq(), (m.params zip pair.counterexample).map(_._2).map(_._2))
 
               println(invocation)
               println(invocationM)
@@ -343,12 +343,12 @@ class Trace(override val s: Trees, override val t: termination.Trees)
         //TODO !!!
         //val validswappairs = swappairs.map(elem => (elem._1, elem._2.find(f => f.id.name == elem._1.id.name && checkArgs(elem._1, f) && simpleEvalCheck(elem._1, f, true)).orElse(elem._2.find(f => checkArgs(elem._1, f) && simpleEvalCheck(elem._1, f, true))).orElse(elem._2.find(f => simpleEvalCheck(elem._1, f, true))))).filter(elem => !elem._2.isEmpty)
         val validswappairs = swappairs.map(elem => (elem._1, elem._2.find(f => Range(0, elem._1.params.size).toList.permutations.toList.tail.exists(o => 
-          println(elem._1.params.map(_.tpe).map(_.toString))
           println(f.params.map(_.tpe).map(_.toString))
-          println(Range(0, f.params.size).map(i => f.params(o(i))).map(_.tpe).map(_.toString))
+          println(elem._1.params.map(_.tpe).map(_.toString))
+          println(Range(0, elem._1.params.size).map(i => elem._1.params(o(i))).map(_.tpe).map(_.toString))
           println(o)
-          elem._1.params.map(_.tpe).map(_.toString).toList ==
-          Range(0, f.params.size).map(i => f.params(o(i))).map(_.tpe).map(_.toString).toList &&
+          f.params.map(_.tpe).map(_.toString).toList ==
+          Range(0, elem._1.params.size).map(i => elem._1.params(o(i))).map(_.tpe).map(_.toString).toList &&
           simpleEvalCheck(elem._1, f, o))))).filter(elem => !elem._2.isEmpty)
 
         println(validswappairs)
@@ -400,7 +400,7 @@ class Trace(override val s: Trees, override val t: termination.Trees)
             //val argsPermutations = newParamVars.permutations
             //val a = argsPermutations.find(a => Range(0, newParamVars.size).map(i => a(order(i))) == newParamVars).getOrElse(newParamVars)
             //a 
-            Range(0, newParamVars.size).map(i => newParamVars(a(i)))
+            Range(0, newParamVars.size).map(i => newParamVars(order(i)))
           case None => newParamVars
         }
 
@@ -649,7 +649,7 @@ class Trace(override val s: Trees, override val t: termination.Trees)
             println(fi.args)
             val argsPermutations = fi.args.permutations
             val a = argsPermutations.find(a => Range(0, fi.args.size).map(i => a(order(i))) == fi.args).getOrElse(fi.args)
-            
+            //val a =  Range(0, fi.args.size).map(i => fi.args(order(i)))
             println(FunctionInvocation(replacement_id, tps = fi.tps, args = a))
             FunctionInvocation(replacement_id, tps = fi.tps, args = a)
             // else {
