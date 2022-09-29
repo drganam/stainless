@@ -175,6 +175,19 @@ trait VerificationChecker { self =>
         Some(vc -> res)
       }
     }
+//    val keep = Set(
+//      (57, 13, "body assertion: Inlined precondition of check"),
+//      (493, 18, "body assertion"),
+//      (803, 16, "postcondition"),
+//      (1081, 12, "body assertion"),
+//      (307, 18, "body assertion"),
+//      (655, 16, "body assertion"),
+//      (803, 16, "postcondition"),
+//      (57, 13, "body assertion: Inlined precondition of check"),
+//    )
+//    val filteredVcs = vcs.filter { vc =>
+//      keep.exists { case (line, col, label) => vc.getPos.line == line && vc.getPos.col == col && vc.kind.name.startsWith(label) }
+//    }
 //    val poi = 4713+3
 //    val results = Future.traverse(vcs.drop(poi - 1)) { vc =>
     val results = Future.traverse(vcs) { vc =>
@@ -186,6 +199,7 @@ trait VerificationChecker { self =>
     }.map(_.flatten)
 
     results.map(initMap ++ _)
+//    results.map(_.toMap)
   }
 
   /** Check whether the model for the ADT invariant specified by the given (invalid) VC is

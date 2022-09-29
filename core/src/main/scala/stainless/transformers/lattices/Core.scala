@@ -1328,12 +1328,18 @@ trait Core extends Definitions { ocbsl =>
       case Signature(lab@(Label.Plus | Label.Times), Seq(e1, e2)) =>
         cr.derived(simplifyAssocArith(lab, e1, e2))
 
-      case Signature(Label.Minus, Seq(e1, e2)) =>
-        assert(codeTpe(e1) == codeTpe(e2))
+      case MinusSig(e1, e2) =>
+        assert(codeTpe(e1) == tpe && codeTpe(e1) == codeTpe(e2))
         if (e1 == e2) cr.derived(zero)
         else (code2sig(e1), code2sig(e2)) match {
           case (IntLikeLitSig(i1), IntLikeLitSig(i2)) =>
-            cr.derived(codeOfIntLit(i1 - i2, codeTpe(e1)))
+            cr.derived(codeOfIntLit(i1 - i2, tpe))
+          case (MinusSig(a, IntLikeLitCode(i1)), IntLikeLitSig(i2)) =>
+            val res = codeOfSig(mkMinus(a, codeOfIntLit(i1 - i2, tpe)), tpe)
+            cr.derived(res)
+          case (MinusSig(IntLikeLitCode(i1), a), IntLikeLitSig(i2)) =>
+            val res = codeOfSig(mkMinus(codeOfIntLit(i1 - i2, tpe), a), tpe)
+            cr.derived(res)
           case _ => cr
         }
 
@@ -1823,23 +1829,24 @@ trait Core extends Definitions { ocbsl =>
   }
 
   final def isSimple(c: Code)(using ctxs: Ctxs): Boolean = code2sig(c) match {
+    case _ if ctxs.isBoundDef(c) => true
     case Signature(Label.Lit(_) | Label.Var(_), Seq()) => true
     case Signature(Label.ADTSelector(_, _, _), Seq(e)) => isSimple(e)
     case Signature(Label.TupleSelect(_), Seq(e)) => isSimple(e)
     case Signature(Label.ArrayLength, Seq(e)) => isSimple(e)
     case Signature(Label.ADT(_, _), args) => args.isEmpty
-    case Signature(Label.Plus | Label.Minus | Label.Times | Label.Division
+    case Signature(Label.Or | Label.Not
+                   | Label.Equals | Label.GreaterEquals | Label.GreaterThan | Label.LessEquals | Label.LessThan
+                   | Label.Plus | Label.Minus | Label.Times | Label.Division
                    | Label.Modulo | Label.Remainder
                    | Label.BVAnd | Label.BVOr | Label.BVXor | Label.BVShiftLeft
-                   | Label.BVAShiftRight | Label.BVLShiftRight, Seq(lhs, rhs)) => isLit(lhs) || isLit(rhs)
+                   | Label.BVAShiftRight | Label.BVLShiftRight, args) => args.size <= 2 && args.forall(isSimple)
     case Signature(Label.BVSignedToUnsigned | Label.BVUnsignedToSigned
                    | Label.BVNarrowingCast(_) | Label.BVWideningCast(_)
                    | Label.BVNot, Seq(e)) => isSimple(e)
     case Signature(Label.ArraySelect, Seq(a, i)) => isSimple(a) && isSimple(i)
     case Signature(Label.FunctionInvocation(id, _), args) => codePurityInst.fnPurity(id).isPure && args.forall(a => label(a).isUnitLiteral)
-    case Signature(Label.Equals | Label.GreaterEquals | Label.GreaterThan | Label.LessEquals | Label.LessThan, Seq(a, b)) => isSimple(a) && isSimple(b)
-    case Signature(Label.Or | Label.Not, args) => args.size <= 2 && args.forall(isSimple)
-    case _ => ctxs.isBoundDef(c)
+    case _ => false
   }
 
   final def needsBinding(terminal: Code, terminalComposition: Occurrences, bodyOccurrences: Occurrences)(using env: Env, prefix: Ctxs): BindingCase = {
@@ -1853,7 +1860,7 @@ trait Core extends Definitions { ocbsl =>
         else {
           val definitionOccurrence = bodyOccurrences(terminal)
           lazy val negatedDefOccurrence = negCodeCache.get(terminal).map(bodyOccurrences.apply).getOrElse(Occurrence.Zero)
-          val terminalIsPure = codePurity(terminal)
+          lazy val terminalIsPure = codePurity(terminal)
           definitionOccurrence match {
             case Occurrence.Many =>
               if (!isLambda(terminal) && isSimple(terminal)) BindingCase.Inlinable
@@ -2970,6 +2977,17 @@ trait Core extends Definitions { ocbsl =>
     def unapply(sig: Signature): Option[BigInt] = sig match {
       case Signature(Label.Lit(bv@BVLiteral(_, _, _)), _) => Some(bv.toBigInt)
       case Signature(Label.Lit(IntegerLiteral(v)), _) => Some(v)
+      case _ => None
+    }
+  }
+
+  object IntLikeLitCode {
+    def unapply(c: Code): Option[BigInt] = IntLikeLitSig.unapply(code2sig(c))
+  }
+
+  object MinusSig {
+    def unapply(sig: Signature): Option[(Code, Code)] = sig match {
+      case Signature(Label.Minus, Seq(a, b)) => Some((a, b))
       case _ => None
     }
   }
