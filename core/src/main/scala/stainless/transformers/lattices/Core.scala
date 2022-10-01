@@ -528,14 +528,15 @@ trait Core extends Definitions { ocbsl =>
           if (debug) {
             // Pour comparer les occurrences, on enlève les "simples" car ceux-ci peuvent apparaitre une ou plrs fois
             // sans pour autant changer le code final car ceux-ci ne sont pas bound
-            val u2WithoutSimple = Occurrences(u2.c2u.filter {
-              case (c, _) => !isSimple(c)(using inCtxs)
-            })
+            // TODO: -> non, on remove les "mayDuplicate"
+            val u2WithoutSimple = Occurrences(u2.c2u.filter(_._2.isOnce))
+//              case (c, _) => !mayDuplicate(c)(using inCtxs)
+//            })
             val alreadyThere = currEntry.get(inCtxs)
             val got = alreadyThere.map { case (expected0, _) =>
-              val expected = Occurrences(expected0.c2u.filter {
-                case (c, _) => !isSimple(c)(using inCtxs)
-              })
+              val expected = Occurrences(expected0.c2u.filter(_._2.isOnce))
+//                case (c, _) => !mayDuplicate(c)(using inCtxs)
+//              })
               val eq = u2WithoutSimple.c2u.toSet.intersect(expected.c2u.toSet)
               val diff = (u2WithoutSimple.c2u.toSet ++ expected.c2u.toSet) -- eq
               (expected, eq, diff)
@@ -1342,17 +1343,43 @@ trait Core extends Definitions { ocbsl =>
         cr.derived(simplifyAssocArith(lab, e1, e2))
 
       case MinusSig(e1, e2) =>
+        def minus1(a: Code, lit: BigInt): CodeRes = {
+          val res =
+            if (lit == 0) a
+            else codeOfSig(mkMinus(a, codeOfIntLit(lit, tpe)), tpe)
+          cr.derived(res)
+        }
+        def minus2(lit: BigInt, a: Code): CodeRes = {
+          val res =
+            if (lit == 0) codeOfSig(mkUMinus(a), tpe)
+            else codeOfSig(mkMinus(codeOfIntLit(lit, tpe), a), tpe)
+          cr.derived(res)
+        }
+        def plus(a: Code, lit: BigInt): CodeRes = {
+          val res =
+            if (lit == 0) a
+            else codeOfSig(mkPlus(a, codeOfIntLit(lit, tpe)), tpe)
+          cr.derived(res)
+        }
+
         assert(codeTpe(e1) == tpe && codeTpe(e1) == codeTpe(e2))
         if (e1 == e2) cr.derived(zero)
         else (code2sig(e1), code2sig(e2)) match {
           case (IntLikeLitSig(i1), IntLikeLitSig(i2)) =>
             cr.derived(codeOfIntLit(i1 - i2, tpe))
+
           case (MinusSig(a, IntLikeLitCode(i1)), IntLikeLitSig(i2)) =>
-            val res = codeOfSig(mkMinus(a, codeOfIntLit(i1 + i2, tpe)), tpe)
-            cr.derived(res)
+            minus1(a, i1 + i2)
+
           case (MinusSig(IntLikeLitCode(i1), a), IntLikeLitSig(i2)) =>
-            val res = codeOfSig(mkMinus(codeOfIntLit(i1 - i2, tpe), a), tpe)
-            cr.derived(res)
+            minus2(i1 - i2, a)
+
+          case (PlusSig(a, IntLikeLitCode(i1)), IntLikeLitSig(i2)) =>
+            plus(a, i1 - i2)
+
+          case (PlusSig(IntLikeLitCode(i1), a), IntLikeLitSig(i2)) =>
+            plus(a, i1 - i2)
+
           case _ => cr
         }
 
@@ -1842,24 +1869,29 @@ trait Core extends Definitions { ocbsl =>
     case MustBind // ... the `e` must be bound (appears in `body` if pure, may not appear if impure)
   }
 
-  final def isSimple(c: Code)(using ctxs: Ctxs): Boolean = code2sig(c) match {
-    case _ if ctxs.isBoundDef(c) => true
+  final def isSimple(c: Code, bodyOccurrences: Occurrences)(using ctxs: Ctxs): Boolean = code2sig(c) match {
+    case _ if !bodyOccurrences(c).isMany => true
     case Signature(Label.Lit(_) | Label.Var(_), Seq()) => true
-    case Signature(Label.ADTSelector(_, _, _), Seq(e)) => isSimple(e)
-    case Signature(Label.TupleSelect(_), Seq(e)) => isSimple(e)
-    case Signature(Label.ArrayLength, Seq(e)) => isSimple(e)
+    case Signature(Label.ADTSelector(_, _, _), Seq(e)) => isSimple(e, bodyOccurrences)
+    case Signature(Label.TupleSelect(_), Seq(e)) => isSimple(e, bodyOccurrences)
+    case Signature(Label.ArrayLength, Seq(e)) => isSimple(e, bodyOccurrences)
     case Signature(Label.ADT(_, _), args) => args.isEmpty
+    case Signature(Label.ArraySelect, Seq(a, i)) => isSimple(a, bodyOccurrences) && isSimple(i, bodyOccurrences)
+    case Signature(Label.FunctionInvocation(id, _), args) => codePurityInst.fnPurity(id).isPure && args.forall(a => label(a).isUnitLiteral)
+    case _ => false
+  }
+
+  final def mayDuplicate(c: Code, bodyOccurrences: Occurrences)(using ctxs: Ctxs): Boolean = code2sig(c) match {
+    case _ if isSimple(c, bodyOccurrences) => true
     case Signature(Label.Or | Label.Not
                    | Label.Equals | Label.GreaterEquals | Label.GreaterThan | Label.LessEquals | Label.LessThan
                    | Label.Plus | Label.Minus | Label.Times | Label.Division
                    | Label.Modulo | Label.Remainder
                    | Label.BVAnd | Label.BVOr | Label.BVXor | Label.BVShiftLeft
-                   | Label.BVAShiftRight | Label.BVLShiftRight, args) => args.size <= 2 && args.forall(isSimple)
+                   | Label.BVAShiftRight | Label.BVLShiftRight, args) => args.size <= 2 && args.forall(isSimple(_, bodyOccurrences))
     case Signature(Label.BVSignedToUnsigned | Label.BVUnsignedToSigned
                    | Label.BVNarrowingCast(_) | Label.BVWideningCast(_)
-                   | Label.BVNot, Seq(e)) => isSimple(e)
-    case Signature(Label.ArraySelect, Seq(a, i)) => isSimple(a) && isSimple(i)
-    case Signature(Label.FunctionInvocation(id, _), args) => codePurityInst.fnPurity(id).isPure && args.forall(a => label(a).isUnitLiteral)
+                   | Label.BVNot, Seq(e)) => isSimple(e, bodyOccurrences)
     case _ => false
   }
 
@@ -1877,7 +1909,7 @@ trait Core extends Definitions { ocbsl =>
           lazy val terminalIsPure = codePurity(terminal)
           definitionOccurrence match {
             case Occurrence.Many =>
-              if (!isLambda(terminal) && isSimple(terminal)) BindingCase.Inlinable
+              if (!isLambda(terminal) && mayDuplicate(terminal, bodyOccurrences)) BindingCase.Inlinable
               else BindingCase.MustBind
             case Occurrence.Zero =>
               // Si une expr impure n'apparait pas dans le body, on ne peut pas l'éliminer, il faut donc le bind
@@ -3004,6 +3036,13 @@ trait Core extends Definitions { ocbsl =>
 
   object IntLikeLitCode {
     def unapply(c: Code): Option[BigInt] = IntLikeLitSig.unapply(code2sig(c))
+  }
+
+  object PlusSig {
+    def unapply(sig: Signature): Option[(Code, Code)] = sig match {
+      case Signature(Label.Plus, Seq(a, b)) => Some((a, b))
+      case _ => None
+    }
   }
 
   object MinusSig {
