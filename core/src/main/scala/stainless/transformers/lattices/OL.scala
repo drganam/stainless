@@ -44,6 +44,9 @@ trait OL extends Core {
       case (LtSig(lhs1, rhs1), LeqSig(lhs2, rhs2)) => lhs1 == lhs2 && rhs1 == rhs2
       case (GtSig(lhs1, rhs1), GeqSig(lhs2, rhs2)) => lhs1 == lhs2 && rhs1 == rhs2
 
+      case (LtSig(lhs1, rhs1), NotSig(EqCode(lhs2, rhs2))) => lhs1 == lhs2 && rhs1 == rhs2
+      case (GtSig(lhs1, rhs1), NotSig(EqCode(lhs2, rhs2))) => lhs1 == lhs2 && rhs1 == rhs2
+
       case _ => false
     })
   }
@@ -95,22 +98,27 @@ trait OL extends Core {
   // (On note les disjunctions phi_1,...,phi_n)
   // S'il existe un i t.q.
   //   ¬phi_i <= \/_j phi_j    (1)
-  // alors on retourne l'indice k t.q.
+  // alors on retourne l'indice max(i, k) t.q.
   //   ¬phi_i <= phi_k         (2)
   //
   // Remarque: on obtient que:
-  //   ¬phi_i \/ \/_j phi_j === \/_j phi_j
-  //                        === true (par ¬phi_i \/ phi_i)
+  //   ¬phi_i \/ \/_j phi_j === true        (par ¬phi_i \/ phi_i)
+  //                        === \/_j phi_j  (par (1))
   // C-à-d l'existence de i par (1) nous indique que \/_j phi_j === true
   // Comme dans notre application, on ne peut pas drop tous les phi_j (en raison de la présence des exprs impures)
   // on est intéressé à trouver un k t.q. \/_j<=k phi_j === true (on pourra alors drop tout ce qui vient après ce k)
-  // C'est précisément le k de (2) qui nous intéresse
+  // C'est précisément le max(i, k) de (2) qui nous intéresse
   // En effet, par (1), on a ¬phi_i <= \/_j phi_j ==> il existe un k t.q. ¬phi_i <= phi_k
   // (voir définition <= cas disjonction sur la droite)
   override final def checkForDisjunctionContradiction(disjs: Seq[Code])(using Env, Ctxs): Option[Int] = {
     assert(disjs.size >= 2)
     val negDisjs = disjs map negCodeOf
-    findMap(negDisjs)(negPhiI => indexWhereOpt(disjs)(phiJ => latticesLeq(negPhiI, phiJ)))
+    val disjsCode = codeOfDisjs(disjs)
+    for {
+      i <- indexWhereOpt(negDisjs)(latticesLeq(_, disjsCode))
+      negPhiI = negDisjs(i)
+      k <- indexWhereOpt(disjs)(latticesLeq(negPhiI, _))
+    } yield math.max(i, k)
   }
 }
 

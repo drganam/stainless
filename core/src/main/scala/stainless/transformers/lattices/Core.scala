@@ -3077,6 +3077,13 @@ trait Core extends Definitions { ocbsl =>
     }
   }
 
+  object EqCode {
+    def unapply(c: Code): Option[(Code, Code)] = code2sig(c) match {
+      case Signature(Label.Equals, Seq(lhs, rhs)) => Some((lhs, rhs))
+      case _ => None
+    }
+  }
+
   object LeqSig {
     def unapply(sig: Signature): Option[(Code, Code)] = sig match {
       case Signature(Label.LessEquals, Seq(lhs, rhs)) => Some((lhs, rhs))
@@ -3101,6 +3108,13 @@ trait Core extends Definitions { ocbsl =>
   object GtSig {
     def unapply(sig: Signature): Option[(Code, Code)] = sig match {
       case Signature(Label.GreaterThan, Seq(lhs, rhs)) => Some((lhs, rhs))
+      case _ => None
+    }
+  }
+
+  object NotSig {
+    def unapply(sig: Signature): Option[Code] = sig match {
+      case Signature(Label.Not, Seq(c)) => Some(c)
       case _ => None
     }
   }
