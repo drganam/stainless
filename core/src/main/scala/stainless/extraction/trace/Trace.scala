@@ -313,19 +313,17 @@ class Trace(override val s: Trees, override val t: termination.Trees)
       // res._1 sublemma + its sublemmas and replacement
       // res._2 and res._3 map for replacement
       def makeSublemmas(fd1: s.FunDef, fd2: s.FunDef): List[(List[s.FunDef], List[s.FunDef], List[s.FunDef])] = {
-        val f1Calls = getFunCalls(fd1)//.filter(!_.flags.exists(_.name == "library"))
-        val f2Calls = getFunCalls(fd2)//.filter(!_.flags.exists(_.name == "library"))
+        val f1Calls = getFunCalls(fd1).filter(!_.flags.exists(_.name == "library"))
+        val f2Calls = getFunCalls(fd2).filter(!_.flags.exists(_.name == "library"))
 
 
         val pairs = f1Calls zip f1Calls.map(m => f2Calls.filter(f => m != f && checkArgsSet(m, f)))
         //val pairs = f1Calls zip f1Calls.map(m => f2Calls.filter(f => checkArgsSet(m, f)))
-        println(pairs)
 
         // maps each call from fd1 to its "best" match from fd2
-        val goodpairs = if (Trace.state.keys.toList.contains(fd2.id) && Trace.state(fd2.id).prevModels.contains(fd1.id)) List()
-                        else pairs.map(elem => (elem._1, elem._2.find(f => f.id.name == elem._1.id.name && checkArgs(elem._1, f) && simpleEvalCheck(elem._1, f, Range(0, elem._1.params.size).toList.permutations.toList(0))).orElse(elem._2.find(f => checkArgs(elem._1, f) && simpleEvalCheck(elem._1, f, Range(0, elem._1.params.size).toList.permutations.toList(0))))))
+        val goodpairs = pairs.map(elem => (elem._1, elem._2.find(f => f.id.name == elem._1.id.name && checkArgs(elem._1, f) && simpleEvalCheck(elem._1, f, Range(0, elem._1.params.size).toList.permutations.toList(0))).orElse(elem._2.find(f => checkArgs(elem._1, f) && simpleEvalCheck(elem._1, f, Range(0, elem._1.params.size).toList.permutations.toList(0))))))
         val validpairs = goodpairs.filter(elem => !elem._2.isEmpty)
-
+        
         val swappairs = pairs.filter(elem => !validpairs.map(_._1).contains(elem._1)) //pairs -- validpairs
 
         
@@ -336,9 +334,6 @@ class Trace(override val s: Trees, override val t: termination.Trees)
           f.params.map(_.tpe).map(_.toString).toList ==
           Range(0, elem._1.params.size).map(i => elem._1.params(o(i))).map(_.tpe).map(_.toString).toList &&
           simpleEvalCheck(elem._1, f, o))))).filter(elem => !elem._2.isEmpty)
-
-        println(validpairs)
-        println(validswappairs)
 
         validpairs.map(elem => (elem._1, elem._2) match {
           case (m, Some(f)) => 
@@ -784,8 +779,8 @@ object Trace {
       case x::xs => {
         val n = 3
         //TODO decision - probably keep like this
-        //tmpModels = allModels.toList.sortBy(m => -m._2).map(_._1).filterNot(state(x).prevModels.contains).take(n)
-        tmpModels = allModels.toList.sortBy(m => -m._2).map(_._1).take(n)
+        tmpModels = allModels.toList.sortBy(m => -m._2).map(_._1).filterNot(state(x).prevModels.contains).take(n)
+        //tmpModels = allModels.toList.sortBy(m => -m._2).map(_._1).take(n)
 
         if(tmpModels.isEmpty) tmpModels = allModels.keys.take(1).toList
         nextModel
@@ -835,7 +830,7 @@ object Trace {
           val counterexample = counterex.vars
           val existing = false
           val fromEval = false
-          val fromFunction = funFirst || function.get == fun
+          val fromFunction = funFirst || (function != None && function.get == fun)
       })
 
     if (isMainCounterexample(fun)) tmpCounterexample = c
