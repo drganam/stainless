@@ -18,7 +18,7 @@ object optVCCache extends inox.FlagOptionDef("vc-cache", true)
 object optSimplifier extends inox.OptionDef[SimplifierKind] {
   override val name: String = "simplifier"
 
-  def default: SimplifierKind = SimplifierKind.OCBSL  // TODO: Set default to Vanilla once done
+  def default: SimplifierKind = SimplifierKind.Vanilla
 
   def parser: inox.OptionParsers.OptionParser[SimplifierKind] = SimplifierKind.tryFromString
 
