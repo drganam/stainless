@@ -725,7 +725,7 @@ object Trace {
   }
 
   def setModels(m: List[Identifier]) = {
-    allModels = m.map(elem => (elem, 100)).toMap
+    allModels = m.map(elem => (elem, 200)).toMap
     tmpModels = m
     clusters = (m zip m.map(_ => Nil)).toMap
     state = state ++ (m zip m.map(_ => State(None, None, List(), List()))).toMap
