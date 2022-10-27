@@ -672,7 +672,8 @@ object Trace {
   var unknowns: List[Identifier] = List()   // timeout
   var wrong: List[Identifier] = List()      // bad signature
 
-  var allModels: Map[Identifier, Int] = Map()
+  //var allModels: Map[Identifier, Int] = Map()
+  var allModels: List[Identifier] = List()
   var tmpModels: List[Identifier] = List()
 
   var allFunctions: List[Identifier] = List()
@@ -725,7 +726,7 @@ object Trace {
   }
 
   def setModels(m: List[Identifier]) = {
-    allModels = m.map(elem => (elem, 100)).toMap
+    allModels = m//.map(elem => (elem, 100)).toMap
     tmpModels = m
     clusters = (m zip m.map(_ => Nil)).toMap
     state = state ++ (m zip m.map(_ => State(None, None, List(), List()))).toMap
@@ -779,10 +780,10 @@ object Trace {
       case x::xs => {
         val n = 3
         //TODO decision - probably keep like this
-        tmpModels = allModels.toList.sortBy(m => -m._2).map(_._1).filterNot(state(x).prevModels.contains).take(n)
+        tmpModels = allModels//.toList.sortBy(m => -m._2).map(_._1).filterNot(state(x).prevModels.contains).take(n)
         //tmpModels = allModels.toList.sortBy(m => -m._2).map(_._1).take(n)
 
-        if(tmpModels.isEmpty) tmpModels = allModels.keys.take(1).toList
+        if(tmpModels.isEmpty) tmpModels = allModels.take(1).toList
         nextModel
         tmpFunctions = xs
         function = Some(x)
@@ -871,7 +872,7 @@ object Trace {
 
     if(isDone && unknowns.size < cnt) {
       cnt = unknowns.size
-      tmpModels = allModels.keys.toList
+      tmpModels = allModels//.keys.toList
       tmpFunctions = unknowns.reverse
       unknowns = List()
       nextFunction
@@ -902,7 +903,7 @@ object Trace {
 
   // if there is a new state go there, otherwise report as unknown
   private def reportUnknown = {
-    allModels = allModels.updated(model.get, allModels(model.get) - 1)
+    //allModels = allModels.updated(model.get, allModels(model.get) - 1)
     if (isFinalEqCheckState) {
       resetEqCheckState
       nextModel
@@ -921,12 +922,12 @@ object Trace {
     if(funFirst) flippedcounter = flippedcounter + 1
     resetEqCheckState
 
-    if (!allModels.keys.toList.contains(function.get)) {
+    if (!allModels.toList.contains(function.get)) {
       state(function.get).directModel = model
 
-      val inc = if (allModels(model.get) > 0) 20 else 100
-      allModels = allModels.updated(model.get, allModels(model.get) + inc)
-      allModels = (allModels + (function.get -> 0))
+      //val inc = if (allModels(model.get) > 0) 20 else 100
+      //allModels = allModels.updated(model.get, allModels(model.get) + inc)
+      allModels = (allModels ++ List(function.get)) // (function.get -> 0))
 
       clusters = clusters + (function.get -> List())
     }
@@ -957,7 +958,7 @@ object Trace {
     import ctx.{ reporter, timers }
     if(!clusters.isEmpty || !errors.isEmpty || !unknowns.isEmpty || !wrong.isEmpty) {
       reporter.info(s"Printing equivalence checking results:")
-      allModels.keys.foreach(model => if (!clusters(model).isEmpty) {
+      allModels.foreach(model => if (!clusters(model).isEmpty) {
         val l = clusters(model).map(CheckFilter.fixedFullName).mkString(", ")
         val m = CheckFilter.fixedFullName(model)
         reporter.info(s"List of functions that are equivalent to model $m: $l")
