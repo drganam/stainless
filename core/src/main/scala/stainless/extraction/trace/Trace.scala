@@ -902,7 +902,7 @@ object Trace {
 
   // if there is a new state go there, otherwise report as unknown
   private def reportUnknown = {
-    allModels = allModels.updated(model.get, allModels(model.get) - 1)
+    //allModels = allModels.updated(model.get, allModels(model.get) - 1)
     if (isFinalEqCheckState) {
       resetEqCheckState
       nextModel
