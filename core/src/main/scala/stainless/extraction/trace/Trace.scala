@@ -85,20 +85,11 @@ class Trace(override val s: Trees, override val t: termination.Trees)
         val subCounterexamples = Trace.state.values.flatMap(_.subCounterexamples)
 
         val allCounterexamples = (counterexamples ++ subCounterexamples)
-        println("updating ordring")
-        println(o)
+
         Trace.ordering = Trace.ordering ++ Map(f.id -> o)
         Trace.ordering = Trace.ordering ++ Map(m.id -> o)
 
-        println(f.id)
-        println(m.id)
-
         val validCounterexamples = allCounterexamples.filter{elem => 
-          // println("gggggggggggggggggggggggggggggggggggggg")
-          // println(elem.counterexample.keys)
-          // println(elem.counterexample.keys.toList.map(_.tpe).map(_.toString).toList)
-          // println(f.params.map(_.tpe).map(_.toString).toList)
-          // println(m.params.map(_.tpe).map(_.toString).toList)
           elem.counterexample.values.size == f.params.size &&
           m.params.map(_.tpe).map(_.toString).toList ==
           elem.counterexample.keys.toList.map(_.tpe).map(_.toString).toList &&
@@ -108,11 +99,9 @@ class Trace(override val s: Trees, override val t: termination.Trees)
 
         //TODO .distinct
         validCounterexamples.toList.distinctBy(_.counterexample.values).take(2).forall(info => {
-          println("jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj")
           val pair = info
           val ref = m
 
-        
           val bval = {
             type ProgramType = Program{val trees: pair.prog.trees.type; val symbols: pair.prog.symbols.type}
             val prog: ProgramType = pair.prog.asInstanceOf[ProgramType]
@@ -145,24 +134,18 @@ class Trace(override val s: Trees, override val t: termination.Trees)
               val a = (f.params zip pair.counterexample).map(_._2).map(_._2)
               val order = o
               val invocation = evaluator.program.trees.FunctionInvocation(f.id, Seq(), Range(0, a.size).map(i => a(order(i))))
-               // else evaluator.program.trees.FunctionInvocation(m.id, Seq(), a)
+              // else evaluator.program.trees.FunctionInvocation(m.id, Seq(), a)
               val invocationM = evaluator.program.trees.FunctionInvocation(m.id, Seq(), (m.params zip pair.counterexample).map(_._2).map(_._2))
 
               (evaluator.eval(invocation), evaluator.eval(invocationM)) match {
                 case (inox.evaluators.EvaluationResults.Successful(output), inox.evaluators.EvaluationResults.Successful(expected)) => {
-                  println("output == expected?")
-                  println(output)
-                  println(expected)
-                  println(output == expected)
                   output == expected
                 }
                 case err =>  
-                  println(err)
                   true
               }
             } catch {
               case e => 
-                println(e)
                 true
             }
 
@@ -226,12 +209,10 @@ class Trace(override val s: Trees, override val t: termination.Trees)
                   output == expected
                 }
                 case err =>  
-                  println(err)
                   true
               }
             } catch {
               case e => 
-                println(e)
                 true
             }
 
@@ -841,6 +822,7 @@ object Trace {
   var sublemmacounter = 0
   var flippedcounter = 0
   var valid = 0
+  var err = 0
 
   def nextIteration[T <: AbstractReport[T]](report: AbstractReport[T])(implicit context: inox.Context): Boolean = {
     counter = counter + 1
@@ -883,6 +865,8 @@ object Trace {
       println(sublemmacounter)
       println("COUNTER valids")
       println(valid)
+      println("COUNTER errors")
+      println(err)
     }
     !isDone
   }
@@ -897,6 +881,7 @@ object Trace {
     noLongerUnknown(function.get)
     state(function.get).directModel = model
     state(function.get).counterexample = counterexample
+    err = err + 1
     nextFunction
   }
 
