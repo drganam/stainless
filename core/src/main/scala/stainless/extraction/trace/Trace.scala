@@ -86,20 +86,10 @@ class Trace(override val s: Trees, override val t: termination.Trees)
         val subCounterexamples = Trace.state.values.flatMap(_.subCounterexamples)
 
         val allCounterexamples = (counterexamples ++ subCounterexamples)
-        println("updating ordring")
-        println(o)
         Trace.ordering = Trace.ordering ++ Map(f.id -> o)
         Trace.ordering = Trace.ordering ++ Map(m.id -> o)
 
-        println(f.id)
-        println(m.id)
-
         val validCounterexamples = allCounterexamples.filter{elem => 
-          // println("gggggggggggggggggggggggggggggggggggggg")
-          // println(elem.counterexample.keys)
-          // println(elem.counterexample.keys.toList.map(_.tpe).map(_.toString).toList)
-          // println(f.params.map(_.tpe).map(_.toString).toList)
-          // println(m.params.map(_.tpe).map(_.toString).toList)
           elem.counterexample.values.size == f.params.size &&
           m.params.map(_.tpe).map(_.toString).toList ==
           elem.counterexample.keys.toList.map(_.tpe).map(_.toString).toList &&
@@ -109,7 +99,6 @@ class Trace(override val s: Trees, override val t: termination.Trees)
 
         //TODO .distinct
         validCounterexamples.toList.distinctBy(_.counterexample.values).take(2).forall(info => {
-          println("jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj")
           val pair = info
           val ref = m
 
@@ -151,19 +140,15 @@ class Trace(override val s: Trees, override val t: termination.Trees)
 
               (evaluator.eval(invocation), evaluator.eval(invocationM)) match {
                 case (inox.evaluators.EvaluationResults.Successful(output), inox.evaluators.EvaluationResults.Successful(expected)) => {
-                  println("output == expected?")
-                  println(output)
-                  println(expected)
-                  println(output == expected)
                   output == expected
                 }
                 case err =>  
-                  println(err)
+                  //println(err)
                   true
               }
             } catch {
               case e => 
-                println(e)
+                //println(e)
                 true
             }
 
@@ -227,12 +212,12 @@ class Trace(override val s: Trees, override val t: termination.Trees)
                   output == expected
                 }
                 case err =>  
-                  println(err)
+                  //println(err)
                   true
               }
             } catch {
               case e => 
-                println(e)
+                //println(e)
                 true
             }
 
@@ -989,8 +974,6 @@ object Trace {
       allFunctions.foreach(f => {
         state(f).counterexample match {
           case None => //None
-            //println("here")
-            //println(state(f).subCounterexamples.map(c => c.counterexample))
           case Some(c) => 
             val m = CheckFilter.fixedFullName(f)
             val ce = c.counterexample.map((k, v) => (k.id, v))
