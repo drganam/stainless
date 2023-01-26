@@ -103,6 +103,9 @@ class BatchedCallBack(components: Seq[Component])(using val context: inox.Contex
     }
 
     var rerunPipeline = true
+    var cacheCnt = 0
+    var totalCnt = 0
+    var timeCnt: Long = 0
     while (rerunPipeline) {
       val reports = runs map { run =>
         val ids = symbols.functions.keys.toSeq
@@ -110,8 +113,17 @@ class BatchedCallBack(components: Seq[Component])(using val context: inox.Contex
         RunReport(run)(analysis.toReport)
       }
       report = Report(reports)
+      cacheCnt += report.stats.validFromCache
+      totalCnt += report.stats.valid
+      timeCnt += report.stats.time
       rerunPipeline = Trace.nextIteration(report)
       if (!rerunPipeline) Trace.printEverything
+      println("cacheCnt")
+      println(cacheCnt)
+      println("cache %")
+      println(cacheCnt *100.0 / totalCnt)
+      println("timeCnt")
+      println(timeCnt)
     }
   }
 
