@@ -84,9 +84,7 @@ trait OL extends Core {
         if (remaining.size + accepted.size == 0) Seq(current)
         else {
           val all = codeOfDisjs(remaining ++ accepted)
-          val accept = !latticesLeq(current, all) ||
-            // TODO: Pureté imprécise! Il faudrait accumuler les disjs
-            !codePurity(current).isPure
+          val accept = !latticesLeq(current, all) || !codePurity(current).isPure
           rec(remaining, if (accept) accepted :+ current else accepted)
         }
     }
@@ -95,21 +93,21 @@ trait OL extends Core {
     rec(disjs2, Seq.empty)
   }
 
-  // (On note les disjunctions phi_1,...,phi_n)
-  // S'il existe un i t.q.
+  // (We denote disjunctions phi_1,...,phi_n)
+  // If it exists i s.t.
   //   ¬phi_i <= \/_j phi_j    (1)
-  // alors on retourne l'indice max(i, k) t.q.
+  // we then return the index max(i, k) s.t.
   //   ¬phi_i <= phi_k         (2)
   //
-  // Remarque: on obtient que:
-  //   ¬phi_i \/ \/_j phi_j === true        (par ¬phi_i \/ phi_i)
-  //                        === \/_j phi_j  (par (1))
-  // C-à-d l'existence de i par (1) nous indique que \/_j phi_j === true
-  // Comme dans notre application, on ne peut pas drop tous les phi_j (en raison de la présence des exprs impures)
-  // on est intéressé à trouver un k t.q. \/_j<=k phi_j === true (on pourra alors drop tout ce qui vient après ce k)
-  // C'est précisément le max(i, k) de (2) qui nous intéresse
-  // En effet, par (1), on a ¬phi_i <= \/_j phi_j ==> il existe un k t.q. ¬phi_i <= phi_k
-  // (voir définition <= cas disjonction sur la droite)
+  // Note: we obtain that:
+  //   ¬phi_i \/ \/_j phi_j === true        (by ¬phi_i \/ phi_i)
+  //                        === \/_j phi_j  (by (1))
+  // The existence of i by (1) implies \/_j phi_j === true
+  // In our case, we are not allowed to drop *all* phi_j (due to presence of impure expressions).
+  // As such, we are interested in finding a k s.t. \/_j<=k phi_j === true (we can then drop everything after this k, including impure expressions).
+  // The max(i, k) of (2) is exactly what we need.
+  // Indeed, by (1) we have ¬phi_i <= \/_j phi_j ==> ∃k. ¬phi_i <= phi_k
+  // (see definition of <=, case disjunction on the right).
   override final def checkForDisjunctionContradiction(disjs: Seq[Code])(using Env, Ctxs): Option[Int] = {
     assert(disjs.size >= 2)
     val negDisjs = disjs map negCodeOf

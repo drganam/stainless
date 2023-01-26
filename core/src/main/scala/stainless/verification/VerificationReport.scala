@@ -3,14 +3,14 @@
 package stainless
 package verification
 
-import inox.utils.ASCIIHelpers.{ Cell, Row }
+import inox.utils.ASCIIHelpers.{Cell, Row}
 import stainless.utils.JsonConvertions.given
+import io.circe.*
+import io.circe.syntax.*
+import io.circe.generic.semiauto.*
+import stainless.extraction.ExtractionSummary
 
-import io.circe._
-import io.circe.syntax._
-import io.circe.generic.semiauto._
-
-import scala.util.{ Right, Left }
+import scala.util.{Left, Right}
 
 object VerificationReport {
 
@@ -19,8 +19,9 @@ object VerificationReport {
    * inconclusive status mapped to [[Inconclusive]].
    */
   sealed abstract class Status(val name: String) {
-    def isValid = this == Status.Valid || isValidFromCache
+    def isValid = this == Status.Valid || isValidFromCache || isTrivial
     def isValidFromCache = this == Status.ValidFromCache
+    def isTrivial = this == Status.Trivial
     def isInvalid = this.isInstanceOf[Status.Invalid]
     def isInconclusive = this.isInstanceOf[Status.Inconclusive]
   }
@@ -28,6 +29,7 @@ object VerificationReport {
   object Status {
     case object Valid extends Status("valid")
     case object ValidFromCache extends Status("valid from cache")
+    case object Trivial extends Status("trivial")
     case class Inconclusive(reason: String) extends Status(reason)
     case class Invalid(reason: String) extends Status("invalid")
 
@@ -38,6 +40,7 @@ object VerificationReport {
       case VCStatus.Invalid(VCStatus.Unsatisfiable) => Invalid("unsatisfiable")
       case VCStatus.Valid => Valid
       case VCStatus.ValidFromCache => ValidFromCache
+      case VCStatus.Trivial => Trivial
       case inconclusive => Inconclusive(inconclusive.name)
     }
   }
@@ -55,25 +58,26 @@ object VerificationReport {
   given recordEncoder: Encoder[Record] = deriveEncoder
 
   def parse(json: Json) = json.as[(Seq[Record], Set[Identifier])] match {
-    case Right((records, sources)) => new VerificationReport(records, sources)
+    case Right((records, sources)) => new VerificationReport(records, sources, ExtractionSummary.NoSummary)
     case Left(error) => throw error
   }
 
 }
 
-class VerificationReport(val results: Seq[VerificationReport.Record], val sources: Set[Identifier])
+class VerificationReport(val results: Seq[VerificationReport.Record], val sources: Set[Identifier], override val extractionSummary: ExtractionSummary)
   extends BuildableAbstractReport[VerificationReport.Record, VerificationReport] {
   import VerificationReport.{given, _}
 
   override val encoder = recordEncoder
 
   override def build(results: Seq[Record], sources: Set[Identifier]) =
-    new VerificationReport(results, sources)
+    new VerificationReport(results, sources, ExtractionSummary.NoSummary)
 
   lazy val totalConditions: Int = results.size
   lazy val totalTime = results.map(_.time).sum
   lazy val totalValid = results.count(_.status.isValid)
   lazy val totalValidFromCache = results.count(_.status.isValidFromCache)
+  lazy val totalTrivial = results.count(_.status.isTrivial)
   lazy val totalInvalid = results.count(_.status.isInvalid)
   lazy val totalUnknown = results.count(_.status.isInconclusive)
 
@@ -88,6 +92,7 @@ class VerificationReport(val results: Seq[VerificationReport.Record], val source
       RecordRow(id, pos, level, extra, time)
   }
 
+
   private def levelOf(status: Status) = {
     if (status.isValid) Level.Normal
     else if (status.isInconclusive) Level.Warning
@@ -95,7 +100,7 @@ class VerificationReport(val results: Seq[VerificationReport.Record], val source
   }
 
   override lazy val stats =
-    ReportStats(totalConditions, totalTime, totalValid, totalValidFromCache, totalInvalid, totalUnknown)
+    ReportStats(totalConditions, totalTime, totalValid, totalValidFromCache, totalTrivial, totalInvalid, totalUnknown)
 
 }
 

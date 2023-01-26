@@ -5,7 +5,7 @@ import inox.solvers
 
 import java.util.concurrent.atomic.AtomicInteger
 
-// Wrapper that sets up a thread-local ocbsl algo instance
+// Wrapper that sets up a thread-local algo instance
 trait LatticesSimplifier { self =>
   import LatticesSimplifier._
   val trees: ast.Trees
@@ -23,22 +23,7 @@ trait LatticesSimplifier { self =>
       case UnderlyingAlgo.Bland => lattices.Bland(trees, symbols, opts)
     })
 
-  private val vcNum: AtomicInteger = new AtomicInteger(0)
-
-  val poi = 124
-//  val poi = 4753
-
   def simplify(e: Expr): Expr = {
-//    if (vcNum.get() < poi) {
-//      println("TAKING THE EASY ROUTE #1")
-//      println("TAKING THE EASY ROUTE #2")
-//      println("TAKING THE EASY ROUTE #3")
-//      vcNum.incrementAndGet()
-//      return BooleanLiteral(true)
-//    } else if (vcNum.get() > poi) ???
-//    println("")
-//    println("SIMPLIFY:")
-//    println(e)
     val core = coreTL.get()
     given core.Env = core.Env.empty
     given core.Ctxs = core.Ctxs.empty
@@ -46,9 +31,7 @@ trait LatticesSimplifier { self =>
 
     val resE = core.codeOfExpr(e)
     val codeE = resE.selfPlugged(core.Ctxs.empty)._2
-    val res = core.uncodeOf(codeE).expr.copiedFrom(e)
-    vcNum.incrementAndGet()
-    res
+    core.uncodeOf(codeE).expr.copiedFrom(e)
   }
 }
 object LatticesSimplifier {

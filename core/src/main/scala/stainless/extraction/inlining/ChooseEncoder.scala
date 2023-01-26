@@ -4,9 +4,9 @@ package stainless
 package extraction
 package inlining
 
-class ChooseEncoder(override val s: Trees, override val t: Trees)
+class ChooseEncoder(override val s: ast.Trees, override val t: ast.Trees)
                    (using override val context: inox.Context)
-  extends CachingPhase with SimplyCachedFunctions with IdentitySorts { self =>
+  extends CachingPhase with NoSummaryPhase with SimplyCachedFunctions with IdentitySorts { self =>
 
   type TransformerContext = s.Symbols
   override def getContext(symbols: s.Symbols) = symbols
@@ -15,7 +15,7 @@ class ChooseEncoder(override val s: Trees, override val t: Trees)
   override protected def registerFunctions(symbols: t.Symbols, functions: Seq[Seq[t.FunDef]]): t.Symbols =
     symbols.withFunctions(functions.flatten)
 
-  protected def extractFunction(context: TransformerContext, fd: s.FunDef): Seq[t.FunDef] = {
+  protected def extractFunction(context: TransformerContext, fd: s.FunDef): (Seq[t.FunDef], Unit) = {
     var fdChooses = Seq[t.FunDef]()
 
     object ce extends inox.transformers.Transformer {
@@ -92,17 +92,17 @@ class ChooseEncoder(override val s: Trees, override val t: Trees)
 
     // bind `newFd` before returning so that `fdChooses` gets filled with the new `choose` functions
     val newFd = ce.transform(fd)
-    fdChooses :+ newFd
+    (fdChooses :+ newFd, ())
   }
 
 }
 
 object ChooseEncoder {
-  def apply(it: inlining.Trees)(using inox.Context): ChooseEncoder {
-    val s: it.type
-    val t: it.type
+  def apply(st: ast.Trees, tt: ast.Trees)(using inox.Context): ChooseEncoder {
+    val s: st.type
+    val t: tt.type
   } = {
-    class Impl(override val s: it.type, override val t: it.type) extends ChooseEncoder(s, t)
-    new Impl(it, it)
+    class Impl(override val s: st.type, override val t: tt.type) extends ChooseEncoder(s, t)
+    new Impl(st, tt)
   }
 }

@@ -366,7 +366,7 @@ trait CodeExtraction extends ASTExtractors {
   }
 
   private def extractObject(obj: ModuleDef): (xt.ModuleDef, Seq[xt.ClassDef], Seq[xt.FunDef], Seq[xt.TypeDef], Option[Identifier]) = {
-    val ExObjectDef(_, template) = obj
+    val ExObjectDef(_, template) = obj: @unchecked
 
     val (imports, classes, functions, typeDefs, subs, allClasses, allFunctions, allTypeDefs, companionOf) = extractStatic(template.body)
 
@@ -1276,8 +1276,10 @@ trait CodeExtraction extends ASTExtractors {
     case ExtractorHelpers.ExSymbol("scala", "Predef", "$qmark$qmark$qmark") => xt.NoTree(extractType(tr))
 
     case chs @ ExChooseExpression(body) =>
+      ctx.reporter.warning(tr.pos, "`choose` expressions may be unsafe due to difficulty in checking their realizability automatically")
       extractTree(body) match {
-        case xt.Lambda(Seq(vd), body) => xt.Choose(vd, body)
+        case xt.Lambda(Seq(vd), body) =>
+          xt.Choose(vd, body)
         case _ => outOfSubsetError(tr, "Unexpected choose definition")
       }
 
@@ -1488,6 +1490,9 @@ trait CodeExtraction extends ASTExtractors {
 
     case ExSplitAnd(lhs, rhs) =>
       xt.SplitAnd(extractTree(lhs), extractTree(rhs))
+
+    case ExGhost(body) =>
+      xt.Annotated(extractTree(body), Seq(xt.Ghost))
 
     case c @ ExCall(rec, sym, tps, args) => rec match {
       case None if sym.owner.isModuleClass && sym.owner.isCase =>

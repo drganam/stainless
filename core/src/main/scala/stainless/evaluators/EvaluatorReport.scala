@@ -4,6 +4,7 @@ package stainless
 package evaluators
 
 import stainless.utils.JsonConvertions.given
+import stainless.extraction.ExtractionSummary
 
 import io.circe._
 import io.circe.syntax._
@@ -38,19 +39,19 @@ object EvaluatorReport {
   given recordEncoder: Encoder[Record] = deriveEncoder
 
   def parse(json: Json) = json.as[(Seq[Record], Set[Identifier])] match {
-    case Right((records, sources)) => new EvaluatorReport(records, sources)
+    case Right((records, sources)) => new EvaluatorReport(records, sources, ExtractionSummary.NoSummary)
     case Left(error) => throw error
   }
 }
 
-class EvaluatorReport(val results: Seq[EvaluatorReport.Record], val sources: Set[Identifier])
+class EvaluatorReport(val results: Seq[EvaluatorReport.Record], val sources: Set[Identifier], override val extractionSummary: ExtractionSummary)
   extends BuildableAbstractReport[EvaluatorReport.Record, EvaluatorReport] {
   import EvaluatorReport.{given, _}
 
   override val encoder = recordEncoder
 
   override def build(results: Seq[Record], sources: Set[Identifier]) =
-    new EvaluatorReport(results, sources)
+    new EvaluatorReport(results, sources, ExtractionSummary.NoSummary)
 
   override val name = EvaluatorComponent.name
 
@@ -64,7 +65,7 @@ class EvaluatorReport(val results: Seq[EvaluatorReport.Record], val sources: Set
   private lazy val totalInvalid = results.size - totalValid
 
   override lazy val stats =
-    ReportStats(results.size, totalTime, totalValid, validFromCache = 0, totalInvalid, unknown = 0)
+    ReportStats(results.size, totalTime, totalValid, validFromCache = 0, trivial = 0, totalInvalid, unknown = 0)
 
   private def levelOf(status: Status) = status match {
     case PostHeld(_) | NoPost(_) => Level.Normal

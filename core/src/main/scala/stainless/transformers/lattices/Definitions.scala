@@ -11,7 +11,7 @@ trait Definitions {
   import trees._
   import symbols.{given, _}
 
-  // Si on fait un summon[Ordering[Int]] dans Opaques, ça loop...
+  // If we do a summon[Ordering[Int]] within Opaques, it loops...
   private val intOrdering = summon[Ordering[Int]]
 
   object Opaques {
@@ -35,13 +35,11 @@ trait Definitions {
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-  // TODO: S'assurer que les position ou autre info n'influence pas == sur Label
   enum Label {
     case Var(v: VarId)
     case Let
     case Tuple
     case ADT(id: Identifier, tps: Seq[Type])
-    // TODO: Trimbaler ce ctor n'est pas très joli non?
     case ADTSelector(adt: ADTType, ctor: TypedADTConstructor, selector: Identifier)
     case FunctionInvocation(id: Identifier, tps: Seq[Type])
     case Annotated(flags: Seq[Flag])
@@ -119,8 +117,6 @@ trait Definitions {
     case MapMerge
 
     case FiniteArray(base: Type)
-    // Comme args, il y a elems.values ++ Seq(default, size)
-    // On utilise indices pour reconstruire elems
     case LargeArray(elemsIndices: Seq[Int], base: Type)
     case ArraySelect
     case ArrayUpdated
@@ -221,7 +217,6 @@ trait Definitions {
     case ADT(id: Identifier, tps: Seq[Type], sub: Seq[LabelledPattern]) extends LabelledPattern
     case TuplePattern(sub: Seq[LabelledPattern]) extends LabelledPattern
     case Lit[T](lit: Literal[T]) extends LabelledPattern
-    // TODO: What is recs???
     case Unapply(recs: Seq[Code], id: Identifier, tps: Seq[Type], sub: Seq[LabelledPattern]) extends LabelledPattern
 
     import LabelledPattern._
@@ -240,13 +235,12 @@ trait Definitions {
 
   enum Purity {
     case Pure
-    // TODO: Ajouter "letBound": cela permet de drop l'expression (dont la sous-partie impure est let-bound à une var)
     case Impure
     case Delayed(blockers: Set[Identifier])
 
     def ++(that: => Purity): Purity = {
       if (this == Impure) Impure
-      else (this, that) match { // TODO: Evaluated once or multiple time?
+      else (this, that) match {
         case (Pure, Pure) => Pure
         case (Delayed(s1), Delayed(s2)) => Delayed(s1 ++ s2)
         case (Delayed(s1), Pure) => Delayed(s1)

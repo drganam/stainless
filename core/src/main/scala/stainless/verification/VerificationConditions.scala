@@ -32,6 +32,11 @@ case class VC[T <: ast.Trees](val trees: T)(val condition: trees.Expr, val fid: 
 sealed abstract class VCKind(val name: String, val abbrv: String) {
   override def toString = name
   def underlying = this
+
+  def isMeasureRelated: Boolean = this match {
+    case VCKind.MeasureDecreases | VCKind.MeasurePositive | VCKind.MeasureMissing => true
+    case _ => false
+  }
 }
 
 object VCKind {
@@ -95,6 +100,7 @@ object VCStatus {
   case object Valid extends VCStatus[Nothing]("valid")
   case object Admitted extends VCStatus[Nothing]("admitted")
   case object ValidFromCache extends VCStatus[Nothing]("valid from cache")
+  case object Trivial extends VCStatus[Nothing]("trivial")
   case object Unknown extends VCStatus[Nothing]("unknown")
   case object Timeout extends VCStatus[Nothing]("timeout")
   case object Cancelled extends VCStatus[Nothing]("cancelled")
@@ -108,8 +114,9 @@ case class VCResult[+Model](
   solverName: Option[String],
   time: Option[Long]
 ) {
-  def isValid           = status == VCStatus.Valid || isValidFromCache
+  def isValid           = status == VCStatus.Valid || isValidFromCache || isTrivial
   def isValidFromCache  = status == VCStatus.ValidFromCache
+  def isTrivial         = status == VCStatus.Trivial
   def isAdmitted        = status == VCStatus.Admitted
   def isInvalid         = status.isInstanceOf[VCStatus.Invalid[_]]
   def isInconclusive    = !isValid && !isInvalid

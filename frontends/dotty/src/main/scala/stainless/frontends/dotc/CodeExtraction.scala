@@ -1524,6 +1524,7 @@ class CodeExtraction(inoxCtx: inox.Context, symbolMapping: SymbolMapping)(using 
       rec(extractBlock(members :+ body))
 
     case ExChooseExpression(tpt, pred) =>
+      reporter.warning(tr.sourcePos, "`choose` expressions may be unsafe due to difficulty in checking their realizability automatically")
       extractTree(pred) match {
         case xt.Lambda(Seq(vd), body) => xt.Choose(vd, body)
         case e => extractType(tpt) match {
@@ -1722,6 +1723,9 @@ class CodeExtraction(inoxCtx: inox.Context, symbolMapping: SymbolMapping)(using 
     case ExSplitAnd(lhs, rhs) =>
       xt.SplitAnd(extractTree(lhs), extractTree(rhs))
 
+    case ExGhost(body) =>
+      xt.Annotated(extractTree(body), Seq(xt.Ghost))
+
     case app @ Apply(tree, args) if defn.isFunctionType(tree.tpe) =>
       xt.Application(extractTree(tree), args map extractTree).setPos(app.sourcePos)
 
@@ -1735,8 +1739,8 @@ class CodeExtraction(inoxCtx: inox.Context, symbolMapping: SymbolMapping)(using 
 
     case ExCastCall(expr, from, to) =>
       // Double check that we are dealing with regular integer types
-      val xt.BVType(true, size) = extractType(from)(using dctx, NoSourcePosition)
-      val newType @ xt.BVType(true, newSize) = extractType(to)(using dctx, NoSourcePosition)
+      val xt.BVType(true, size) = extractType(from)(using dctx, NoSourcePosition): @unchecked
+      val newType @ xt.BVType(true, newSize) = extractType(to)(using dctx, NoSourcePosition): @unchecked
       if (size > newSize) xt.BVNarrowingCast(extractTree(expr), newType)
       else                xt.BVWideningCast(extractTree(expr), newType)
 
@@ -2233,7 +2237,13 @@ class CodeExtraction(inoxCtx: inox.Context, symbolMapping: SymbolMapping)(using 
         xt.MutableMapType(from, to)
 
       case AppliedType(tr: TypeRef, tps) if TupleSymbol.unapply(tr.classSymbol).isDefined =>
-        xt.TupleType(tps map extractType)
+        // We know the underlying is a tuple, but it may be hidden under an alias
+        // such as type Pair[R] = (R, R)
+        // Using the above `tps` is incorrect in presence of alias
+        // (for Pair[Int], we would just get tps = Seq(Int) instead of Seq(Int, Int))
+        // Instead, we dealias the type and use these tps
+        val AppliedType(_, theTps) = tpt.dealias: @unchecked
+        xt.TupleType(theTps map extractType)
 
       case AppliedType(tr: TypeRef, Seq(tp)) if isArrayClassSym(tr.symbol) =>
         xt.ArrayType(extractType(tp))

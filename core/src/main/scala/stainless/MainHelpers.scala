@@ -51,7 +51,6 @@ trait MainHelpers extends inox.MainHelpers { self =>
     verification.optAdmitAll -> Description(Verification, "Admit all obligations when translated into a coq program"),
     verification.optStrictArithmetic -> Description(Verification,
       s"Check arithmetic operations for unintended behavior and overflows (default: true)"),
-    verification.optTypeChecker -> Description(Verification, "Use the type-checking rules from the calculus to generate verification conditions"),
     verification.optAdmitVCs -> Description(Verification, "Admit all verification conditions"),
     verification.optSimplifier -> Description(Verification, "Select which simplifier to use for VC simplification\n" +
       "Available:\n" +
@@ -70,6 +69,7 @@ trait MainHelpers extends inox.MainHelpers { self =>
     genc.optIncludes -> Description(General, "Add includes in GenC output"),
     optWatch -> Description(General, "Re-run stainless upon file changes"),
     optCompact -> Description(General, "Print only invalid elements of summaries"),
+    optExtendedSummary -> Description(General, "Print an extended summary of all Stainless phases"),
     frontend.optBatchedProgram -> Description(General, "Process the whole program together, skip dependency analysis"),
     frontend.optKeep -> Description(General, "Keep library objects marked by @keepFor(g) for some g in g1,g2,... (implies --batched)"),
     frontend.optExtraDeps -> Description(General, "Fetch the specified extra source dependencies and add their source files to the session"),

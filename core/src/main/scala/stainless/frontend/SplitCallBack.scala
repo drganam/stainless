@@ -73,7 +73,7 @@ class SplitCallBack(components: Seq[Component])(using override val context: inox
   final override def failed(): Unit = ()
 
   final override def endExtractions(): Unit = {
-    reporter.terminateIfFatal()
+    reporter.terminateIfError()
 
     processSymbols(symbols)
 
@@ -163,7 +163,7 @@ class SplitCallBack(components: Seq[Component])(using override val context: inox
     val funDeps = syms.functions.values.filter(fd => deps(fd.id)).toSeq
     val typeDeps = syms.typeDefs.values.filter(td => deps(td.id)).toSeq
     val preSyms = xt.NoSymbols.withClasses(clsDeps).withFunctions(funDeps ++ funs).withTypeDefs(typeDeps)
-    val funSyms = preprocessing.debug(Preprocessing().transform)(preSyms)
+    val funSyms = preprocessing.debugWithoutSummary(Preprocessing().transform)(preSyms)._1
 
     val cf = serialize(funs)(using funSyms)
 

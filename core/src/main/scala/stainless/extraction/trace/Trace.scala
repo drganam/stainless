@@ -9,6 +9,7 @@ import stainless.utils.CheckFilter
 class Trace(override val s: Trees, override val t: termination.Trees)
            (using override val context: inox.Context)
   extends CachingPhase
+     with NoSummaryPhase
      with IdentityFunctions
      with IdentitySorts { self =>
   import s._
@@ -39,7 +40,7 @@ class Trace(override val s: Trees, override val t: termination.Trees)
     evaluator.eval(expr)
   }
 
-  override protected def extractSymbols(context: TransformerContext, symbols: s.Symbols): t.Symbols = {
+  override protected def extractSymbols(context: TransformerContext, symbols: s.Symbols): (t.Symbols, AllSummaries) = {
     import symbols.{given, _}
     import exprOps._
 
@@ -512,13 +513,13 @@ class Trace(override val s: Trees, override val t: termination.Trees)
       }
     } else List())
 
-    val extractedSymbols = super.extractSymbols(context, symbols)
+    val (extractedSymbols, summary) = super.extractSymbols(context, symbols)
 
     val extracted = t.NoSymbols
       .withSorts(extractedSymbols.sorts.values.toSeq)
       .withFunctions((generatedFunctions.map(fun => identity.transform(fun)) ++ extractedSymbols.functions.values).filterNot(fd => fd.flags.exists(elem => elem.name == "traceInduct")).toSeq)
 
-    registerFunctions(extracted, inductFuns.map(fun => identity.transform(fun)))
+    (registerFunctions(extracted, inductFuns.map(fun => identity.transform(fun))), summary)
   }
 
   // make a copy of the 'model'

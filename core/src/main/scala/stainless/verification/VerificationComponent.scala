@@ -3,14 +3,13 @@
 package stainless
 package verification
 
-import inox.solvers.PurityOptions
 import io.circe._
 
 import scala.concurrent.Future
+
 import stainless.extraction._
 import stainless.extraction.utils.DebugSymbols
 import stainless.termination.MeasureInference
-import stainless.transformers.LatticesSimplifier
 
 /**
  * Strict Arithmetic Mode:
@@ -18,11 +17,6 @@ import stainless.transformers.LatticesSimplifier
  * Add assertions for integer overflow checking and other unexpected behaviour (e.g. x << 65).
  */
 object optStrictArithmetic extends inox.FlagOptionDef("strict-arithmetic", true)
-
-/**
- * Generate VC via the System FR type-checker instead of the ad-hoc DefaultTactic.
- */
-object optTypeChecker extends inox.FlagOptionDef("type-checker", true)
 
 /**
  * Verify program using Coq
@@ -78,37 +72,21 @@ class VerificationRun private(override val component: VerificationComponent.type
     val t: self.trees.type = self.trees
   }
 
-  private[stainless] def execute(functions0: Seq[Identifier], symbols: trees.Symbols): Future[VerificationAnalysis] = {
+  override private[stainless] def execute(functions0: Seq[Identifier], symbols: trees.Symbols, exSummary: ExtractionSummary): Future[VerificationAnalysis] = {
     import context._
 
     val functions = functions0.filterNot(fid => symbols.getFunction(fid).flags.contains(trees.DropVCs))
-
-//    val useOCBSL = context.options.findOptionOrDefault(optOCBSLSimp)
-//    val useOL = context.options.findOptionOrDefault(optOLSimp)
-//    val algo = {
-//      if (useOL) LatticesSimplifier.UnderlyingAlgo.OL
-//      else LatticesSimplifier.UnderlyingAlgo.OCBSL
-//    }
-//    val latticeSimp = LatticesSimplifier(trees, symbols, PurityOptions.unchecked, algo)
-//    if (useOCBSL && useOL) {
-//      reporter.warning("Both OCBSL and OL are selected, defaulting to OL")
-//    }
-//
-//    def simplifyFn(f: trees.FunDef): trees.FunDef = {
-//      if (true || useOCBSL || useOL) {
-//        val newBody = latticeSimp.simplify(symbols.simplifyLets(f.fullBody))
-//        f.copy(fullBody = newBody)
-//      } else {
-//        val newBody = symbols.simplifyExpr(symbols.simplifyLets(f.fullBody))(using PurityOptions.unchecked)
-//        f.copy(fullBody = newBody)
-//      }
-//    }
-//    val p = inox.Program(trees)(symbols.withFunctions(symbols.functions.values.map(simplifyFn).toSeq))
-
     val p = inox.Program(trees)(symbols)
 
     if (context.options.findOptionOrDefault(optCoq)) {
-      CoqVerificationChecker.verify(functions, p, context)
+      val vcResult = CoqVerificationChecker.verify(functions, p, context)
+      Future.successful(new VerificationAnalysis {
+        override val program: p.type = p
+        override val context = VerificationRun.this.context
+        override val sources = functions.toSet
+        override val results = vcResult
+        override val extractionSummary = exSummary
+      })
     } else {
       val assertions = AssertionInjector(p, context)
       val assertionEncoder = inox.transformers.ProgramEncoder(p)(assertions)
@@ -123,24 +101,21 @@ class VerificationRun private(override val component: VerificationComponent.type
 
       val vcGenEncoder = assertionEncoder
 
-      val vcs = if (context.options.findOptionOrDefault(optTypeChecker))
-        context.timers.verification.get("type-checker").run {
-          TypeChecker(vcGenEncoder.targetProgram, context).checkFunctionsAndADTs(functions)
-        }
-      else
-        VerificationGenerator.gen(vcGenEncoder.targetProgram, context)(functions)
+      val vcs = context.timers.verification.get("type-checker").run {
+        TypeChecker(vcGenEncoder.targetProgram, context).checkFunctionsAndADTs(functions)
+      }
 
       if (!functions.isEmpty) {
         reporter.debug(s"Finished generating VCs")
       }
-
-      val res =
+      val opaqueEncoder = inox.transformers.ProgramEncoder(vcGenEncoder.targetProgram)(OpaqueChooseInjector(vcGenEncoder.targetProgram))
+      val res: Future[Map[VC[p.trees.type], VCResult[p.Model]]] =
         if (context.options.findOptionOrDefault(optAdmitVCs)) {
           Future(vcs.map(vc => vc -> VCResult(VCStatus.Admitted, None, None)).toMap)
         } else {
-          VerificationChecker.verify(assertionEncoder.targetProgram, context)(vcs).map(_.view.mapValues {
+          VerificationChecker.verify(opaqueEncoder.targetProgram, context)(vcs).map(_.view.mapValues {
             case VCResult(VCStatus.Invalid(VCStatus.CounterExample(model)), s, t) =>
-              VCResult(VCStatus.Invalid(VCStatus.CounterExample(model.encode(assertionEncoder.reverse))), s, t)
+              VCResult(VCStatus.Invalid(VCStatus.CounterExample(model.encode(opaqueEncoder.reverse.andThen(vcGenEncoder.reverse)))), s, t)
             case res => res.asInstanceOf[VCResult[p.Model]]
           }.toMap)
         }
@@ -150,6 +125,7 @@ class VerificationRun private(override val component: VerificationComponent.type
         override val context = VerificationRun.this.context
         override val sources = functions.toSet
         override val results = r
+        override val extractionSummary = exSummary
       })
     }
   }

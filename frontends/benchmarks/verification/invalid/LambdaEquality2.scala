@@ -32,9 +32,9 @@ object LambdaEquality2 {
     val f1 = (x: Nat) => a
     val f2 = (x: Nat) => p
     assert(f1 != f2)
-    assert(plusZero(a)) // TODO: Skip
-    assert(equalFunctions[Nat, Nat](a, p)) // TODO: Skip
-    assert(f1 == f2)// TODO: Skip
-    assert(false)// TODO: Skip
+    assert(plusZero(a))
+    assert(equalFunctions[Nat, Nat](a, p))
+    assert(f1 == f2)
+    assert(false)
   }
 }

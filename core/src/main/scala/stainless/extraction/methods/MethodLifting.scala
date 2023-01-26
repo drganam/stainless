@@ -80,7 +80,7 @@ class MethodLifting(override val s: Trees, override val t: oo.Trees)
     }
   }
 
-  override final def extract(symbols: s.Symbols): t.Symbols = {
+  override final def extract(symbols: s.Symbols): (t.Symbols, ExtractionSummary) = {
     assert(symbols.sorts.isEmpty,
       "Unexpected sorts in method lifting: " + symbols.sorts.keys.map(_.asString).mkString(", "))
 
@@ -129,7 +129,7 @@ class MethodLifting(override val s: Trees, override val t: oo.Trees)
       typeDefs += typeDefCache.cached(td, symbols)(identity.transform(td))
     }
 
-    t.NoSymbols.withFunctions(functions.toSeq).withClasses(classes.toSeq).withTypeDefs(typeDefs.toSeq)
+    (t.NoSymbols.withFunctions(functions.toSeq).withClasses(classes.toSeq).withTypeDefs(typeDefs.toSeq), ExtractionSummary.NoSummary)
   }
 
   private[this] type Metadata = (Seq[s.FunDef], Map[Identifier, Override])
@@ -289,7 +289,7 @@ class MethodLifting(override val s: Trees, override val t: oo.Trees)
       }
       (subCalls, elze)
     } else {
-      val conds :+ ((_, elze: t.Expr)) = subCalls
+      val conds :+ ((_, elze: t.Expr)) = subCalls: @unchecked
       (conds, elze)
     }
 

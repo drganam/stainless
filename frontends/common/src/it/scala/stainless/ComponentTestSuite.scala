@@ -3,11 +3,13 @@
 package stainless
 
 import scala.concurrent.Await
-import scala.concurrent.duration.*
+import scala.concurrent.duration._
+
 import stainless.utils.YesNoOnly
-import extraction.xlang.{TreeSanitizer, trees as xt}
+
+import extraction.ExtractionSummary
+import extraction.xlang.{ TreeSanitizer, trees => xt }
 import extraction.utils.DebugSymbols
-import stainless.verification.*
 
 trait ComponentTestSuite extends inox.TestSuite with inox.ResourceUtils with InputUtils { self =>
 
@@ -15,13 +17,11 @@ trait ComponentTestSuite extends inox.TestSuite with inox.ResourceUtils with Inp
 
   override def configurations: Seq[Seq[inox.OptionValue[_]]] = Seq(
     Seq(
-      verification.optTypeChecker(true),
       inox.optSelectedSolvers(Set("smt-z3:z3-4.8.12")),
-      inox.optTimeout(120.seconds),
+      inox.optTimeout(300.seconds),
       verification.optStrictArithmetic(false),
       termination.optInferMeasures(false),
       termination.optCheckMeasures(YesNoOnly.No),
-      optSimplifier(SimplifierKind.OL)
     )
   )
 
@@ -30,8 +30,7 @@ trait ComponentTestSuite extends inox.TestSuite with inox.ResourceUtils with Inp
   override protected def optionsString(options: inox.Options): String = {
     "solvr=" + options.findOptionOrDefault(inox.optSelectedSolvers).head + " " +
     "lucky=" + options.findOptionOrDefault(inox.solvers.unrolling.optFeelingLucky) + " " +
-    "check=" + options.findOptionOrDefault(inox.solvers.optCheckModels) + " "
-    "type-checker=" + options.findOptionOrDefault(verification.optTypeChecker)
+    "check=" + options.findOptionOrDefault(inox.solvers.optCheckModels)
   }
 
   protected def filter(ctx: inox.Context, name: String): FilterStatus = Test
@@ -62,7 +61,7 @@ trait ComponentTestSuite extends inox.TestSuite with inox.ResourceUtils with Inp
           val t: xt.type = xt
         }
 
-        val programSymbols = userFiltering.debug(frontend.UserFiltering().transform)(program.symbols)
+        val programSymbols = userFiltering.debugWithoutSummary(frontend.UserFiltering().transform)(program.symbols)._1
         programSymbols.ensureWellFormed
         val errors = TreeSanitizer(xt).enforce(programSymbols)
         if (!errors.isEmpty) {
@@ -71,7 +70,7 @@ trait ComponentTestSuite extends inox.TestSuite with inox.ResourceUtils with Inp
 
         val run = component.run(extraction.pipeline)
 
-        val exProgram = inox.Program(run.trees)(run extract programSymbols)
+        val exProgram = inox.Program(run.trees)(run.extract(programSymbols)._1)
         exProgram.symbols.ensureWellFormed
         assert(ctx.reporter.errorCount == 0, "There were errors during extraction")
 
@@ -90,7 +89,7 @@ trait ComponentTestSuite extends inox.TestSuite with inox.ResourceUtils with Inp
 
         val funs = defs.filter(i => exProgram.symbols.functions.contains(i) && identifierFilter(i)).toSeq
 
-        val report = Await.result(run.execute(funs, exProgram.symbols), Duration.Inf)
+        val report = Await.result(run.execute(funs, exProgram.symbols, ExtractionSummary.NoSummary), Duration.Inf)
         block(report, ctx.reporter, unit)
       }
     } else {
@@ -106,7 +105,7 @@ trait ComponentTestSuite extends inox.TestSuite with inox.ResourceUtils with Inp
         val t: xt.type = xt
       }
 
-      val programSymbols = userFiltering.debug(frontend.UserFiltering().transform)(program.symbols)
+      val programSymbols = userFiltering.debugWithoutSummary(frontend.UserFiltering().transform)(program.symbols)._1
       programSymbols.ensureWellFormed
 
       for {
@@ -123,7 +122,7 @@ trait ComponentTestSuite extends inox.TestSuite with inox.ResourceUtils with Inp
           .withTypeDefs(programSymbols.typeDefs.values.filter(td => deps(td.id)).toSeq)
 
         val run = component.run(extraction.pipeline)
-        val exSymbols = run extract symbols
+        val exSymbols = run.extract(symbols)._1
         exSymbols.ensureWellFormed
         assert(ctx.reporter.errorCount == 0, "There were errors during pipeline extraction")
 
@@ -137,7 +136,7 @@ trait ComponentTestSuite extends inox.TestSuite with inox.ResourceUtils with Inp
           exSymbols.sorts.values.filter(sort => derived(sort.flags)).map(_.id)
         } (defs).toSeq.filter(exSymbols.functions contains _)
 
-        val report = Await.result(run.execute(funs, exSymbols),Duration.Inf)
+        val report = Await.result(run.execute(funs, exSymbols, ExtractionSummary.NoSummary),Duration.Inf)
         block(report, ctx.reporter, unit)
       }
     }

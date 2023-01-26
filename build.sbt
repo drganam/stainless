@@ -22,8 +22,8 @@ val osArch = System.getProperty("sun.arch.data.model")
 
 val circeVersion = "0.14.1"
 
-lazy val nParallel = {
-  val p = System.getProperty("parallel")
+lazy val nTestParallelism = {
+  val p = System.getProperty("test-parallelism")
   if (p ne null) {
     try {
       p.toInt
@@ -36,11 +36,11 @@ lazy val nParallel = {
 }
 
 // The Scala version with which Stainless is compiled.
-val stainlessScalaVersion = "3.0.2"
-// Stainless supports Scala 2.13 and Scala 3.0 programs.
-val frontendScalacVersion = "2.13.6"
+val stainlessScalaVersion = "3.2.0"
+// Stainless supports Scala 2.13 and Scala 3.2 programs.
+val frontendScalacVersion = "2.13.10"
 val frontendDottyVersion = stainlessScalaVersion
-// The Stainless libraries use Scala 2.13, but they are compatible with Scala 3.0 as well.
+// The Stainless libraries use Scala 2.13, but they are compatible with Scala 3.2 as well.
 val stainlessLibScalaVersion = frontendScalacVersion
 
 scalaVersion := stainlessScalaVersion
@@ -86,10 +86,8 @@ lazy val commonSettings: Seq[Setting[_]] = artifactSettings ++ Seq(
     "-feature"
   ),
 
-  resolvers ++= Seq(
-    Resolver.sonatypeRepo("releases").withAllowInsecureProtocol(true),
-    ("uuverifiers" at "http://logicrunch.research.it.uu.se/maven").withAllowInsecureProtocol(true),
-  ),
+  resolvers ++= Resolver.sonatypeOssRepos("releases"),
+  resolvers += ("uuverifiers" at "http://logicrunch.research.it.uu.se/maven").withAllowInsecureProtocol(true),
 
   libraryDependencies ++= Seq(
     // "ch.epfl.lara"    %% "inox"          % inoxVersion,
@@ -114,8 +112,6 @@ lazy val commonSettings: Seq[Setting[_]] = artifactSettings ++ Seq(
 
   // disable documentation packaging in universal:stage to speedup development
   Compile / packageDoc / mappings := Seq(),
-
-  Global / concurrentRestrictions += Tags.limitAll(nParallel),
 
   Compile / sourcesInBase := false,
 
@@ -145,8 +141,6 @@ lazy val stainlessLibSettings: Seq[Setting[_]] = artifactSettings ++ Seq(
 
   // disable documentation packaging in universal:stage to speedup development
   Compile / packageDoc / mappings := Seq(),
-
-  Global / concurrentRestrictions += Tags.limitAll(nParallel),
 
   Compile / sourcesInBase := false,
 
@@ -195,8 +189,9 @@ lazy val libFilesFile = "libfiles.txt" // file storing list of library file name
 
 lazy val regenFilesFile = false
 
-lazy val libraryFiles: Seq[(String, File)] = {
-  val libFiles = ((root.base / "frontends" / "library" / "stainless") ** "*.scala").get
+def libraryFiles(baseDir: File): Seq[(String, File)] = {
+  // Note baseDir.value is either frontends/scalac or frontends/dotty, so we need to go up two levels with / .. / .. /
+  val libFiles = ((baseDir / ".." / ".." / "frontends" / "library" / "stainless") ** "*.scala").get
   val dropCount = (libFiles.head.getPath indexOfSlice "library") + ("library".size + 1 /* for separator */)
   val res : Seq[(String, File)] = libFiles.map(file => (file.getPath drop dropCount, file)) // Drop the prefix of the path (i.e. everything before "library")
   if (regenFilesFile) {
@@ -212,15 +207,16 @@ def commonFrontendSettings(compilerVersion: String): Seq[Setting[_]] = Defaults.
   /**
     * NOTE: IntelliJ seems to have trouble including sources located outside the base directory of an
     *   sbt project. You can temporarily disable the following four lines when importing the project.
+    * NOTE 2: baseDirectory.value is either frontends/scalac or frontends/dotty, so we need to go up two levels with / .. / .. /
     */
-  IntegrationTest / unmanagedResourceDirectories += (root.base / "frontends" / "benchmarks"),
-  Compile / unmanagedSourceDirectories           += (root.base.getAbsoluteFile / "frontends" / "common" / "src" / "main" / "scala"),
-  Test / unmanagedSourceDirectories              += (root.base.getAbsoluteFile / "frontends" / "common" / "src" / "test" / "scala"),
-  IntegrationTest / unmanagedSourceDirectories   += (root.base.getAbsoluteFile / "frontends" / "common" / "src" / "it" / "scala"),
+  IntegrationTest / unmanagedResourceDirectories += (baseDirectory.value / ".." / ".." / "frontends" / "benchmarks"),
+  Compile / unmanagedSourceDirectories           += (baseDirectory.value / ".." / ".." / "frontends" / "common" / "src" / "main" / "scala"),
+  Test / unmanagedSourceDirectories              += (baseDirectory.value / ".." / ".." / "frontends" / "common" / "src" / "test" / "scala"),
+  IntegrationTest / unmanagedSourceDirectories   += (baseDirectory.value / ".." / ".." / "frontends" / "common" / "src" / "it" / "scala"),
 
   // We have to use managed resources here to keep sbt's source watcher happy
   Compile / resourceGenerators += Def.task {
-    for ((libPath, libFile) <- libraryFiles) yield {
+    for ((libPath, libFile) <- libraryFiles(baseDirectory.value)) yield {
       val resourceFile = (Compile / resourceManaged).value / libPath
       IO.write(resourceFile, IO.read(libFile))
       resourceFile
@@ -246,7 +242,7 @@ def commonFrontendSettings(compilerVersion: String): Seq[Setting[_]] = Defaults.
           |    reporter.info(s"Bundled Scala compiler: $$compilerVersion")
           |  }
           |
-          |  val defaultPaths = List(${removeSlashU(libraryFiles.map(_._1).mkString("\"\"\"", "\"\"\",\n \"\"\"", "\"\"\""))})
+          |  val defaultPaths = List(${removeSlashU(libraryFiles(baseDirectory.value).map(_._1).mkString("\"\"\"", "\"\"\",\n \"\"\"", "\"\"\""))})
           |  val libPaths = try {
           |    val source = scala.io.Source.fromFile(\"${libFilesFile}\")
           |    try source.getLines().toList finally source.close()
@@ -260,9 +256,13 @@ def commonFrontendSettings(compilerVersion: String): Seq[Setting[_]] = Defaults.
     Seq(main)
   }) ++
   inConfig(IntegrationTest)(Defaults.testTasks ++ Seq(
-    logBuffered := (nParallel > 1),
-    parallelExecution := (nParallel > 1)
+    logBuffered := (nTestParallelism > 1),
+    parallelExecution := (nTestParallelism > 1),
   ))
+
+Global / concurrentRestrictions := Seq(
+  Tags.limit(Tags.Test, nTestParallelism)
+)
 
 val scriptSettings: Seq[Setting[_]] = Seq(
   extraClasspath := {
@@ -275,7 +275,7 @@ val scriptSettings: Seq[Setting[_]] = Seq(
 def ghProject(repo: String, version: String) = RootProject(uri(s"${repo}#${version}"))
 
 // lazy val inox = RootProject(file("../inox"))
-lazy val inox = ghProject("https://github.com/epfl-lara/inox.git", "1c8c0bac611ad4edc2c5b209deea9c75359d51b1")
+lazy val inox = ghProject("https://github.com/epfl-lara/inox.git", "4341d51e200b4cb4746744bedf62e849aeadcc7a")
 lazy val cafebabe = ghProject("https://github.com/epfl-lara/cafebabe.git", "616e639b34379e12b8ac202849de3ebbbd0848bc")
 
 // Allow integration test to use facilities from regular tests

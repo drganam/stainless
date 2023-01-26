@@ -8,41 +8,11 @@ Installing Stainless
 General Requirement
 -------------------
 
-- Java 8 JRE
-  It suffices to have headless OpenJDK JRE 8 (e.g. one that one gets with ``apt install openjdk-8-jre-headless`` on Debian/Ubuntu).
-  Make sure that ``java -version`` reports a version starting with 1.8, such as ``openjdk version "1.8`` or ``java version "1.8``.
+- Java 17 JRE
+  It suffices to have headless OpenJDK JRE 17 (e.g. one that one gets with ``apt install openjdk-17-jre-headless`` on Debian/Ubuntu).
+  Make sure that ``java -version`` reports a version starting with 1.17, such as ``openjdk version "1.17`` or ``java version "1.17``.
 
 Stainless bundles Scala compiler front-end and runs it before it starts compilation. We recommend using the Scala 3 front end (originally named dotty), though Scala 2 is also available.
-
-.. _running-code:
-
-Running Code with Stainless dependencies
-----------------------------------------
-
-Using sources:
-
-1. Clone the sources from https://github.com/epfl-lara/stainless
-
-2. Create a folder to put compiled Scala objects: ``mkdir -p ~/.scala_objects``
-
-3. Compile your code (here in ``MyFile.scala``, though you can have more than one file) while referring to the Stainless library sources: ``scalac -d ~/.scala_objects $(find /path/to/Stainless/frontends/library/stainless/ -name "*.scala") MyFile.scala``
-
-4. Run your code (replace ``MyMainClass`` with the name of your main object): ``scala -cp ~/.scala_objects MyMainClass``
-
-Using jar:
-   
-You can package the scala library into a jar to avoid the need to compile it every time. For example (for stainless 0.9.6) you can use:
-
-.. code-block:: bash
-
-    $ cd path/to/stainless/
-    $ sbt stainless-library/package
-
-Add the generated stainless library jar file when invoking the compiler with `scalac` and the JVM with `scala` or `java`:
-
-.. code-block:: bash
-
-    $ scalac -d ~/.scala_objects -cp /path/to/stainless/frontends/library/target/scala-2.13/stainless-library_2.13-0.9.6.jar MyFile.scala
 
 .. _standalone-release:
 
@@ -55,105 +25,66 @@ Use Standalone Release (recommended)
 
 3. (Optional) Add this directory to your ``PATH``. This will let you invoke Stainless via the ``stainless`` command instead of its fully qualified path in step 5.
 
-4. Paste the following code in a file named ``test.scala``:
+4. Paste the following code in a file named ``HelloStainless.scala``:
 
 .. code-block:: scala
 
-  import stainless.lang._
+    import stainless.collection._
 
-  object test {
-    def ok = {
-      assert(true)
+    object HelloStainless {
+      def myTail(xs: List[BigInt]): BigInt = {
+        require(xs.nonEmpty)
+        xs match {
+          case Cons(h, _) => h
+          // Match provably exhaustive
+        }
+      }
     }
-  }
 
 5. In a terminal, type the following command, substituting the proper path to the directory where you unzipped the latest release:
 
 .. code-block:: bash
 
-  $ /path/to/unzipped/directory/stainless test.scala
+  $ /path/to/unzipped/directory/stainless.sh HelloStainless.scala
 
 6. The output should read:
 
 .. code-block:: text
 
-   [Warning ] The Z3 native interface is not available. Falling back onto smt-z3.
-   [  Info  ]  - Checking cache: 'body assertion' VC for ok @5:7...
-   [  Info  ] Cache miss: 'body assertion' VC for ok @5:7...
-   [  Info  ]  - Now solving 'body assertion' VC for ok @5:7...
-   [  Info  ]  - Result for 'body assertion' VC for ok @5:7:
-   [  Info  ]  => VALID
-   [  Info  ]   ┌───────────────────┐
-   [  Info  ] ╔═╡ stainless summary ╞══════════════════════════════════════════════════════════════════════╗
-   [  Info  ] ║ └───────────────────┘                                                                      ║
-   [  Info  ] ║ ok   body assertion           valid     U:smt-z3        test.scala:5:7           0.239     ║
-   [  Info  ] ╟┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╢
-   [  Info  ] ║ total: 1    valid: 1    (0 from cache) invalid: 0    unknown: 0    time:   0.239           ║
-   [  Info  ] ╚════════════════════════════════════════════════════════════════════════════════════════════╝
-   [  Info  ] Shutting down executor service.
+    [ Debug  ] Generating VCs for functions: myTail
+    [ Debug  ] Finished generating VCs
+    [  Info  ] Starting verification...
+    [  Info  ] Verified: 0 / 1
+    [ Debug  ]  - Checking cache: 'body assertion: match exhaustiveness' VC for myTail @6:5...
+    [ Debug  ] Cache miss: 'body assertion: match exhaustiveness' VC for myTail @6:5...
+    [ Debug  ]  - Now solving 'body assertion: match exhaustiveness' VC for myTail @6:5...
+    [ Debug  ]
+    [ Debug  ]  - Original VC:
+    [ Debug  ]    nonEmpty[BigInt](xs) ==> {
+    [ Debug  ]      val scrut: List[BigInt] = xs
+    [ Debug  ]      !scrut.isInstanceOf[Cons] ==> false
+    [ Debug  ]    }
+    [ Debug  ]
+    [ Debug  ]  - Simplified VC:
+    [ Debug  ]    !nonEmpty[BigInt](xs) || xs.isInstanceOf[Cons]
+    [ Debug  ]
+    [ Debug  ] Solving with: nativez3
+    [ Debug  ]  - Result for 'body assertion: match exhaustiveness' VC for myTail @6:5:
+    [ Debug  ]  => VALID
+    [  Info  ] Verified: 1 / 1
+    [  Info  ]   ┌───────────────────┐
+    [  Info  ] ╔═╡ stainless summary ╞═════════════════════════════════════════════════════════════════════════════════╗
+    [  Info  ] ║ └───────────────────┘                                                                                 ║
+    [  Info  ] ║ HelloStainless.scala:6:5:     myTail  body assertion: match exhaustiveness     valid   nativez3   0,2 ║
+    [  Info  ] ╟┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╢
+    [  Info  ] ║ total: 1    valid: 1    (0 from cache, 0 trivial) invalid: 0    unknown: 0    time:    0,17           ║
+    [  Info  ] ╚═══════════════════════════════════════════════════════════════════════════════════════════════════════╝
+    [  Info  ] Verification pipeline summary:
+    [  Info  ]   cache, nativez3
+    [  Info  ] Shutting down executor service.
 
 Note: If the warning above says something about falling back on the Princess solver, you might be missing the ``libgomp1`` library,
 which you can install with your favorite package manager. For example, on Debian/Ubuntu, just run ``apt-get install libgomp1``.
-
-.. _sbt-usage:
-
-Usage With Sbt
---------------
-
-Stainless is also avaiable as a sbt plugin, which hooks into the build process to verify
-your code on compilation. This allows for both verifying your code, compiling, and running your
-code in one swift motion.
-
-Moreover, thanks to `Metals <https://scalameta.org/metals/>`_, Stainless diagnostics will
-automatically appear in your editor of choice (we recommend `VS Code <https://code.visualstudio.com>`_),
-while the full log will typically be available in a separate window/pane.
-To this end, please follow the installation instructions for your editor on
-the `Metals website <https://scalameta.org/metals/docs/editors/overview.html>`_.
-
-To ease the process, we provide a template for a Stainless-enabled sbt project
-which one can then import into their editor of choice to get started in a few steps:
-:ref:`gitter8-template`
-
-Alternatively, one can also integrate Stainless into an existing sbt project: :ref:`sbt-project`.
-
-.. _gitter8-template:
-
-Sbt Template Project
-********************
-
-**Install sbt:**
-
-Follow the instructions at http://www.scala-sbt.org/ to install ``sbt`` 1.3.0.
-
-**Create a new project from the template:**
-
-1. In a console, create a new project with the following command:
-
-   .. code-block:: bash
-
-      sbt new epfl-lara/stainless-project.g8
-
-2. Fill in a name for your project, eg. ``My Great Project``.
-
-3. Leave the proposed Stainless version as is, ie, just press ``ENTER``.
-
-4. sbt will now create a project under ``./my-great-project``.
-
-5. Put the source files you want to verify under ``verified/src/main/scala/`` and your regular Scala code under ``core/src/main/scala/``.
-
-6. Launch ``sbt`` and, at its prompt, type the following command:
-
-   .. code-block:: bash
-
-      > core/run
-
-   This will compile, verify, and run your code!
-
-7. To only compile and verify your code, you can use the following command:
-
-   .. code-block:: bash
-
-      > verified/run
 
 
 .. _sbt-project:
@@ -161,25 +92,36 @@ Follow the instructions at http://www.scala-sbt.org/ to install ``sbt`` 1.3.0.
 Usage Within An Existing Project
 ********************************
 
-Stainless can also be used within an existing sbt 1.5.x project.
+Stainless can also be used within an existing SBT 1.7.x project.
 
 1. Start by installing an external solver (see Section ":ref:`smt-solvers`").
 
-2. Add the ``sbt-stainless`` plugin together with the required resolver to your ``project/plugins.sbt``
+2. Download ``sbt-stainless`` from the `GitHub releases <https://github.com/epfl-lara/stainless/releases>`_, and move it to the directory of the project. You should have the following project structure:
 
-.. code-block:: scala
+.. code-block::
 
-   resolvers ++= Seq(
-     Resolver.bintrayRepo("epfl-lara", "princess"),
-     Resolver.bintrayIvyRepo("epfl-lara", "sbt-plugins"),
-     ("uuverifiers" at "http://logicrunch.research.it.uu.se/maven").withAllowInsecureProtocol(true),
-   )
+    MyProject
+    ├── build.sbt
+    ├── project
+    │   └── build.properties
+    ├── sbt-stainless.zip       <--------
+    └── src/
 
-   addSbtPlugin("ch.epfl.lara" % "sbt-stainless" % "<insert-version>")
+3. Unzip ``sbt-stainless.zip``:
 
-Check the `GitHub releases <https://github.com/epfl-lara/stainless/releases>`_ or the `sbt-stainless bintray repository <https://bintray.com/epfl-lara/sbt-plugins/sbt-stainless>`_ for the available versions.
+.. code-block::
 
-3. In your project's build file, enable the ``StainlessPlugin`` on the modules that should be verified by Stainless. Below is an example:
+    MyProject
+    ├── build.sbt
+    ├── project
+    │   ├── build.properties
+    │   └── lib                     <--------
+    │       └── sbt-stainless.jar   <--------
+    ├── sbt-stainless.zip
+    ├── src/
+    └── stainless/                  <--------
+
+4. In your project's build file, enable the ``StainlessPlugin`` on the modules that should be verified by Stainless. Below is an example:
 
 .. code-block:: scala
 
@@ -189,19 +131,15 @@ Check the `GitHub releases <https://github.com/epfl-lara/stainless/releases>`_ o
     .enablePlugins(StainlessPlugin) // <-- Enabling Stainless verification on this module!
     .settings(...)
 
-Note that if you are using ``.scala`` build files you need to use the fully qualified name ``ch.epfl.lara.sbt.stainless.StainlessPlugin``. Also, because stainless accepts a subset of the Scala language, you may need to refactor your build a bit and code to successfully use Stainless on a module.
+Note that if you are using ``.scala`` build files you need to use the fully qualified name ``ch.epfl.lara.sbt.stainless.StainlessPlugin``. Also, because Stainless accepts a subset of the Scala language, you may need to refactor your build a bit and code to successfully use Stainless on a module.
 
-4. After modifying the build, type ``reload`` if inside the sbt interactive shell. From now on, when executing ``compile`` on a module where the ``StainlessPlugin`` is enabled, Stainless will check your Scala code and report errors in the shell (just like any other error that would be reported during compilation).
+5. After modifying the build, type ``reload`` if inside the sbt interactive shell. From now on, when executing ``compile`` on a module where the ``StainlessPlugin`` is enabled, Stainless will check your Scala code and report errors in the shell (just like any other error that would be reported during compilation).
 
-That's all there is to it. However, the ``sbt-stainless`` plugin is a more recent addition to Stainless compared to command-line script. It has seen less testing in the field and currently has the following limitations:
-
-* No incremental compilation support. All sources (included the stainless-library sources) are recompiled at every ``compile`` execution.ub
-
-* The plugin *does not* support Scala 3 (dotty). To track sbt support in dotty you can follow `issue #178 <https://github.com/epfl-lara/stainless/issues/178>`_.
+That's all there is to it. However, the ``sbt-stainless`` plugin is a more recent addition to Stainless compared to command-line script. Furthermore, there incremental compilation is not supported. All sources (included the stainless-library sources) are recompiled at every ``compile`` execution.ub
 
 Also, note that the plugin offers a ``stainlessEnabled`` setting that can help experimenting with Stainless. The ``stainlessEnabled`` setting is set to ``true`` by default, but you can flip the flag to false by typing ``set every stainlessEnabled := false`` while inside the sbt interactive shell.
 
-5. It is possible to specify extra source dependencies to be added to the set of files processed by Stainless via the ``stainlessExtraDeps`` setting. For example, to add both the ``stainless-algebra`` and ``stainless-actors`` packages, along with the latter's dependency on Akka,
+6. It is possible to specify extra source dependencies to be added to the set of files processed by Stainless via the ``stainlessExtraDeps`` setting. For example, to add both the ``stainless-algebra`` and ``stainless-actors`` packages, along with the latter's dependency on Akka,
    one can add the following settings to their build:
 
 .. code-block:: scala
@@ -214,6 +152,40 @@ Also, note that the plugin offers a ``stainlessEnabled`` setting that can help e
    libraryDependencies += "com.typesafe.akka" %% "akka-actor" % "2.5.21"
 
 Note that the dependencies specified in ``stainlessExtraDeps`` must be available as a source JAR from any of the resolvers configured in the build.
+
+.. _running-code:
+
+Running Code with Stainless dependencies
+----------------------------------------
+
+Using sources:
+
+1. Clone the sources from https://github.com/epfl-lara/stainless
+
+2. Create a folder to put compiled Scala objects: ``mkdir -p ~/.scala_objects``
+
+3. Compile your code (here in ``MyFile.scala``, though you can have more than one file) while referring to the Stainless library sources: ``scalac -d ~/.scala_objects $(find /path/to/stainless/frontends/library/stainless/ -name "*.scala") MyFile.scala``
+
+4. Run your code (replace ``MyMainClass`` with the name of your main object): ``scala -cp ~/.scala_objects MyMainClass``
+
+Using jar:
+
+You can package the Stainless library into a jar to avoid the need to compile it every time:
+
+.. code-block:: bash
+
+    $ cd path/to/stainless/
+    $ sbt stainless-library/packageBin
+
+Add the generated Stainless library jar file when invoking the compiler with ``scalac`` and the JVM with ``scala`` or ``java``. For instance:
+
+.. code-block:: bash
+
+    $ mkdir -p ~/.scala_objects
+    $ scalac -d ~/.scala_objects -cp /path/to/stainless/frontends/library/target/scala-2.13/stainless-library_2.13-X.Y.Z-A-BCDEFGHI.jar MyFile1.scala MyFile2.scala # and so on
+    $ scala -cp ~/.scala_objects:/path/to/stainless/frontends/library/target/scala-2.13/stainless-library_2.13-X.Y.Z-A-BCDEFGHI.jar MyMainClass
+
+where ``X.Y.Z`` is the Stainless version and ``A-BCDEFGHI`` is some hash (which can be autocompleted by the terminal).
 
 .. _smt-solvers:
 
@@ -297,9 +269,9 @@ Build from Source on Linux & macOS
 ----------------------------------
 
 To build Stainless, we use ``sbt``. In a typical configuration, ``sbt universal:stage`` in the root of the source tree should work, yet,
-in an attempt to be more reproducible and independent from sbt cache and path, the instructions below assume that the directory called ``stainless`` does not exist, they instruct ``sbt`` to use a relative path for its bootstrap, and do not require adding ``sbt`` to your path.
+in an attempt to be more reproducible and independent from SBT cache and path, the instructions below assume that the directory called ``stainless`` does not exist, they instruct ``sbt`` to use a relative path for its bootstrap, and do not require adding ``sbt`` to your path.
 
-**Install sbt**
+**Install SBT**
 
 Follow the instructions at http://www.scala-sbt.org/ to install ``sbt`` 1.5.6 (or somewhat later version).
 
@@ -312,9 +284,9 @@ Get the sources of Stainless by cloning the official Stainless repository:
   $ git clone https://github.com/epfl-lara/stainless.git
   Cloning into 'stainless'...
 
-**Run sbt**
+**Run SBT**
 
-The following instructions will invoke sbt while using a stainless sub-directory to download files.
+The following instructions will invoke SBT while using a stainless sub-directory to download files.
 
 .. code-block:: bash
 
@@ -334,7 +306,7 @@ You may want to introduce a soft-link from to a file called ``stainless``:
 and, for the Scala2 version of the front end,
 
   $ ln -s frontends/scalac/target/universal/stage/bin/stainless-scalac stainless-scalac-old
-  
+
 Analogous scripts work for various platforms and allow additional control over the execution, such as passing JVM arguments or system properties:
 
 .. code-block:: bash

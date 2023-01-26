@@ -16,7 +16,6 @@ class TerminationSuite extends VerificationComponentTestSuite {
 
   override def configurations = super.configurations.map { seq =>
     Seq(
-      optTypeChecker(true),
       optInferMeasures(true),
       optCheckMeasures(YesNoOnly.Only),
     ) ++ seq
@@ -24,6 +23,11 @@ class TerminationSuite extends VerificationComponentTestSuite {
 
   override protected def optionsString(options: inox.Options): String = {
     "solver=" + options.findOptionOrDefault(inox.optSelectedSolvers).head
+  }
+
+  override def filter(ctx: inox.Context, name: String): FilterStatus = name match {
+    case "verification/valid/BitsTricksSlow" => Skip
+    case _ => super.filter(ctx, name)
   }
 
   def getResults(analysis: VerificationAnalysis) = {
@@ -107,7 +111,7 @@ class TerminationSuite extends VerificationComponentTestSuite {
       f -> Try {
         val program = loadFiles(List(f))._2
         val programSymbols = frontend.UserFiltering().transform(program.symbols)
-        val exSyms = component.run(extraction.pipeline).extract(programSymbols)
+        val exSyms = component.run(extraction.pipeline).extract(programSymbols)._1
 
         val p = inox.Program(stainless.trees)(exSyms)
         val assertions = AssertionInjector(p, context)

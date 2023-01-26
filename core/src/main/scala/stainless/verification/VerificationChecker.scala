@@ -136,12 +136,9 @@ trait VerificationChecker { self =>
           // Note: the class instance is outside of the closure scope to avoid repeated creation instances
           // (so that computation can be preserved across VCs)
           val latticeSimp = LatticesSimplifier(trees, symbols, PurityOptions.assumeChecked, toLatticeAlgo(lat))
-          (e: Expr) =>latticeSimp.simplify(
-            simplifyLets(removeAssertions(e)))
+          (e: Expr) => latticeSimp.simplify(simplifyLets(removeAssertions(e)))
         case Vanilla =>
-          (e: Expr) => simplifyExpr(
-            simplifyLets(removeAssertions(e))
-          )(using PurityOptions.assumeChecked)
+          (e: Expr) => simplifyExpr(simplifyLets(removeAssertions(e)))(using PurityOptions.assumeChecked)
       }
     }
 
@@ -175,23 +172,7 @@ trait VerificationChecker { self =>
         Some(vc -> res)
       }
     }
-    val keep = Set(
-//      (57, 13, "body assertion: Inlined precondition of check"),
-//      (493, 18, "body assertion"),
-//      (803, 16, "postcondition"),
-//      (1081, 12, "body assertion"),
-//      (307, 18, "body assertion"),
-//      (655, 16, "body assertion"),
-//      (803, 16, "postcondition"),
-//      (57, 13, "body assertion: Inlined precondition of check"),
-//      (1062, 12, "body assertion"),
-//      (1077, 12, "body assertion"),
-    )
-//    val filteredVcs = vcs.filter { vc =>
-//      keep.exists { case (line, col, label) => vc.getPos.line == line && vc.getPos.col == col && vc.kind.name.startsWith(label) }
-//    }
-//    val poi = 4713+3
-//    val results = Future.traverse(vcs.drop(poi - 1)) { vc =>
+
     val results = Future.traverse(vcs) { vc =>
       // Note that `successful(e)` is eager and gets immediately evaluated whereas Future(e) is a scheduled task.
       // If parallelism is not explicitly enabled, we fallback to eager evaluation
@@ -201,7 +182,6 @@ trait VerificationChecker { self =>
     }.map(_.flatten)
 
     results.map(initMap ++ _)
-//    results.map(_.toMap)
   }
 
   /** Check whether the model for the ADT invariant specified by the given (invalid) VC is
@@ -251,32 +231,35 @@ trait VerificationChecker { self =>
       evaluator.eval(wrapped, model)
     }
 
-    val newArgs = evaledArgs.map {
-      case Successful(e) => e
-      case RuntimeError(msg) => return failure(s"- ADT inv. argument leads to runtime error: $msg")
-      case EvaluatorError(msg) => return failure(s"- ADT inv. argument leads to evaluator error: $msg")
+    val (newArgs, errs) = evaledArgs.partitionMap {
+      case Successful(e) => Left(e)
+      case RuntimeError(msg) => Right(failure(s"- ADT inv. argument leads to runtime error: $msg"))
+      case EvaluatorError(msg) => Right(failure(s"- ADT inv. argument leads to evaluator error: $msg"))
     }
+    if (errs.nonEmpty) errs.head
+    else {
+      val newAdt = ADT(adt.id, adt.tps, newArgs)
+      val adtVar = Variable(FreshIdentifier("adt"), adt.getType(using symbols), Seq())
+      val newInv = FunctionInvocation(invId, inv.tps, Seq(adtVar))
+      val newModel = inox.Model(program)(model.vars + (adtVar.toVal -> newAdt), model.chooses)
+      val newCondition = exprOps.replace(Map(inv -> newInv), vc.condition)
 
-    val newAdt = ADT(adt.id, adt.tps, newArgs)
-    val adtVar = Variable(FreshIdentifier("adt"), adt.getType(using symbols), Seq())
-    val newInv = FunctionInvocation(invId, inv.tps, Seq(adtVar))
-    val newModel = inox.Model(program)(model.vars + (adtVar.toVal -> newAdt), model.chooses)
-    val newCondition = exprOps.replace(Map(inv -> newInv), vc.condition)
-
-    evaluator.eval(newCondition, newModel) match {
-      case Successful(BooleanLiteral(false)) => success
-      case Successful(_) => failure("- Invalid model.")
-      case RuntimeError(msg) => failure(s"- Model leads to runtime error: $msg")
-      case EvaluatorError(msg) => failure(s"- Model leads to evaluation error: $msg")
+      evaluator.eval(newCondition, newModel) match {
+        case Successful(BooleanLiteral(false)) => success
+        case Successful(_) => failure("- Invalid model.")
+        case RuntimeError(msg) => failure(s"- Model leads to runtime error: $msg")
+        case EvaluatorError(msg) => failure(s"- Model leads to evaluation error: $msg")
+      }
     }
   }
 
   private def removeAssertions(expr: Expr): Expr = {
     exprOps.postMap {
       case Assert(_, _, e) => Some(e)
-      case Annotated(e, _) => Some(e)
-//      case Annotated(e, Seq(DropVCs)) => Some(e)
-//      case Annotated(e, Seq(DropConjunct)) => Some(e)
+      case Annotated(e, flags0) =>
+        val flags = flags0.filter(f => f != DropVCs && f != DropConjunct)
+        if (flags.isEmpty) Some(e)
+        else Some(Annotated(e, flags).copiedFrom(expr))
       case _ => None
     }(expr)
   }
@@ -293,27 +276,18 @@ trait VerificationChecker { self =>
 
   protected def checkVC(vc: VC, origVC: VC, sf: SolverFactory { val program: self.program.type }): VCResult = {
     import SolverResponses._
+
+    val cond = vc.condition
+    if (cond == BooleanLiteral(true)) {
+      return VCResult(VCStatus.Trivial, None, None)
+    }
+
     val s = sf.getNewSolver()
-
-//    def exprSize(e: Expr): Long = {
-//      val Operator(es, _) = e
-//      es.map(exprSize).sum + 1
-//    }
-
     try {
-      val cond = vc.condition
-//      val orig = simplifyLets(removeAssertions(origVC.condition))
-//      val vanilla = simplifyExpr(orig)(using PurityOptions.assumeChecked)
-//      println(s"HERE-IS-SIZES ${Seq(orig, vc.condition, vanilla).map(exprSize).mkString("     ")}")
-
       reporter.synchronized {
         reporter.debug(s" - Now solving '${vc.kind}' VC for ${vc.fid.asString} @${vc.getPos}...")
         debugVC(vc, origVC)
         reporter.debug("Solving with: " + s.name)
-      }
-
-      if (cond == BooleanLiteral(true)) {
-        return VCResult(VCStatus.Valid, Some("(trivial)"), Some(0))
       }
 
       val (time, tryRes) = timers.verification.runAndGetTime {
@@ -344,7 +318,7 @@ trait VerificationChecker { self =>
             VCResult(VCStatus.Valid, s.getResultSolver.map(_.name), Some(time))
 
           case SatWithModel(model) if checkModels && vc.kind.isInstanceOf[VCKind.AdtInvariant] =>
-            val VCKind.AdtInvariant(invId) = vc.kind
+            val VCKind.AdtInvariant(invId) = vc.kind: @unchecked
             val status = checkAdtInvariantModel(vc, invId, model)
             VCResult(status, s.getResultSolver.map(_.name), Some(time))
 
@@ -416,30 +390,18 @@ trait VerificationChecker { self =>
   protected def debugVC(simplifiedVC: VC, origVC: VC)(using inox.DebugSection): Unit = {
     import stainless.utils.StringUtils.indent
 
-    def exprSize(e: Expr): Long = {
-      val Operator(es, _) = e
-      es.map(exprSize).sum + 1
-    }
-
     if (reporter.isDebugEnabled) {
       if (!reporter.isDebugEnabled(using DebugSectionFullVC)) {
         reporter.debug(prettify(simplifiedVC.condition).asString)
       } else {
         reporter.whenDebug(DebugSectionFullVC) { debug =>
-          println(s"")
-          println(s" - Original VC:")
-          val orig = simplifyLets(removeAssertions(origVC.condition))
-          // debug(indent(prettify(origVC.condition).asString, 3))
-          println(indent(prettify(orig).asString, 3))
-          println(s"")
-          println(s" - Simplified VC:")
-          println(indent(prettify(simplifiedVC.condition).asString, 3))
-          println(s"")
-          println(s" - Vanilla Simplified VC:")
-          val simp = simplifyExpr(orig)(using PurityOptions.assumeChecked)
-          println(indent(prettify(simp).asString, 3))
-          println(s"HERE-IS-SIZES ${Seq(orig, simplifiedVC.condition, simp).map(exprSize).mkString("     ")}")
-          println(s"")
+          debug(s"")
+          debug(s" - Original VC:")
+          debug(indent(prettify(origVC.condition).asString, 3))
+          debug(s"")
+          debug(s" - Simplified VC:")
+          debug(indent(prettify(simplifiedVC.condition).asString, 3))
+          debug(s"")
         }
       }
     }

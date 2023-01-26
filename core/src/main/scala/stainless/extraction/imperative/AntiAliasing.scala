@@ -21,19 +21,19 @@ class AntiAliasing(override val s: Trees)(override val t: s.type)(using override
 
   // Function rewriting depends on the effects analysis which relies on all dependencies
   // of the function, so we use a dependency cache here.
-  override protected final val funCache = new ExtractionCache[s.FunDef, FunctionResult]((fd, context) =>
+  override protected final val funCache = new ExtractionCache[s.FunDef, (FunctionResult, FunctionSummary)]((fd, context) =>
     getDependencyKey(fd.id)(using context.symbols)
   )
 
   // Function types are rewritten by the transformer depending on the result of the
   // effects analysis, so we again use a dependency cache here.
-  override protected final val sortCache = new ExtractionCache[s.ADTSort, SortResult]((sort, context) =>
+  override protected final val sortCache = new ExtractionCache[s.ADTSort, (SortResult, SortSummary)]((sort, context) =>
     getDependencyKey(sort.id)(using context.symbols)
   )
 
   // Function types are rewritten by the transformer depending on the result of the
   // effects analysis, so we again use a dependency cache here.
-  override protected final val classCache = new ExtractionCache[s.ClassDef, ClassResult]((cd, context) =>
+  override protected final val classCache = new ExtractionCache[s.ClassDef, (ClassResult, ClassSummary)]((cd, context) =>
     getDependencyKey(cd.id)(using context.symbols)
   )
 
@@ -82,7 +82,11 @@ class AntiAliasing(override val s: Trees)(override val t: s.type)(using override
   override protected type TransformerContext = SymbolsAnalysis
   override protected def getContext(symbols: Symbols) = SymbolsAnalysis()(using symbols)
 
-  override protected def extractFunction(analysis: SymbolsAnalysis, fd: FunDef): Option[FunDef] = {
+  enum FunctionSummary {
+    case Untransformed(fid: Identifier)
+    case Transformed(fid: Identifier)
+  }
+  override protected def extractFunction(analysis: SymbolsAnalysis, fd: FunDef): (Option[FunDef], FunctionSummary) = {
     import analysis.{given, _}
     import symbols._
 
@@ -90,7 +94,7 @@ class AntiAliasing(override val s: Trees)(override val t: s.type)(using override
 
     checkEffects(fd)(analysis) match {
       case CheckResult.Ok => ()
-      case CheckResult.Skip => return None
+      case CheckResult.Skip => return (None, FunctionSummary.Untransformed(fd.id))
       case CheckResult.Error(err) => throw err
     }
 
@@ -557,11 +561,35 @@ class AntiAliasing(override val s: Trees)(override val t: s.type)(using override
               }
 
               val resVd = ValDef.fresh("res", b.getType).copiedFrom(b)
-              LetVar(
-                vd, newExpr,
-                Let(resVd, newBody, Block(copyEffects.toSeq, resVd.toVariable).copiedFrom(l)).copiedFrom(l)
-              ).copiedFrom(l)
 
+              // What we would like is the following:
+              //   var vd = newExpr
+              //   val resVd = newBody
+              //   copyEffects // must happen after newBody and newExpr
+              //   resVd
+              // However, newBody may contain an `Ensuring` clause which would get "lost" in the newBody:
+              //   var vd = newExpr
+              //   val resVd = {
+              //      newBody'
+              //   }.ensuring(...) // oh no :(
+              //   copyEffects
+              //   resVd
+              // What we would like is something as follows:
+              //   var vd = newExpr
+              //   {
+              //      newBodyBlocks // e.g. assignments etc.
+              //      val resVd = newBodyLastExpr
+              //      copyEffect
+              //      resVd
+              //    }.ensuring(...)
+              // To achieve this, we "drill" a hole in newBody using the normalizer object,
+              // insert copyEffect and plug it with resVd. This should get us something like the above.
+              val (newBodyCtx, newBodyLastExpr) = normalizer.drill(newBody)
+              val (copyEffectCtx, copyEffectLastExpr) = normalizer.normalizeBlock(Block(copyEffects.toSeq, resVd.toVariable).copiedFrom(l))(using normalizer.BlockNorm.Standard)
+              assert(copyEffectLastExpr == resVd.toVariable) // To be sure we are on the good track.
+              val combined =
+                newBodyCtx(let(resVd, newBodyLastExpr, copyEffectCtx(resVd.toVariable)))
+              LetVar(vd, newExpr, combined).copiedFrom(l)
             } else {
               throw MalformedStainlessCode(l, "Unsupported `val` definition in AntiAliasing (couldn't compute targets and there are mutable variables shared between the binding and the body)")
             }
@@ -609,7 +637,7 @@ class AntiAliasing(override val s: Trees)(override val t: s.type)(using override
             Ensuring(transform(body, env), Lambda(params, transform(post, env)).copiedFrom(l)).copiedFrom(e)
 
           case l @ Lambda(params, body) =>
-            val ft @ FunctionType(_, _) = l.getType
+            val ft @ FunctionType(_, _) = l.getType: @unchecked
             val ownEffects = functionTypeEffects(ft)
             val aliasedParams: Seq[ValDef] = params.zipWithIndex.flatMap {
               case (vd, i) if ownEffects.contains(i) => Some(vd)
@@ -674,7 +702,7 @@ class AntiAliasing(override val s: Trees)(override val t: s.type)(using override
           case app @ Application(callee, args) =>
             checkAliasing(app, args, env)
 
-            val ft @ FunctionType(from, to) = callee.getType
+            val ft @ FunctionType(from, to) = callee.getType: @unchecked
             val ftEffects = functionTypeEffects(ft)
             if (ftEffects.nonEmpty) {
               val nfi = Application(
@@ -736,7 +764,7 @@ class AntiAliasing(override val s: Trees)(override val t: s.type)(using override
       }
 
       val transformer = new TransformerImpl(self.s, self.t)
-      val normBody = normalizer.normalize(body)
+      val normBody = normalizer.normalize(body)(using normalizer.BlockNorm.Standard)
       transformer.transform(normBody, env)
     }
 
@@ -754,7 +782,7 @@ class AntiAliasing(override val s: Trees)(override val t: s.type)(using override
     def updatedTarget(target: Target, newValue: Expr): Expr = {
       def rec(receiver: Expr, path: Seq[Accessor]): Expr = path match {
         case ADTFieldAccessor(id) :: fs =>
-          val adt @ ADTType(_, tps) = receiver.getType
+          val adt @ ADTType(_, tps) = receiver.getType: @unchecked
           val tcons = adt.getSort.constructors.find(_.fields.exists(_.id == id)).get
           val r = rec(Annotated(ADTSelector(receiver, id).copiedFrom(newValue), Seq(DropVCs)).copiedFrom(newValue), fs)
 
@@ -785,7 +813,7 @@ class AntiAliasing(override val s: Trees)(override val t: s.type)(using override
           }).copiedFrom(newValue)
 
         case TupleFieldAccessor(index) :: fs =>
-          val tt @ TupleType(_) = receiver.getType
+          val tt @ TupleType(_) = receiver.getType: @unchecked
           val r = rec(Annotated(TupleSelect(receiver, index).copiedFrom(newValue), Seq(DropVCs)).copiedFrom(newValue), fs)
 
           Tuple((1 to tt.dimension).map { i =>
@@ -953,9 +981,42 @@ class AntiAliasing(override val s: Trees)(override val t: s.type)(using override
     //       targetBound.value = 1234
     //
     object normalizer {
-      def normalize(e: Expr): Expr = {
+      // Dictates the normalization to be done on blocks.
+      // Standard is keeping the block while IntoLet sequence the statements into lets.
+      // Let-transformation of blocks is only used for normalizing the predicate of `require` and `decreases`.
+      // These must be chained within lets and not blocks.
+      enum BlockNorm {
+        case Standard
+        case IntoLet
+      }
+
+      def normalize(e: Expr)(using BlockNorm): Expr = {
         val (ctx, norm) = doNormalize(e)
         ctx(norm)
+      }
+
+      def drill(toDrill: Expr): (Expr => Expr, Expr) = {
+        def helper(subpartToDrill: Expr)(recons: Expr => Expr) = {
+          val (subCtx, subExpr) = drill(subpartToDrill)
+          val ctx = (e: Expr) => recons(subCtx(e)).copiedFrom(toDrill)
+          (ctx, subExpr)
+        }
+
+        toDrill match {
+          case Block(stmts, last) => helper(last)(Block(stmts, _))
+          case Let(vd, df, body) => helper(body)(Let(vd, df, _))
+          case LetVar(vd, df, body) => helper(body)(LetVar(vd, df, _))
+          case LetRec(fds, body) => helper(body)(LetRec(fds, _))
+          case Lambda(vds, body) => helper(body)(Lambda(vds, _))
+          case Choose(vd, body) => helper(body)(Choose(vd, _))
+          case Forall(vds, body) => helper(body)(Forall(vds, _))
+          case Ensuring(body, l) => helper(body)(Ensuring(_, l))
+          case Assert(pred, err, body) => helper(body)(Assert(pred, err, _))
+          case Assume(pred, body) => helper(body)(Assume(pred, _))
+          case Decreases(pred, body) => helper(body)(Decreases(pred, _))
+          case Require(pred, body) => helper(body)(Require(pred, _))
+          case _ => (identity, toDrill)
+        }
       }
 
       // The actual work, we perform normalization using the unreasonably effective "hole technique".
@@ -971,7 +1032,7 @@ class AntiAliasing(override val s: Trees)(override val t: s.type)(using override
       //   -For [[{stmt1; stmt2; ...; last}|], if [|stmti|] ~> Ci, stmti' and [|last|] ~> Cl, last'
       //    then [[{stmt1; stmt2; ...; last}|] ~> {C1[stmt1']; C2[stmt2']; ..., []}, last'
       //
-      def doNormalize(e: Expr): (Expr => Expr, Expr) = e match {
+      def doNormalize(e: Expr)(using BlockNorm): (Expr => Expr, Expr) = e match {
         case cs @ ClassSelector(_, _) if selectionNeedsNorm(cs) =>
           normalizeForTarget(cs)
 
@@ -1034,7 +1095,7 @@ class AntiAliasing(override val s: Trees)(override val t: s.type)(using override
           normalizeCall(call)
 
         case ite @ IfExpr(cond, thn, els) =>
-          val (ctxCond, normCond) = doNormalize(cond)
+          val (ctxCond, normCond) = normalizeForTarget(cond)
           // We may not hoist bindings out of the branches.
           val normThn = normalize(thn)
           val normEls = normalize(els)
@@ -1120,11 +1181,11 @@ class AntiAliasing(override val s: Trees)(override val t: s.type)(using override
           (ctxPred, Assume(normPred, normalize(body)).copiedFrom(asm))
 
         case dec @ Decreases(pred, body) =>
-          val (ctxPred, normPred) = doNormalize(pred)
+          val (ctxPred, normPred) = doNormalize(pred)(using BlockNorm.IntoLet)
           (ctxPred, Decreases(normPred, normalize(body)).copiedFrom(dec))
 
         case req @ Require(pred, body) =>
-          val (ctxPred, normPred) = doNormalize(pred)
+          val (ctxPred, normPred) = doNormalize(pred)(using BlockNorm.IntoLet)
           (ctxPred, Require(normPred, normalize(body)).copiedFrom(req))
 
         case ens @ Ensuring(body, l @ Lambda(vds, lamBody)) =>
@@ -1142,7 +1203,7 @@ class AntiAliasing(override val s: Trees)(override val t: s.type)(using override
 
         case _: (And | Or | Implies | Not) =>
           // Similar to if-then-else, we may not hoist expression out of these expressions (in particular && || and ==> are short-circuiting)
-          val Operator(args, recons) = e
+          val Operator(args, recons) = e: @unchecked
           (identity, recons(args.map(normalize)).copiedFrom(e))
 
         case Operator(args, recons) =>
@@ -1151,7 +1212,7 @@ class AntiAliasing(override val s: Trees)(override val t: s.type)(using override
       }
 
       // For indices and keys
-      def normalizeSelector(sel: Expr): (Expr => Expr, Expr) = {
+      def normalizeSelector(sel: Expr)(using BlockNorm): (Expr => Expr, Expr) = {
         assert(!isMutableType(sel.getType))
         if (!isReferentiallyTransparent(sel)) {
           val valIx = Variable(FreshIdentifier("ix"), sel.getType, Seq.empty).copiedFrom(sel)
@@ -1163,7 +1224,7 @@ class AntiAliasing(override val s: Trees)(override val t: s.type)(using override
         }
       }
 
-      def normalizeForTarget(targetExpr: Expr): (Expr => Expr, Expr) = targetExpr match {
+      def normalizeForTarget(targetExpr: Expr)(using BlockNorm): (Expr => Expr, Expr) = targetExpr match {
         case v @ Variable(_, _, flags) =>
           if (flags.contains(IsVar)) {
             val newVal = v.copy(id = FreshIdentifier(s"${v.id.name}Cpy"), flags = flags.filter(_ != IsVar)).copiedFrom(v)
@@ -1206,7 +1267,7 @@ class AntiAliasing(override val s: Trees)(override val t: s.type)(using override
           (ctx, targetVal)
       }
 
-      def normalizeArgs(args: Seq[Expr]): (Expr => Expr, Seq[Expr]) = {
+      def normalizeArgs(args: Seq[Expr])(using BlockNorm): (Expr => Expr, Seq[Expr]) = {
         def occurInAssignment(vs: Set[Variable], expr: Expr): Boolean = expr match {
           case Assignment(v, e) => vs.contains(v) || occurInAssignment(vs, e)
           case FieldAssignment(recv, _, e) => (exprOps.variablesOf(recv) & vs).nonEmpty || occurInAssignment(vs, e)
@@ -1253,19 +1314,28 @@ class AntiAliasing(override val s: Trees)(override val t: s.type)(using override
         else Let(vd, value, body).copiedFrom(value)
       }
 
-      def normalizeBlock(block: Block): (Expr => Expr, Expr) = {
+      def normalizeBlock(block: Block)(using bn: BlockNorm): (Expr => Expr, Expr) = {
         val normExprs: Seq[(Expr => Expr, Expr)] = (block.exprs :+ block.last).map(doNormalize)
-        assert(normExprs.size >= 2)
 
         val (ctxLast, normLast) = normExprs.last
         val ctxBlock = (e: Expr) => {
-          val init = normExprs.init.map((ctx, e) => ctx(e))
-          Block(init, ctxLast(e)).copiedFrom(block)
+          if (normExprs.size == 1) ctxLast(e).copiedFrom(block) // Note: normExprs == Seq((ctxLast, normLast))
+          else bn match {
+            case BlockNorm.Standard =>
+              val init = normExprs.init.map((ctx, e) => ctx(e))
+              Block(init, ctxLast(e)).copiedFrom(block)
+            case BlockNorm.IntoLet =>
+              normExprs.init.foldRight(ctxLast(e)) {
+                case ((ctx, e), acc) =>
+                  val vd = ValDef.fresh("tmp", e.getType).copiedFrom(e)
+                  let(vd, ctx(e), acc)
+              }.copiedFrom(block)
+          }
         }
         (ctxBlock, normLast)
       }
 
-      def normalizeLet(lt: Let | LetVar): (Expr => Expr, Expr) = {
+      def normalizeLet(lt: Let | LetVar)(using BlockNorm): (Expr => Expr, Expr) = {
         val (vd, value, body) = unlet(lt)
         val (ctxValue, normValue) = doNormalize(value)
         val (ctxBody, normBody) = doNormalize(body)
@@ -1273,10 +1343,10 @@ class AntiAliasing(override val s: Trees)(override val t: s.type)(using override
         (ctxLet, normBody)
       }
 
-      def normalizeCall(call: Application | FunctionInvocation | ApplyLetRec): (Expr => Expr, Expr) = {
+      def normalizeCall(call: Application | FunctionInvocation | ApplyLetRec)(using BlockNorm): (Expr => Expr, Expr) = {
         val (ft, args, ctxCallee: (Expr => Expr), recons: (Seq[Expr] => Expr)) = call match {
           case app @ Application(callee, args) =>
-            val ft @ FunctionType(_, _) = callee.getType
+            val ft @ FunctionType(_, _) = callee.getType: @unchecked
             val (ctxCallee, normCallee) = doNormalize(callee)
             val recons: Seq[Expr] => Expr = Application(normCallee, _).copiedFrom(app)
             (ft, args, ctxCallee, recons)
@@ -1297,7 +1367,7 @@ class AntiAliasing(override val s: Trees)(override val t: s.type)(using override
       // as the set of targets for immutable types is empty.
       def selectionNeedsNorm(e: ClassSelector | TupleSelect | ADTSelector): Boolean = e match {
         case ClassSelector(recv, sel) =>
-          val ct @ ClassType(_, _) = recv.getType
+          val ct @ ClassType(_, _) = recv.getType: @unchecked
           isMutableType(e.getType) || ct.getField(sel).get.flags.contains(IsVar)
         case TupleSelect(_, _) =>
           isMutableType(e.getType)
@@ -1306,18 +1376,35 @@ class AntiAliasing(override val s: Trees)(override val t: s.type)(using override
       }
     }
 
-
-    Some(transformer.transform(updateFunction(Outer(fd), Environment.empty).toFun))
+    val result = transformer.transform(updateFunction(Outer(fd), Environment.empty).toFun)
+    val unchanged = result.id == fd.id && result.tparams == fd.tparams && result.params == fd.params &&
+      result.returnType == fd.returnType && result.flags == fd.flags && result.fullBody == fd.fullBody
+    val summary = if (unchanged) FunctionSummary.Untransformed(fd.id) else FunctionSummary.Transformed(fd.id)
+    (Some(result), summary)
   }
 
-  override protected def extractSort(analysis: SymbolsAnalysis, sort: ADTSort): ADTSort =
-    analysis.transformer.transform(sort)
+  override protected type SortSummary = Unit
+  override protected def extractSort(analysis: SymbolsAnalysis, sort: ADTSort): (ADTSort, Unit) =
+    (analysis.transformer.transform(sort), ())
 
-  override protected def extractClass(analysis: SymbolsAnalysis, cd: ClassDef): ClassDef =
-    analysis.transformer.transform(cd)
+  override protected type ClassSummary = Unit
+  override protected def extractClass(analysis: SymbolsAnalysis, cd: ClassDef): (ClassDef, Unit) =
+    (analysis.transformer.transform(cd), ())
+
+  override protected def combineSummaries(allSummaries: AllSummaries): ExtractionSummary = {
+    val affectedFns = allSummaries.fnsSummary.collect { case FunctionSummary.Transformed(fid) => fid }
+    ExtractionSummary.Leaf(AntiAliasing)(AntiAliasing.SummaryData(affectedFns.toSet))
+  }
 }
 
-object AntiAliasing {
+object AntiAliasing extends ExtractionPipelineCreator {
+  case class SummaryData(affectedFns: Set[Identifier] = Set.empty) {
+    def ++(other: SummaryData): SummaryData = SummaryData(affectedFns ++ other.affectedFns)
+    def hasRun: Boolean = affectedFns.nonEmpty
+  }
+
+  override val name: String = "AntiAliasing"
+
   def apply(trees: Trees)(using inox.Context): ExtractionPipeline {
     val s: trees.type
     val t: trees.type

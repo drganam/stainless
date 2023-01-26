@@ -102,9 +102,9 @@ private class TreeEncoder[Prog <: Program](val sourceProgram: Prog)
           t.BooleanLiteral(true).copiedFrom(e)
         ).copiedFrom(e)
 
-      case s.Error(tpe, desc) =>
+      case s.Error(tpe, _) =>
         t.Choose(
-          t.ValDef(FreshIdentifier("error: " + desc, true), transform(tpe)).copiedFrom(e),
+          t.ValDef(FreshIdentifier("err", true), transform(tpe)).copiedFrom(e),
           t.BooleanLiteral(true).copiedFrom(e)
         ).copiedFrom(e)
 
@@ -171,7 +171,7 @@ private class TreeEncoder[Prog <: Program](val sourceProgram: Prog)
 
       case s.ArrayUpdated(array, index, value) =>
         val na = transform(array)
-        val t.ADTType(_, tps) = transform(array.getType)
+        val t.ADTType(_, tps) = transform(array.getType): @unchecked
         t.ADT(arrayCons.id, tps, Seq(
           t.MapUpdated(t.ADTSelector(na, arr).copiedFrom(e), transform(index), transform(value)).copiedFrom(e),
           t.ADTSelector(na, size).copiedFrom(e)
@@ -181,7 +181,7 @@ private class TreeEncoder[Prog <: Program](val sourceProgram: Prog)
         t.ADTSelector(transform(array), size).copiedFrom(e)
 
       case s.Application(caller, args) =>
-        val s.FunctionType(from, to) = caller.getType
+        val s.FunctionType(from, to) = caller.getType: @unchecked
         t.Application(transform(caller).copiedFrom(e), args map transform).copiedFrom(e)
 
       case s.SizedADT(sort, tps, args, size) => transform(s.ADT(sort, tps, args))
