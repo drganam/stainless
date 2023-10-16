@@ -17,7 +17,7 @@ trait FrontendFactory {
 
   /** Paths to the library files used by this frontend. */
   final lazy val libraryFiles: Seq[String] = libraryPaths
-    .filterNot(libPath => libPath.isBlank || libPath.startsWith("#"))
+    .filterNot(libPath => libPath.length == 0 || libPath.startsWith("#"))
     .map { libPath =>
       // There are two run modes: either the library is not packaged in a jar, and therefore
       // directly available as is from the disk, or it is embedded in stainless' jar file, in
