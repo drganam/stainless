@@ -113,7 +113,9 @@ class VerificationRun private(override val component: VerificationComponent.type
       if (!functions.isEmpty) {
         reportVCProgress(s"Finished generating VCs")
       }
+      import solvers._
       val opaqueEncoder = inox.transformers.ProgramEncoder(vcGenEncoder.targetProgram)(OpaqueChooseInjector(vcGenEncoder.targetProgram))
+      println(InoxEncoder(opaqueEncoder.targetProgram, context).targetProgram)
       val res: Future[Map[VC[p.trees.type], VCResult[p.Model]]] =
         if (context.options.findOptionOrDefault(optAdmitVCs)) {
           Future(vcs.map(vc => vc -> VCResult(VCStatus.Admitted, None, None)).toMap)
