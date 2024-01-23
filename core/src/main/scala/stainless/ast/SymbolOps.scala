@@ -167,6 +167,8 @@ trait SymbolOps extends inox.ast.SymbolOps with TypeOps { self =>
         val scrutV = scrutVd.toVariable
         val condsAndRhs = for (cse <- cases) yield {
           val map = mapForPattern(scrutV, cse.pattern)
+          println("map")
+          println(map)
           val patCond = conditionForPattern[Path](scrutV, cse.pattern, includeBinders = false)
           val realCond = cse.optGuard match {
             case Some(g) => patCond withCond replaceFromSymbols(map, g)
@@ -176,20 +178,46 @@ trait SymbolOps extends inox.ast.SymbolOps with TypeOps { self =>
           (realCond.toClause.copiedFrom(cse), newRhs, cse)
         }
 
-        val (branches, elze) = if (assumeExhaustive) {
-          val (cases :+ ((_, rhs, _))) = condsAndRhs: @unchecked
-          (cases, rhs)
+        // TODO return dummy value of given type
+        // does not affect termination
+        // insert choose ?
+        val t: Expr = BooleanLiteral(true)
+
+        val (branches, elze) = if (false) {
+          val cases = condsAndRhs: @unchecked
+          (cases, t)
         } else {
           (condsAndRhs, Error(m.getType, "match exhaustiveness").copiedFrom(m))
         }
+        println("condsAndRhs")
+        println(condsAndRhs)
 
-        val bigIte = branches.foldRight(elze)((p1, ex) => {
+        println("branches")
+        println(branches)
+
+        println("elze")
+        println(elze)
+
+        val bigIte1 = branches.foldRight(elze)((p1, ex) => {
           if(p1._1 == BooleanLiteral(true)) {
             p1._2
           } else {
             IfExpr(p1._1, p1._2, ex).copiedFrom(p1._3)
           }
         })
+
+
+        val bigIte = branches.foldRight(t)((p1, ex) => {
+          if(p1._1 == BooleanLiteral(true)) {
+            p1._2
+          } else {
+            IfExpr(p1._1, p1._2, ex).copiedFrom(p1._3)
+          }
+        })
+
+        println("bigIte")
+
+        println(bigIte)
 
         Some(Let(scrutVd, scrut, bigIte).copiedFrom(m))
 
