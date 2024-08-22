@@ -234,7 +234,7 @@ class MeasureInference(override val s: Trees, override val t: Trees)(using overr
       sortCache.cached(sort, context)(extractSort(context, sort))
     }.toSeq.unzip
 
-    (t.NoSymbols.withSorts(sorts).withFunctions(functions ++ sizeFunctions), AllSummaries(fnsSummaries, sortSummaries))
+    (t.NoSymbols.withSorts(sorts).withFunctions(functions), AllSummaries(fnsSummaries, sortSummaries))
   }
 }
 
