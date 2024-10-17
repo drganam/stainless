@@ -109,7 +109,8 @@ private class TreeEncoder[Prog <: Program](val sourceProgram: Prog)
         ).copiedFrom(e)
 
       case s.Require(pred, body) =>
-        transform(body)
+        t.Assume(transform(pred), transform(body)).copiedFrom(e)
+        //transform(body)
 
       case s.Ensuring(s.Require(pred, body), s.Lambda(Seq(res), post)) =>
         val vd = transform(res)

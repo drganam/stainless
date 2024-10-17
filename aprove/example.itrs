@@ -1,0 +1,13 @@
+(VAR t scrut$p fresh targetBound fresh1 fresh2 ret q)
+(RULES
+eval(t) -> eval1(t, t)
+eval1(t, True$0()) -> eval6(t, True$0(), true)
+eval1(t, Not$0(scrut$p)) -> eval2(t, Not$0(scrut$p), scrut$p, eval(scrut$p))
+eval2(t, Not$0(scrut$p), scrut$p, ret_eval(fresh)) -> eval3(t, Not$0(scrut$p), fresh)
+eval3(t, Not$0(scrut$p), targetBound) -> eval4(t, Not$0(scrut$p), targetBound, eval(t)) :|: targetBound
+eval3(t, Not$0(scrut$p), targetBound) -> eval5(t, Not$0(scrut$p), targetBound, eval(t)) :|: !targetBound
+eval4(t, Not$0(scrut$p), targetBound, ret_eval(fresh1)) -> eval6(t, Not$0(scrut$p), fresh1) :|: targetBound
+eval5(t, Not$0(scrut$p), targetBound, ret_eval(fresh2)) -> eval6(t, Not$0(scrut$p), fresh2) :|: !targetBound
+eval6(t, t, ret) -> ret_eval(ret)
+ret_eval(q) -> q
+)
